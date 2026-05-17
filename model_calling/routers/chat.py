@@ -3,9 +3,9 @@ import json
 import traceback
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
-from schemas import PersonalityProfile, SpeechProfile, UserStyle
-from services import process_stt, extract_user_style, process_llm, process_tts, clone_user_voice
-from utils import load_user_persona
+from model_calling.schemas import PersonalityProfile, SpeechProfile, UserStyle
+from model_calling.services import process_stt, extract_user_style, process_llm, process_tts, clone_user_voice
+from model_calling.utils import load_user_persona
 
 router = APIRouter()
 

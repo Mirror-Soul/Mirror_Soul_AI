@@ -1,0 +1,63 @@
+from fastapi import APIRouter
+
+from model_training.schemas import (
+    DeleteRagDataResponse,
+    SearchMemoryRequest,
+    SearchMemoryResponse,
+    TrainingSampleRequest,
+    TrainingSampleResponse,
+)
+from model_training.services import (
+    add_training_sample_to_rag,
+    delete_user_rag_data,
+    search_user_memories,
+)
+
+router = APIRouter(prefix="/api/v1/training", tags=["model_training"])
+
+
+@router.post("/samples", response_model=TrainingSampleResponse)
+def add_training_sample(request: TrainingSampleRequest):
+    result = add_training_sample_to_rag(
+        user_id=request.userId,
+        ai_profile_id=request.aiProfileId,
+        question_id=request.questionId,
+        question_category=request.questionCategory,
+        question_text=request.questionText,
+        transcript=request.transcript,
+        mbti=request.mbti,
+        description=request.description,
+        audio_url=request.audioUrl,
+    )
+
+    return TrainingSampleResponse(
+        success=True,
+        documentId=result["documentId"],
+        sampleId=result["sampleId"],
+        status=result["status"],
+    )
+
+
+@router.post("/search", response_model=SearchMemoryResponse)
+def search_training_memories(request: SearchMemoryRequest):
+    memories = search_user_memories(
+        user_id=request.userId,
+        query=request.query,
+        top_k=request.topK,
+    )
+
+    return SearchMemoryResponse(
+        success=True,
+        memories=memories,
+    )
+
+
+@router.delete("/users/{user_id}/rag-data", response_model=DeleteRagDataResponse)
+def delete_training_rag_data(user_id: str):
+    result = delete_user_rag_data(user_id)
+
+    return DeleteRagDataResponse(
+        success=result["success"],
+        userId=result["userId"],
+        deleted=result["deleted"],
+    )

@@ -4,7 +4,7 @@ import json
 import httpx
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from schemas import PersonalityProfile, SpeechProfile
+from model_calling.schemas import PersonalityProfile, SpeechProfile
 
 # 환경 변수 로드 및 API 클라이언트 초기화
 load_dotenv()
