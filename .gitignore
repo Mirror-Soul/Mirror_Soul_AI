@@ -1,0 +1,41 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# VS Code personal settings
+.vscode/
+
+# Local data / user data
+data/*
+!data/.gitkeep
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+
+# RAG / vector DB local files
+rag_store/*
+!rag_store/.gitkeep
+
+# Audio / video files
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mov
+*.webm
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
