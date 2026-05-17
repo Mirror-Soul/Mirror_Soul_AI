@@ -19,7 +19,7 @@ class ChatRequest(BaseModel):
 async def api_extract_style(audio_file: UploadFile = File(...)):
     try:
         audio_bytes = await audio_file.read()
-        stt_text = await process_stt(audio_bytes)
+        stt_text = await process_stt(audio_bytes, audio_file.filename or "audio.m4a")
         style_data = await extract_user_style(stt_text)
         return UserStyle(**style_data)
         
@@ -81,7 +81,7 @@ async def api_register(
 
         voice_id = await clone_user_voice(user_id, audio_bytes)
 
-        stt_text = await process_stt(audio_bytes)
+        stt_text = await process_stt(audio_bytes, audio_file.filename or "audio.m4a")
         style_data = await extract_user_style(stt_text)
         user_style = UserStyle(**style_data)
 

@@ -1,6 +1,9 @@
 import os
 import io
 import json
+import subprocess
+from pathlib import Path
+
 import httpx
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -10,9 +13,9 @@ from model_calling.schemas import PersonalityProfile, SpeechProfile
 load_dotenv()
 client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-async def process_stt(audio_bytes: bytes) -> str:
+async def process_stt(audio_bytes: bytes, filename: str = "audio.m4a") -> str:
     audio_file = io.BytesIO(audio_bytes)
-    audio_file.name = "audio.wav"
+    audio_file.name = filename
     
     response = await client.audio.transcriptions.create(
         model="whisper-1",
@@ -137,29 +140,36 @@ def calculate_voice_settings(personality: PersonalityProfile):
     return round(stability, 2), round(style, 2)
 
 # process_tts 매개변수에 personality 추가
-async def process_tts(ai_text: str, user_id: str, speech: SpeechProfile, personality: PersonalityProfile) -> str:
+async def process_tts(
+    ai_text: str,
+    user_id: str,
+    speech: SpeechProfile,
+    personality: PersonalityProfile,
+) -> str:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
-    
-    # DB(speech)에서 voice_id를 가져오되, 없으면 .env 참조 (다중 사용자 지원)
-    voice_id = getattr(speech, 'voice_id', None) or os.environ.get("ELEVENLABS_VOICE_ID")
-    
+
+    # DB(speech)에서 voice_id를 가져오되, 없으면 .env 참조
+    voice_id = getattr(speech, "voice_id", None) or os.environ.get("ELEVENLABS_VOICE_ID")
+
     if not api_key or not voice_id:
         raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
-        
-    # 출력 파일 확장자를 .mp3로 고정 (Android 및 iOS 모바일 호환성)
-    output_audio_path = f"assets/{user_id}/result_audio.mp3" 
-    
-    os.makedirs(os.path.dirname(output_audio_path), exist_ok=True)
-    
+
+    # FastAPI main.py에서 /assets로 mount한 실제 폴더와 맞춘다.
+    user_assets_dir = Path("model_calling") / "assets" / user_id
+    user_assets_dir.mkdir(parents=True, exist_ok=True)
+
+    # ElevenLabs API는 안정적으로 mp3를 반환받고, 최종 산출물만 m4a로 변환한다.
+    temp_mp3_path = user_assets_dir / "result_audio_source.mp3"
+    output_m4a_path = user_assets_dir / "result_audio.m4a"
+
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
     headers = {
         "Accept": "audio/mpeg",
         "Content-Type": "application/json",
-        "xi-api-key": api_key
+        "xi-api-key": api_key,
     }
 
-    # 성격 파라미터를 기반으로 voice_settings 동적 계산
     stability_val, style_val = calculate_voice_settings(personality)
 
     data = {
@@ -167,24 +177,54 @@ async def process_tts(ai_text: str, user_id: str, speech: SpeechProfile, persona
         "model_id": "eleven_multilingual_v2",
         "voice_settings": {
             "stability": stability_val,
-            "similarity_boost": 0.9,  # 클론된 목소리와의 유사성 강화
+            "similarity_boost": 0.9,
             "style": style_val,
-            "use_speaker_boost": True
-        }
+            "use_speaker_boost": True,
+        },
     }
 
     async with httpx.AsyncClient(timeout=60.0) as http_client:
         response = await http_client.post(url, json=data, headers=headers)
-        
-        # 상태 코드가 정상이 아닐 경우 상세 에러 텍스트 출력
+
         if response.status_code != 200:
             error_detail = response.text
             raise Exception(f"ElevenLabs API 오류 [{response.status_code}]: {error_detail}")
 
-        with open(output_audio_path, "wb") as file:
-            file.write(response.content)
+        temp_mp3_path.write_bytes(response.content)
 
-    return f"/{output_audio_path}"
+    # mp3 → m4a 변환
+    # ffmpeg가 로컬/서버 환경에 설치되어 있어야 한다.
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(temp_mp3_path),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                str(output_m4a_path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise Exception(
+            "ffmpeg가 설치되어 있지 않아 m4a 변환에 실패했습니다. "
+            "서버 환경에 ffmpeg를 설치해 주세요."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise Exception(
+            f"m4a 변환 중 ffmpeg 오류가 발생했습니다: {exc.stderr.decode(errors='ignore')}"
+        ) from exc
+    finally:
+        if temp_mp3_path.exists():
+            temp_mp3_path.unlink()
+
+    return f"/assets/{user_id}/result_audio.m4a"
 
 
 async def clone_user_voice(user_id: str, audio_bytes: bytes) -> str:
