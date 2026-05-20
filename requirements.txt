@@ -4,6 +4,5 @@ python-multipart
 pydantic
 openai
 python-dotenv
-faster-whisper
-TTS
+httpx
 chromadb
