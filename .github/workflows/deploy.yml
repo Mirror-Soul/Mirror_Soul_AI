@@ -1,0 +1,23 @@
+name: Deploy AI Server
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to AI EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AI_EC2_HOST }}
+          username: ${{ secrets.AI_EC2_USER }}
+          key: ${{ secrets.AI_EC2_KEY }}
+          script: |
+            cd /home/ec2-user/Mirror_Soul_AI
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart mirrorsoul-ai
