@@ -6,3 +6,5 @@ openai
 python-dotenv
 httpx
 chromadb
+websockets
+PyMySQL
