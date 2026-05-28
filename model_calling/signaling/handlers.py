@@ -9,12 +9,25 @@ from model_calling.repository.clone_repository import (
     find_clone_by_user_uuid,
 )
 
+from model_calling.webrtc.peer import (
+    apply_answer,
+    create_answer_from_offer,
+    create_offer_for_renegotiation,
+)
 
 async def handle_signaling_message(ws: Any, message: dict[str, Any]) -> None:
     message_type = message.get("type")
 
     if message_type == "CALL_INVITE":
         await handle_call_invite(ws, message)
+        return
+    
+    if message_type == "OFFER":
+        await handle_offer(ws, message)
+        return
+
+    if message_type == "ANSWER":
+        await handle_answer(message)
         return
 
     print(f"[SIGNALING] unsupported message type: {message_type}")
@@ -104,6 +117,78 @@ async def send_call_reject(
     await send_json(ws, reject_message)
     print(f"[SIGNALING] CALL_REJECT sent: reason={reason}")
 
+async def handle_offer(ws: Any, message: dict[str, Any]) -> None:
+    data = message.get("data") or {}
+
+    call_id = data.get("callId")
+    offer_sdp = data.get("sdp")
+
+    if not call_id or not offer_sdp:
+        print("[SIGNALING] invalid OFFER message")
+        return
+
+    answer_sdp = await create_answer_from_offer(
+        call_id=call_id,
+        room_id=message.get("roomId"),
+        ai_signal_id=message.get("to"),
+        caller_signal_id=message.get("from"),
+        offer_sdp=offer_sdp,
+    )
+
+    answer_message = {
+        "type": "ANSWER",
+        "roomId": message.get("roomId"),
+        "from": message.get("to"),
+        "to": message.get("from"),
+        "data": {
+            "callId": call_id,
+            "sdp": answer_sdp,
+        },
+    }
+
+    await send_json(ws, answer_message)
+    print(f"[SIGNALING] ANSWER sent: callId={call_id}", flush=True)
+
+
+async def handle_answer(message: dict[str, Any]) -> None:
+    data = message.get("data") or {}
+
+    call_id = data.get("callId")
+    answer_sdp = data.get("sdp")
+
+    if not call_id or not answer_sdp:
+        print("[SIGNALING] invalid ANSWER message")
+        return
+
+    await apply_answer(call_id, answer_sdp)
+    print(f"[SIGNALING] ANSWER applied: callId={call_id}", flush=True)
+
+
+async def send_offer(ws: Any, call_id: int) -> None:
+    offer_sdp = await create_offer_for_renegotiation(call_id)
+
+    from model_calling.webrtc.session import get_session
+
+    session = get_session(call_id)
+    if session is None:
+        raise ValueError(f"WebRTC session not found: callId={call_id}")
+
+    offer_message = {
+        "type": "OFFER",
+        "roomId": session.room_id,
+        "from": session.ai_signal_id,
+        "to": session.caller_signal_id,
+        "data": {
+            "callId": call_id,
+            "sdp": offer_sdp,
+        },
+    }
+
+    await send_json(ws, offer_message)
+    print(f"[SIGNALING] OFFER sent: callId={call_id}", flush=True)ㅇ
+
 
 async def send_json(ws: Any, message: dict[str, Any]) -> None:
     await ws.send(json.dumps(message, ensure_ascii=False))
+
+
