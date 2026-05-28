@@ -8,3 +8,4 @@ httpx
 chromadb
 websockets
 PyMySQL
+aiortc
