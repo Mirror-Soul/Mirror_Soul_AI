@@ -4,9 +4,12 @@ import chromadb
 from openai import OpenAI
 
 from model_training.utils import (
+    build_member_profile_summary_text,
     build_training_text,
+    create_member_profile_document_id,
     create_document_id,
     create_sample_id,
+    extract_keywords_from_texts,
 )
 from shared.config import settings
 
@@ -77,6 +80,86 @@ def add_training_sample_to_rag(
         "documentId": document_id,
         "sampleId": sample_id,
         "status": "stored",
+    }
+
+
+def add_member_profile_to_rag(
+    *,
+    user_id: str,
+    ai_profile_id: str | None = None,
+    age: int | None = None,
+    gender: str | None = None,
+    mbti: str | None = None,
+    description: str | None = None,
+    interests: list[str] | None = None,
+    interview_topics: list[str] | None = None,
+    interview_samples: list[dict[str, Any]] | None = None,
+    keyword_limit: int = 12,
+) -> dict[str, Any]:
+    seed_keywords = [
+        *(interests or []),
+        *(interview_topics or []),
+    ]
+
+    keyword_source_texts: list[str] = []
+    if description:
+        keyword_source_texts.append(description)
+
+    for sample in interview_samples or []:
+        question_category = sample.get("questionCategory")
+        question_text = sample.get("questionText")
+        transcript = sample.get("transcript")
+
+        if question_category:
+            seed_keywords.append(str(question_category))
+        if question_text:
+            keyword_source_texts.append(str(question_text))
+        if transcript:
+            keyword_source_texts.append(str(transcript))
+
+    keywords = extract_keywords_from_texts(
+        keyword_source_texts,
+        seed_keywords=seed_keywords,
+        limit=keyword_limit,
+    )
+
+    document_id = create_member_profile_document_id(user_id, ai_profile_id)
+    text = build_member_profile_summary_text(
+        age=age,
+        gender=gender,
+        mbti=mbti,
+        keywords=keywords,
+    )
+    embedding = create_embedding(text)
+
+    metadata: dict[str, Any] = {
+        "userId": user_id,
+        "sourceType": "member_profile_summary",
+        "keywordCount": len(keywords),
+        "keywords": ", ".join(keywords),
+    }
+
+    if ai_profile_id:
+        metadata["aiProfileId"] = ai_profile_id
+    if age is not None:
+        metadata["age"] = age
+    if gender:
+        metadata["gender"] = gender
+    if mbti:
+        metadata["mbti"] = mbti.upper()
+
+    collection.upsert(
+        ids=[document_id],
+        documents=[text],
+        embeddings=[embedding],
+        metadatas=[metadata],
+    )
+
+    return {
+        "documentId": document_id,
+        "status": "stored",
+        "keywords": keywords,
+        "profileSummary": text,
     }
 
 

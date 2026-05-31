@@ -1,19 +1,70 @@
 import os
 import json
 import traceback
+from typing import Any
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from model_calling.schemas import PersonalityProfile, SpeechProfile, UserStyle
 from model_calling.services import process_stt, extract_user_style, process_llm, process_tts, clone_user_voice
 from model_calling.utils import load_user_persona
+from model_training.base_profiles import get_mbti_base_profile
+from model_training.services import search_user_memories
 
-router = APIRouter()
+router = APIRouter(tags=["model_calling"])
 
 class ChatRequest(BaseModel):
     user_text: str
     user_persona: dict
     personality: PersonalityProfile
     speech: SpeechProfile
+    mbti: str | None = None
+
+
+def resolve_mbti(
+    explicit_mbti: str | None,
+    user_persona: dict,
+    retrieved_memories: list[dict[str, Any]] | None = None,
+) -> str | None:
+    if explicit_mbti:
+        return explicit_mbti
+
+    for key in ("mbti", "MBTI"):
+        value = user_persona.get(key)
+        if value:
+            return str(value)
+
+    for memory in retrieved_memories or []:
+        metadata = memory.get("metadata") or {}
+        value = metadata.get("mbti")
+        if value:
+            return str(value)
+
+    return None
+
+
+def load_personalization_context(
+    *,
+    user_id: str,
+    user_text: str,
+    explicit_mbti: str | None,
+    user_persona: dict,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    retrieved_memories: list[dict[str, Any]] = []
+
+    try:
+        retrieved_memories = search_user_memories(
+            user_id=user_id,
+            query=user_text,
+            top_k=5,
+        )
+    except Exception as exc:
+        print(f"[RAG 검색 경고] user_id={user_id}: {repr(exc)}")
+
+    mbti = resolve_mbti(explicit_mbti, user_persona, retrieved_memories)
+    mbti_base_profile = get_mbti_base_profile(mbti)
+
+    return mbti_base_profile, retrieved_memories
 
 @router.post("/extract-style", response_model=UserStyle)
 async def api_extract_style(audio_file: UploadFile = File(...)):
@@ -29,11 +80,20 @@ async def api_extract_style(audio_file: UploadFile = File(...)):
 @router.post("/chat")
 async def api_chat(request: ChatRequest):
     try:
+        mbti_base_profile, retrieved_memories = load_personalization_context(
+            user_id=request.speech.user_id,
+            user_text=request.user_text,
+            explicit_mbti=request.mbti,
+            user_persona=request.user_persona,
+        )
+
         response_text = await process_llm(
             user_text=request.user_text,
             user_persona=request.user_persona,
             personality=request.personality,
-            speech=request.speech
+            speech=request.speech,
+            mbti_base_profile=mbti_base_profile,
+            retrieved_memories=retrieved_memories,
         )
         return {"response_text": response_text}
         
@@ -43,11 +103,20 @@ async def api_chat(request: ChatRequest):
 @router.post("/chat-voice")
 async def api_chat_voice(request: ChatRequest):
     try:
+        mbti_base_profile, retrieved_memories = load_personalization_context(
+            user_id=request.speech.user_id,
+            user_text=request.user_text,
+            explicit_mbti=request.mbti,
+            user_persona=request.user_persona,
+        )
+
         response_text = await process_llm(
             user_text=request.user_text,
             user_persona=request.user_persona,
             personality=request.personality,
-            speech=request.speech
+            speech=request.speech,
+            mbti_base_profile=mbti_base_profile,
+            retrieved_memories=retrieved_memories,
         )
         
         audio_url = await process_tts(
@@ -132,12 +201,21 @@ async def api_call(request: CallRequest):
         user_persona = persona_data.get("user_persona", {})
         personality = PersonalityProfile(**persona_data.get("personality", {}))
         speech = SpeechProfile(**persona_data.get("speech", {}))
+
+        mbti_base_profile, retrieved_memories = load_personalization_context(
+            user_id=request.target_user_id,
+            user_text=request.user_text,
+            explicit_mbti=None,
+            user_persona=user_persona,
+        )
         
         response_text = await process_llm(
             user_text=request.user_text,
             user_persona=user_persona,
             personality=personality,
-            speech=speech
+            speech=speech,
+            mbti_base_profile=mbti_base_profile,
+            retrieved_memories=retrieved_memories,
         )
         
         audio_url = await process_tts(

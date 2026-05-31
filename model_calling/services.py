@@ -3,6 +3,7 @@ import io
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -44,8 +45,59 @@ async def extract_user_style(stt_text: str) -> dict:
     style_data = json.loads(response.choices[0].message.content)
     return style_data
 
-# 2. 동적 System Prompt 생성 함수 (Big5 성격 및 추출된 화법 데이터 반영)
-def build_dynamic_persona_prompt(user_persona: dict, personality: PersonalityProfile, speech: SpeechProfile) -> str:
+def format_mbti_base_profile(mbti_base_profile: dict[str, Any] | None) -> str:
+    if not mbti_base_profile:
+        return "데이터 없음"
+
+    return "\n".join(
+        [
+            f"- MBTI: {mbti_base_profile.get('mbti', '알 수 없음')}",
+            f"- 기본 성향: {mbti_base_profile.get('summary', '알 수 없음')}",
+            f"- 핵심 특성: {', '.join(mbti_base_profile.get('coreTraits', [])) or '알 수 없음'}",
+            f"- 대화 스타일: {mbti_base_profile.get('conversationStyle', '알 수 없음')}",
+            f"- 의사결정 방식: {mbti_base_profile.get('decisionStyle', '알 수 없음')}",
+            f"- 감정 표현: {mbti_base_profile.get('emotionalExpression', '알 수 없음')}",
+            f"- 관계 방식: {mbti_base_profile.get('relationshipStyle', '알 수 없음')}",
+            f"- 프롬프트 가이드: {mbti_base_profile.get('promptGuidance', '알 수 없음')}",
+            f"- 주의사항: {' / '.join(mbti_base_profile.get('cautions', [])) or '알 수 없음'}",
+        ]
+    )
+
+
+def format_retrieved_memories(retrieved_memories: list[dict[str, Any]] | None) -> str:
+    if not retrieved_memories:
+        return "검색된 회원별 RAG 기억 없음"
+
+    formatted_memories: list[str] = []
+    for index, memory in enumerate(retrieved_memories[:5], start=1):
+        text = str(memory.get("text", "")).strip()
+        if len(text) > 700:
+            text = f"{text[:700]}..."
+
+        metadata = memory.get("metadata") or {}
+        source_type = metadata.get("sourceType", "unknown")
+        keywords = metadata.get("keywords")
+
+        memory_lines = [
+            f"{index}. sourceType={source_type}",
+            text,
+        ]
+        if keywords:
+            memory_lines.append(f"키워드: {keywords}")
+
+        formatted_memories.append("\n".join(memory_lines))
+
+    return "\n\n".join(formatted_memories)
+
+
+# 2. 동적 System Prompt 생성 함수 (Big5 성격, MBTI base profile, RAG 기억 및 화법 데이터 반영)
+def build_dynamic_persona_prompt(
+    user_persona: dict,
+    personality: PersonalityProfile,
+    speech: SpeechProfile,
+    mbti_base_profile: dict[str, Any] | None = None,
+    retrieved_memories: list[dict[str, Any]] | None = None,
+) -> str:
     # schemas.py의 SpeechProfile에 user_style이 추가되었다고 가정하고 데이터 추출
     user_style = getattr(speech, 'user_style', None)
     
@@ -60,13 +112,29 @@ def build_dynamic_persona_prompt(user_persona: dict, personality: PersonalityPro
         endings = "데이터 없음"
         style_desc = "데이터 없음"
 
-    prompt = f"""당신은 '{user_persona.get('name', '사용자')}'의 완벽한 디지털 클론입니다.
-다음의 설정값과 성격, 언어 습관을 엄격하게 준수하여 대답하십시오. AI나 기계처럼 행동하지 마십시오.
+    mbti_profile_text = format_mbti_base_profile(mbti_base_profile)
+    rag_memory_text = format_retrieved_memories(retrieved_memories)
+
+    prompt = f"""당신은 '{user_persona.get('name', '사용자')}'의 디지털 클론입니다.
+다음의 설정값, MBTI 기반 기본 성향, 회원별 RAG 기억, 언어 습관을 참고하여 대답하십시오. AI나 기계처럼 행동하지 마십시오.
+
+[답변 우선순위]
+1. 회원별 RAG 기억에 있는 실제 개인 정보를 가장 우선한다.
+2. 회원의 말투, 성격 수치, 저장된 persona 정보를 그다음으로 반영한다.
+3. RAG 정보가 부족한 부분만 MBTI 기반 기본 성향으로 보완한다.
+4. MBTI는 고정관념이 아니라 초기 기본값이다. RAG 기억과 MBTI 설명이 충돌하면 RAG 기억을 우선한다.
 
 [기본 정보]
 - 나이: {user_persona.get('age', '알 수 없음')}
 - 직업: {user_persona.get('occupation', '알 수 없음')}
 - 핵심 가치관: {user_persona.get('core_values', '알 수 없음')}
+- MBTI: {user_persona.get('mbti', user_persona.get('MBTI', '알 수 없음'))}
+
+[MBTI 기반 기본 성향]
+{mbti_profile_text}
+
+[회원별 RAG 기억]
+{rag_memory_text}
 
 [성격 파라미터 (0~100)]
 - 개방성(Openness): {personality.openness}
@@ -91,9 +159,22 @@ def build_dynamic_persona_prompt(user_persona: dict, personality: PersonalityPro
 사용자의 질문에 대해 위의 페르소나와 화법 특징에 완벽히 동화되어, 자연스러운 한국어로 대답하십시오."""
     return prompt
 
-async def process_llm(user_text: str, user_persona: dict, personality: PersonalityProfile, speech: SpeechProfile) -> str:
+async def process_llm(
+    user_text: str,
+    user_persona: dict,
+    personality: PersonalityProfile,
+    speech: SpeechProfile,
+    mbti_base_profile: dict[str, Any] | None = None,
+    retrieved_memories: list[dict[str, Any]] | None = None,
+) -> str:
     # 동적 프롬프트 생성 함수 호출
-    system_prompt = build_dynamic_persona_prompt(user_persona, personality, speech)
+    system_prompt = build_dynamic_persona_prompt(
+        user_persona,
+        personality,
+        speech,
+        mbti_base_profile=mbti_base_profile,
+        retrieved_memories=retrieved_memories,
+    )
 
     response = await client.chat.completions.create(
         model="gpt-4o-mini",

@@ -58,3 +58,62 @@ AI 서버 내부에서는 외부 TTS API 응답을 일시적으로 다른 포맷
 
 ```text
 http://localhost:8000
+```
+
+---
+
+## 4. Training API
+
+### POST /api/v1/training/profiles
+
+백엔드가 회원 기본 정보와 인터뷰 요약 재료를 전달하면, AI 서버는 원문 전체를 저장하지 않고 핵심 프로필 문서로 가공해 RAG DB에 저장합니다.
+
+Request:
+
+```json
+{
+  "userId": "user_123",
+  "aiProfileId": "profile_user_123",
+  "age": 24,
+  "gender": "female",
+  "mbti": "INFP",
+  "description": "자기소개 원문",
+  "interests": ["음악", "여행"],
+  "interviewTopics": ["가족", "진로"],
+  "interviewSamples": [
+    {
+      "questionId": 1,
+      "questionCategory": "가치관",
+      "questionText": "가장 중요하게 생각하는 가치는 무엇인가요?",
+      "transcript": "인터뷰 답변 STT 텍스트"
+    }
+  ],
+  "keywordLimit": 12
+}
+```
+
+AI 서버가 실제 RAG 문서에 저장하는 내용은 나이, 성별, MBTI, 핵심 키워드 목록입니다. `description`, `questionText`, `transcript`는 키워드 추출 재료로만 사용하고 원문 전체를 그대로 저장하지 않습니다.
+
+Response:
+
+```json
+{
+  "success": true,
+  "documentId": "member_profile_user_123_profile_user_123",
+  "status": "stored",
+  "keywords": ["음악", "여행", "가족", "진로"],
+  "profileSummary": "[회원 핵심 프로필]\\n..."
+}
+```
+
+### Chat personalization
+
+`/api/v1/chat`, `/api/v1/chat-voice`, `/api/v1/call`은 답변 생성 전에 회원의 MBTI base profile과 RAG memory를 함께 참고합니다.
+
+답변 생성 우선순위:
+
+1. `userId`로 검색된 RAG memory
+2. 회원 persona, Big5 성격, 말투 profile
+3. MBTI base profile
+
+`/api/v1/chat`과 `/api/v1/chat-voice` 요청에는 선택적으로 `mbti`를 포함할 수 있습니다. `mbti`가 없으면 `user_persona.mbti`, `user_persona.MBTI`, RAG metadata의 `mbti` 순서로 MBTI를 찾습니다.

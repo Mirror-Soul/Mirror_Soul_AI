@@ -2,12 +2,15 @@ from fastapi import APIRouter
 
 from model_training.schemas import (
     DeleteRagDataResponse,
+    MemberProfileRequest,
+    MemberProfileResponse,
     SearchMemoryRequest,
     SearchMemoryResponse,
     TrainingSampleRequest,
     TrainingSampleResponse,
 )
 from model_training.services import (
+    add_member_profile_to_rag,
     add_training_sample_to_rag,
     delete_user_rag_data,
     search_user_memories,
@@ -35,6 +38,35 @@ def add_training_sample(request: TrainingSampleRequest):
         documentId=result["documentId"],
         sampleId=result["sampleId"],
         status=result["status"],
+    )
+
+
+@router.post("/profiles", response_model=MemberProfileResponse)
+def add_member_profile(request: MemberProfileRequest):
+    interview_samples = [
+        sample.model_dump() if hasattr(sample, "model_dump") else sample.dict()
+        for sample in request.interviewSamples
+    ]
+
+    result = add_member_profile_to_rag(
+        user_id=request.userId,
+        ai_profile_id=request.aiProfileId,
+        age=request.age,
+        gender=request.gender,
+        mbti=request.mbti,
+        description=request.description,
+        interests=request.interests,
+        interview_topics=request.interviewTopics,
+        interview_samples=interview_samples,
+        keyword_limit=request.keywordLimit,
+    )
+
+    return MemberProfileResponse(
+        success=True,
+        documentId=result["documentId"],
+        status=result["status"],
+        keywords=result["keywords"],
+        profileSummary=result["profileSummary"],
     )
 
 
