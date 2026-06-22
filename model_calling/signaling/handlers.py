@@ -10,6 +10,7 @@ from model_calling.repository.clone_repository import (
 )
 
 from model_calling.webrtc.peer import (
+    add_remote_ice_candidate,
     apply_answer,
     create_answer_from_offer,
     create_offer_for_renegotiation,
@@ -28,6 +29,10 @@ async def handle_signaling_message(ws: Any, message: dict[str, Any]) -> None:
 
     if message_type == "ANSWER":
         await handle_answer(message)
+        return
+
+    if message_type == "ICE":
+        await handle_ice(message)
         return
 
     print(f"[SIGNALING] unsupported message type: {message_type}")
@@ -185,10 +190,30 @@ async def send_offer(ws: Any, call_id: int) -> None:
     }
 
     await send_json(ws, offer_message)
-    print(f"[SIGNALING] OFFER sent: callId={call_id}", flush=True)ㅇ
+    print(f"[SIGNALING] OFFER sent: callId={call_id}", flush=True)
+
+
+async def handle_ice(message: dict[str, Any]) -> None:
+    data = message.get("data") or {}
+    call_id = data.get("callId")
+
+    if call_id is None:
+        print("[SIGNALING] invalid ICE: callId is required.", flush=True)
+        return
+
+    if "candidate" not in data:
+        print("[SIGNALING] invalid ICE: candidate field is required.", flush=True)
+        return
+
+    try:
+        await add_remote_ice_candidate(
+            call_id=call_id,
+            candidate_data=data["candidate"],
+        )
+    except (AssertionError, KeyError, ValueError) as exc:
+        print(f"[SIGNALING] ICE handling failed: {exc}", flush=True)
 
 
 async def send_json(ws: Any, message: dict[str, Any]) -> None:
     await ws.send(json.dumps(message, ensure_ascii=False))
-
 
