@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from dotenv import load_dotenv
@@ -26,6 +27,18 @@ class CloneInfo:
     sync_rate: int
     avatar_image_url: str | None
     summary: str | None
+
+
+@dataclass(frozen=True)
+class MemberRuntimeProfile:
+    user_uuid: str
+    name: str | None
+    gender: str | None
+    birth_date: date | None
+    job: str | None
+    job_description: str | None
+    self_introduction: str | None
+    mbti: str | None
 
 
 def _get_db_config() -> dict[str, Any]:
@@ -97,4 +110,58 @@ def find_clone_by_user_uuid(clone_user_uuid: str) -> CloneInfo:
         sync_rate=row["sync_rate"],
         avatar_image_url=row["avatar_image_url"],
         summary=row["summary"],
+    )
+
+
+def find_member_runtime_profile(user_uuid: str) -> MemberRuntimeProfile:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+
+    query = """
+        SELECT
+            u.uuid AS user_uuid,
+            u.name,
+            u.gender,
+            u.birth_date,
+            u.job,
+            u.job_description,
+            u.self_introduction,
+            mp.mbti
+        FROM users u
+        LEFT JOIN mbti_profile mp ON mp.user_id = u.id
+        WHERE u.uuid = %s
+        LIMIT 1
+    """
+
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, (user_uuid,))
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(f"RDS member profile lookup failed: {exc}") from exc
+
+    if not row:
+        raise CloneNotFound(f"Member not found: {user_uuid}")
+
+    return MemberRuntimeProfile(
+        user_uuid=str(row["user_uuid"]),
+        name=row["name"],
+        gender=row["gender"],
+        birth_date=row["birth_date"],
+        job=row["job"],
+        job_description=row["job_description"],
+        self_introduction=row["self_introduction"],
+        mbti=row["mbti"],
     )

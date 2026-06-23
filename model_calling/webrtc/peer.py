@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from aiortc import (
@@ -11,9 +12,13 @@ from dotenv import load_dotenv
 
 from model_calling.webrtc.session import (
     WebRTCSession,
+    close_session,
+    get_call_user,
     get_session,
     save_session,
 )
+from model_calling.realtime.audio import QueuedAudioTrack
+from model_calling.realtime import start_realtime_audio
 
 load_dotenv()
 
@@ -43,7 +48,7 @@ def create_rtc_configuration() -> RTCConfiguration:
     return RTCConfiguration(iceServers=ice_servers)
 
 
-def create_peer_connection() -> RTCPeerConnection:
+def create_peer_connection(call_id: int) -> RTCPeerConnection:
     pc = RTCPeerConnection(configuration=create_rtc_configuration())
 
     @pc.on("icegatheringstatechange")
@@ -53,6 +58,8 @@ def create_peer_connection() -> RTCPeerConnection:
     @pc.on("connectionstatechange")
     async def on_connection_state_change():
         print(f"[WEBRTC] connection: {pc.connectionState}", flush=True)
+        if pc.connectionState in {"failed", "closed"}:
+            await close_session(call_id)
 
     @pc.on("iceconnectionstatechange")
     async def on_ice_connection_state_change():
@@ -61,6 +68,24 @@ def create_peer_connection() -> RTCPeerConnection:
     @pc.on("track")
     def on_track(track):
         print(f"[WEBRTC] track received: kind={track.kind}", flush=True)
+        if track.kind != "audio":
+            return
+
+        session = get_session(call_id)
+        if session is None or session.receiver_task is not None:
+            return
+
+        async def start_pipeline() -> None:
+            receiver_task, pipeline_task = await start_realtime_audio(
+                user_id=session.clone_user_uuid,
+                incoming_track=track,
+                output_track=session.output_track,
+                utterance_queue=session.utterance_queue,
+            )
+            session.receiver_task = receiver_task
+            session.pipeline_task = pipeline_task
+
+        asyncio.create_task(start_pipeline())
 
     return pc
 
@@ -75,13 +100,22 @@ async def create_answer_from_offer(
     session = get_session(call_id)
 
     if session is None:
-        pc = create_peer_connection()
+        clone_user_uuid = get_call_user(call_id)
+        if not clone_user_uuid:
+            raise ValueError(f"Call user not registered: callId={call_id}")
+
+        pc = create_peer_connection(call_id)
+        output_track = QueuedAudioTrack()
+        pc.addTrack(output_track)
         session = WebRTCSession(
             call_id=call_id,
             room_id=room_id,
             ai_signal_id=ai_signal_id,
             caller_signal_id=caller_signal_id,
             peer_connection=pc,
+            clone_user_uuid=clone_user_uuid,
+            output_track=output_track,
+            utterance_queue=asyncio.Queue(maxsize=2),
         )
         save_session(session)
 
