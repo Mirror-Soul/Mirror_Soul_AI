@@ -15,6 +15,7 @@ from model_calling.webrtc.peer import (
     create_answer_from_offer,
     create_offer_for_renegotiation,
 )
+from model_calling.webrtc.session import close_session, register_call_user
 
 async def handle_signaling_message(ws: Any, message: dict[str, Any]) -> None:
     message_type = message.get("type")
@@ -33,6 +34,13 @@ async def handle_signaling_message(ws: Any, message: dict[str, Any]) -> None:
 
     if message_type == "ICE":
         await handle_ice(message)
+        return
+
+    if message_type == "CALL_END":
+        await handle_call_end(message)
+        return
+
+    if message_type == "JOINED":
         return
 
     print(f"[SIGNALING] unsupported message type: {message_type}")
@@ -97,6 +105,7 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
     }
 
     await send_json(ws, accept_message)
+    register_call_user(call_id, clone_info.clone_user_uuid)
     print(f"[SIGNALING] CALL_ACCEPT sent: callId={call_id}")
 
 
@@ -212,6 +221,17 @@ async def handle_ice(message: dict[str, Any]) -> None:
         )
     except (AssertionError, KeyError, ValueError) as exc:
         print(f"[SIGNALING] ICE handling failed: {exc}", flush=True)
+
+
+async def handle_call_end(message: dict[str, Any]) -> None:
+    data = message.get("data") or {}
+    call_id = data.get("callId")
+    if call_id is None:
+        print("[SIGNALING] invalid CALL_END: callId is required.", flush=True)
+        return
+
+    await close_session(call_id)
+    print(f"[SIGNALING] CALL_END handled: callId={call_id}", flush=True)
 
 
 async def send_json(ws: Any, message: dict[str, Any]) -> None:

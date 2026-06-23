@@ -9,3 +9,5 @@ chromadb
 websockets
 PyMySQL
 aiortc
+av
+numpy

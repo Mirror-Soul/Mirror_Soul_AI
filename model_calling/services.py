@@ -308,6 +308,48 @@ async def process_tts(
     return f"/assets/{user_id}/result_audio.m4a"
 
 
+async def process_tts_bytes(
+    ai_text: str,
+    speech: SpeechProfile,
+    personality: PersonalityProfile,
+) -> bytes:
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    voice_id = getattr(speech, "voice_id", None) or os.environ.get(
+        "ELEVENLABS_VOICE_ID"
+    )
+
+    if not api_key or not voice_id:
+        raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
+
+    stability_val, style_val = calculate_voice_settings(personality)
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    data = {
+        "text": ai_text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": stability_val,
+            "similarity_boost": 0.9,
+            "style": style_val,
+            "use_speaker_boost": True,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
+        response = await http_client.post(url, json=data, headers=headers)
+
+    if response.status_code != 200:
+        raise Exception(
+            f"ElevenLabs API 오류 [{response.status_code}]: {response.text}"
+        )
+
+    return response.content
+
+
 async def clone_user_voice(user_id: str, audio_bytes: bytes) -> str:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
