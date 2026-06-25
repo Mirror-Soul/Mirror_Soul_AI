@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+openai
+python-dotenv
+httpx
+chromadb
+websockets
+PyMySQL
+aiortc
+av
+numpy
