@@ -1,0 +1,39 @@
+name: Deploy Call Server
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "call_server/**"
+      - "model_calling/**"
+      - "model_training/**"
+      - "shared/**"
+      - "requirements-call.txt"
+      - ".github/workflows/deploy-call-server.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-call-server-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to call EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.CALL_EC2_HOST }}
+          username: ${{ secrets.CALL_EC2_USER }}
+          key: ${{ secrets.CALL_EC2_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /home/ec2-user/Mirror_Soul_AI
+            git pull --ff-only origin main
+            .venv/bin/python -m pip install -r requirements-call.txt
+            sudo systemctl restart mirror-soul-call
+            sudo systemctl is-active --quiet mirror-soul-call
+            curl --fail --silent --show-error http://127.0.0.1:8000/health
