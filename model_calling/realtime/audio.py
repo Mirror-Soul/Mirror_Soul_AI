@@ -26,12 +26,18 @@ class QueuedAudioTrack(MediaStreamTrack):
         self._pcm = bytearray()
         self._pts = 0
         self._started_at: float | None = None
+        self._sent_audio_frames = 0
+        self._sent_silence_frames = 0
+        self._last_silence_log_at = 0.0
 
     @property
     def is_playing(self) -> bool:
         return bool(self._pcm)
 
     def enqueue_encoded_audio(self, audio_bytes: bytes) -> None:
+        pcm_before = len(self._pcm)
+        decoded_frames = 0
+        resampled_frames = 0
         container = av.open(io.BytesIO(audio_bytes))
         resampler = av.AudioResampler(
             format="s16",
@@ -41,13 +47,26 @@ class QueuedAudioTrack(MediaStreamTrack):
 
         try:
             for frame in container.decode(audio=0):
+                decoded_frames += 1
                 for resampled in resampler.resample(frame):
+                    resampled_frames += 1
                     self._pcm.extend(resampled.to_ndarray().tobytes())
 
             for resampled in resampler.resample(None):
+                resampled_frames += 1
                 self._pcm.extend(resampled.to_ndarray().tobytes())
         finally:
             container.close()
+
+        added_pcm = len(self._pcm) - pcm_before
+        duration_seconds = added_pcm / (OUTPUT_SAMPLE_RATE * 2)
+        print(
+            "[AUDIO_OUT] queued encoded audio: "
+            f"encoded_bytes={len(audio_bytes)} decoded_frames={decoded_frames} "
+            f"resampled_frames={resampled_frames} pcm_added={added_pcm} "
+            f"pcm_total={len(self._pcm)} duration={duration_seconds:.2f}s",
+            flush=True,
+        )
 
     async def recv(self) -> av.AudioFrame:
         if self._started_at is None:
@@ -60,8 +79,24 @@ class QueuedAudioTrack(MediaStreamTrack):
         if len(self._pcm) >= byte_count:
             pcm = bytes(self._pcm[:byte_count])
             del self._pcm[:byte_count]
+            self._sent_audio_frames += 1
+            if self._sent_audio_frames == 1 or self._sent_audio_frames % 50 == 0:
+                print(
+                    "[AUDIO_OUT] sending audio frame: "
+                    f"frames={self._sent_audio_frames} remaining_pcm={len(self._pcm)}",
+                    flush=True,
+                )
         else:
             pcm = bytes(byte_count)
+            self._sent_silence_frames += 1
+            now = time.monotonic()
+            if now - self._last_silence_log_at >= 5.0:
+                self._last_silence_log_at = now
+                print(
+                    "[AUDIO_OUT] sending silence frame heartbeat: "
+                    f"silence_frames={self._sent_silence_frames}",
+                    flush=True,
+                )
 
         samples = np.frombuffer(pcm, dtype=np.int16).reshape(1, -1)
         frame = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
@@ -102,6 +137,16 @@ async def receive_utterances(
     speech_seconds = 0.0
     silence_accumulated = 0.0
     speaking = False
+    received_frames = 0
+    last_input_log_at = 0.0
+    last_playback_skip_log_at = 0.0
+
+    print(
+        "[AUDIO_IN] VAD config: "
+        f"threshold={energy_threshold} silence={silence_seconds}s "
+        f"min_speech={min_speech_seconds}s max_speech={max_speech_seconds}s",
+        flush=True,
+    )
 
     while True:
         try:
@@ -110,7 +155,23 @@ async def receive_utterances(
             print("[REALTIME] incoming audio track ended", flush=True)
             return
 
+        received_frames += 1
+        now = time.monotonic()
+        if now - last_input_log_at >= 5.0:
+            last_input_log_at = now
+            print(
+                "[AUDIO_IN] receiving frames heartbeat: "
+                f"frames={received_frames} output_playing={output_track.is_playing}",
+                flush=True,
+            )
+
         if output_track.is_playing:
+            if now - last_playback_skip_log_at >= 2.0:
+                last_playback_skip_log_at = now
+                print(
+                    "[AUDIO_IN] input ignored while AI audio is playing",
+                    flush=True,
+                )
             pre_roll.clear()
             utterance.clear()
             speech_seconds = 0.0
@@ -134,6 +195,12 @@ async def receive_utterances(
                     continue
 
                 speaking = True
+                print(
+                    "[AUDIO_IN] speech started: "
+                    f"rms={rms:.1f} threshold={energy_threshold} "
+                    f"pre_roll_chunks={len(pre_roll)}",
+                    flush=True,
+                )
                 for chunk in pre_roll:
                     utterance.extend(chunk)
                 pre_roll.clear()
@@ -152,7 +219,15 @@ async def receive_utterances(
             )
             reached_limit = speech_seconds >= max_speech_seconds
             if reached_silence or reached_limit:
-                await on_utterance(pcm_to_wav_bytes(bytes(utterance)))
+                wav_bytes = pcm_to_wav_bytes(bytes(utterance))
+                reason = "max_speech" if reached_limit else "silence"
+                print(
+                    "[AUDIO_IN] utterance queued: "
+                    f"reason={reason} speech={speech_seconds:.2f}s "
+                    f"silence={silence_accumulated:.2f}s wav_bytes={len(wav_bytes)}",
+                    flush=True,
+                )
+                await on_utterance(wav_bytes)
                 utterance.clear()
                 speech_seconds = 0.0
                 silence_accumulated = 0.0

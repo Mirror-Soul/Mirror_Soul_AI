@@ -51,6 +51,7 @@ def _load_local_persona(user_id: str) -> dict[str, Any] | None:
     persona_path = Path("data") / user_id / "persona.json"
     if not persona_path.exists():
         return None
+    print(f"[REALTIME] loading local persona: user={user_id}", flush=True)
     return load_user_persona(user_id)
 
 
@@ -66,6 +67,11 @@ async def load_runtime_context(
         return user_persona, personality, speech, mbti
 
     profile = await asyncio.to_thread(find_member_runtime_profile, user_id)
+    print(
+        "[REALTIME] loaded runtime profile from RDS: "
+        f"user={user_id} mbti={profile.mbti or 'none'}",
+        flush=True,
+    )
     user_persona = {
         "name": profile.name or "회원",
         "age": _calculate_age(profile.birth_date),
@@ -83,12 +89,23 @@ async def load_runtime_context(
 
 
 async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
+    print(
+        f"[REALTIME] STT start: user={user_id} wav_bytes={len(wav_bytes)}",
+        flush=True,
+    )
     transcript = await process_stt(wav_bytes, "realtime_utterance.wav")
     if not transcript:
+        print(f"[REALTIME] STT empty result: user={user_id}", flush=True)
         return None
 
     print(f"[REALTIME] STT user={user_id}: {transcript}", flush=True)
     user_persona, personality, speech, mbti = await load_runtime_context(user_id)
+    print(
+        "[REALTIME] context ready: "
+        f"user={user_id} mbti={mbti or 'none'} "
+        f"voice_id={'set' if speech.voice_id else 'fallback-or-missing'}",
+        flush=True,
+    )
 
     try:
         memories = await asyncio.to_thread(
@@ -97,10 +114,15 @@ async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
             transcript,
             5,
         )
+        print(
+            f"[REALTIME] RAG lookup complete: user={user_id} count={len(memories)}",
+            flush=True,
+        )
     except Exception as exc:
         print(f"[REALTIME] RAG lookup skipped: {exc}", flush=True)
         memories = []
 
+    print(f"[REALTIME] LLM start: user={user_id}", flush=True)
     response_text = await process_llm(
         user_text=transcript,
         user_persona=user_persona,
@@ -111,11 +133,17 @@ async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
     )
     print(f"[REALTIME] LLM user={user_id}: {response_text}", flush=True)
 
-    return await process_tts_bytes(
+    print(f"[REALTIME] TTS start: user={user_id}", flush=True)
+    tts_bytes = await process_tts_bytes(
         ai_text=response_text,
         speech=speech,
         personality=personality,
     )
+    print(
+        f"[REALTIME] TTS complete: user={user_id} audio_bytes={len(tts_bytes)}",
+        flush=True,
+    )
+    return tts_bytes
 
 
 async def start_realtime_audio(
@@ -130,15 +158,34 @@ async def start_realtime_audio(
             print("[REALTIME] dropping utterance because the queue is full", flush=True)
             return
         await utterance_queue.put(wav_bytes)
+        print(
+            "[REALTIME] utterance enqueued: "
+            f"user={user_id} queue_size={utterance_queue.qsize()} "
+            f"wav_bytes={len(wav_bytes)}",
+            flush=True,
+        )
 
     async def process_queue() -> None:
         while True:
             wav_bytes = await utterance_queue.get()
+            print(
+                "[REALTIME] utterance dequeued: "
+                f"user={user_id} queue_size={utterance_queue.qsize()} "
+                f"wav_bytes={len(wav_bytes)}",
+                flush=True,
+            )
             try:
                 reply_audio = await generate_reply_audio(user_id, wav_bytes)
                 if reply_audio:
+                    print(
+                        "[REALTIME] queueing reply audio: "
+                        f"user={user_id} audio_bytes={len(reply_audio)}",
+                        flush=True,
+                    )
                     output_track.enqueue_encoded_audio(reply_audio)
                     print("[REALTIME] reply audio queued", flush=True)
+                else:
+                    print(f"[REALTIME] no reply audio generated: user={user_id}", flush=True)
             except CloneRepositoryError as exc:
                 print(f"[REALTIME] member profile lookup failed: {exc}", flush=True)
             except Exception as exc:
@@ -146,8 +193,15 @@ async def start_realtime_audio(
             finally:
                 utterance_queue.task_done()
 
+    print(f"[REALTIME] starting realtime audio tasks: user={user_id}", flush=True)
     receiver_task = asyncio.create_task(
         receive_utterances(incoming_track, output_track, enqueue_utterance)
     )
     pipeline_task = asyncio.create_task(process_queue())
+    print(
+        "[REALTIME] realtime audio tasks started: "
+        f"user={user_id} receiver_task={id(receiver_task)} "
+        f"pipeline_task={id(pipeline_task)}",
+        flush=True,
+    )
     return receiver_task, pipeline_task

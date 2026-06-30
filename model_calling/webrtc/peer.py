@@ -45,11 +45,17 @@ def create_rtc_configuration() -> RTCConfiguration:
             )
         )
 
+    print(
+        "[WEBRTC] RTC configuration created: "
+        f"ice_servers={len(ice_servers)} turn={'enabled' if turn_url else 'disabled'}",
+        flush=True,
+    )
     return RTCConfiguration(iceServers=ice_servers)
 
 
 def create_peer_connection(call_id: int) -> RTCPeerConnection:
     pc = RTCPeerConnection(configuration=create_rtc_configuration())
+    print(f"[WEBRTC] peer connection created: callId={call_id}", flush=True)
 
     @pc.on("icegatheringstatechange")
     async def on_ice_gathering_state_change():
@@ -69,13 +75,23 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
     def on_track(track):
         print(f"[WEBRTC] track received: kind={track.kind}", flush=True)
         if track.kind != "audio":
+            print(f"[WEBRTC] non-audio track ignored: kind={track.kind}", flush=True)
             return
 
         session = get_session(call_id)
-        if session is None or session.receiver_task is not None:
+        if session is None:
+            print(f"[WEBRTC] track ignored because session is missing: callId={call_id}", flush=True)
+            return
+        if session.receiver_task is not None:
+            print(f"[WEBRTC] duplicate audio track ignored: callId={call_id}", flush=True)
             return
 
         async def start_pipeline() -> None:
+            print(
+                "[WEBRTC] starting realtime pipeline for track: "
+                f"callId={call_id} user={session.clone_user_uuid}",
+                flush=True,
+            )
             receiver_task, pipeline_task = await start_realtime_audio(
                 user_id=session.clone_user_uuid,
                 incoming_track=track,
@@ -84,6 +100,12 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
             )
             session.receiver_task = receiver_task
             session.pipeline_task = pipeline_task
+            print(
+                "[WEBRTC] realtime pipeline attached: "
+                f"callId={call_id} receiver_task={id(receiver_task)} "
+                f"pipeline_task={id(pipeline_task)}",
+                flush=True,
+            )
 
         asyncio.create_task(start_pipeline())
 
@@ -107,6 +129,7 @@ async def create_answer_from_offer(
         pc = create_peer_connection(call_id)
         output_track = QueuedAudioTrack()
         pc.addTrack(output_track)
+        print(f"[WEBRTC] output audio track added: callId={call_id}", flush=True)
         session = WebRTCSession(
             call_id=call_id,
             room_id=room_id,
@@ -118,6 +141,11 @@ async def create_answer_from_offer(
             utterance_queue=asyncio.Queue(maxsize=2),
         )
         save_session(session)
+        print(
+            "[WEBRTC] session created: "
+            f"callId={call_id} roomId={room_id} user={clone_user_uuid}",
+            flush=True,
+        )
 
     pc = session.peer_connection
 
@@ -126,10 +154,21 @@ async def create_answer_from_offer(
         type=offer_sdp["type"],
     )
 
+    print(
+        "[WEBRTC] applying remote offer: "
+        f"callId={call_id} type={offer.type} sdp_length={len(offer.sdp)}",
+        flush=True,
+    )
     await pc.setRemoteDescription(offer)
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
+    print(
+        "[WEBRTC] local answer created: "
+        f"callId={call_id} type={pc.localDescription.type} "
+        f"sdp_length={len(pc.localDescription.sdp)}",
+        flush=True,
+    )
 
     return {
         "type": pc.localDescription.type,
@@ -146,6 +185,12 @@ async def create_offer_for_renegotiation(call_id: int) -> dict:
 
     offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
+    print(
+        "[WEBRTC] local offer created: "
+        f"callId={call_id} type={pc.localDescription.type} "
+        f"sdp_length={len(pc.localDescription.sdp)}",
+        flush=True,
+    )
 
     return {
         "type": pc.localDescription.type,
@@ -163,6 +208,11 @@ async def apply_answer(call_id: int, answer_sdp: dict) -> None:
         type=answer_sdp["type"],
     )
 
+    print(
+        "[WEBRTC] applying remote answer: "
+        f"callId={call_id} type={answer.type} sdp_length={len(answer.sdp)}",
+        flush=True,
+    )
     await session.peer_connection.setRemoteDescription(answer)
 
 
