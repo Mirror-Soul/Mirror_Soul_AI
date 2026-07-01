@@ -86,6 +86,17 @@ class QueuedAudioTrack(MediaStreamTrack):
                     f"frames={self._sent_audio_frames} remaining_pcm={len(self._pcm)}",
                     flush=True,
                 )
+        elif self._pcm:
+            remaining_bytes = len(self._pcm)
+            pcm = bytes(self._pcm) + bytes(byte_count - remaining_bytes)
+            self._pcm.clear()
+            self._sent_audio_frames += 1
+            print(
+                "[AUDIO_OUT] sending final padded audio frame: "
+                f"frames={self._sent_audio_frames} padded_bytes={byte_count - remaining_bytes} "
+                "remaining_pcm=0",
+                flush=True,
+            )
         else:
             pcm = bytes(byte_count)
             self._sent_silence_frames += 1
@@ -122,10 +133,13 @@ async def receive_utterances(
     output_track: QueuedAudioTrack,
     on_utterance: Callable[[bytes], Awaitable[None]],
 ) -> None:
-    energy_threshold = int(os.getenv("REALTIME_VAD_ENERGY_THRESHOLD", "450"))
+    energy_threshold = int(os.getenv("REALTIME_VAD_ENERGY_THRESHOLD", "900"))
     silence_seconds = float(os.getenv("REALTIME_VAD_SILENCE_SECONDS", "0.8"))
-    min_speech_seconds = float(os.getenv("REALTIME_VAD_MIN_SPEECH_SECONDS", "0.4"))
+    min_speech_seconds = float(os.getenv("REALTIME_VAD_MIN_SPEECH_SECONDS", "0.7"))
     max_speech_seconds = float(os.getenv("REALTIME_VAD_MAX_SPEECH_SECONDS", "15"))
+    startup_grace_seconds = float(
+        os.getenv("REALTIME_VAD_STARTUP_GRACE_SECONDS", "1.5")
+    )
 
     resampler = av.AudioResampler(
         format="s16",
@@ -140,11 +154,14 @@ async def receive_utterances(
     received_frames = 0
     last_input_log_at = 0.0
     last_playback_skip_log_at = 0.0
+    last_startup_skip_log_at = 0.0
+    started_at = time.monotonic()
 
     print(
         "[AUDIO_IN] VAD config: "
         f"threshold={energy_threshold} silence={silence_seconds}s "
-        f"min_speech={min_speech_seconds}s max_speech={max_speech_seconds}s",
+        f"min_speech={min_speech_seconds}s max_speech={max_speech_seconds}s "
+        f"startup_grace={startup_grace_seconds}s",
         flush=True,
     )
 
@@ -164,6 +181,20 @@ async def receive_utterances(
                 f"frames={received_frames} output_playing={output_track.is_playing}",
                 flush=True,
             )
+
+        if now - started_at < startup_grace_seconds:
+            if now - last_startup_skip_log_at >= 1.0:
+                last_startup_skip_log_at = now
+                print(
+                    "[AUDIO_IN] input ignored during startup grace period",
+                    flush=True,
+                )
+            pre_roll.clear()
+            utterance.clear()
+            speech_seconds = 0.0
+            silence_accumulated = 0.0
+            speaking = False
+            continue
 
         if output_track.is_playing:
             if now - last_playback_skip_log_at >= 2.0:
