@@ -51,5 +51,21 @@ Successful conversation logs:
 
 If `data/{user_id}/persona.json` exists, the realtime pipeline uses its
 personality, speech style, and ElevenLabs voice ID. Otherwise it loads the
-member profile and MBTI from RDS and uses `ELEVENLABS_VOICE_ID` as the default
-voice.
+member profile and MBTI from RDS.
+
+For RDS-backed calls, the pipeline first looks for an active voice profile:
+
+```sql
+SELECT avp.elevenlabs_voice_id
+FROM ai_voice_profiles avp
+JOIN clones c ON c.id = avp.clone_id
+JOIN users u ON u.id = c.user_id
+WHERE u.uuid = ?
+  AND avp.status = 'ACTIVE'
+  AND avp.is_active = TRUE
+ORDER BY avp.updated_at DESC
+LIMIT 1;
+```
+
+If no active `ai_voice_profiles` row exists, or the table is not available yet,
+the call continues with the default `ELEVENLABS_VOICE_ID`.
