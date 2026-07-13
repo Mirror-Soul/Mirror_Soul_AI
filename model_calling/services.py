@@ -14,6 +14,15 @@ from model_calling.schemas import PersonalityProfile, SpeechProfile
 load_dotenv()
 client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
+
+def _mask_voice_id(voice_id: str | None) -> str:
+    if not voice_id:
+        return "missing"
+    if len(voice_id) <= 8:
+        return "set"
+    return f"{voice_id[:4]}...{voice_id[-4:]}"
+
+
 async def process_stt(audio_bytes: bytes, filename: str = "audio.m4a") -> str:
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = filename
@@ -243,6 +252,7 @@ async def process_tts(
     temp_mp3_path = user_assets_dir / "result_audio_source.mp3"
     output_m4a_path = user_assets_dir / "result_audio.m4a"
 
+    print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
     headers = {
@@ -321,6 +331,7 @@ async def process_tts_bytes(
     if not api_key or not voice_id:
         raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
 
+    print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
     stability_val, style_val = calculate_voice_settings(personality)
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {

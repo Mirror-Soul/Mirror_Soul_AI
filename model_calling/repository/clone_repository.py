@@ -41,6 +41,15 @@ class MemberRuntimeProfile:
     mbti: str | None
 
 
+@dataclass(frozen=True)
+class ActiveVoiceProfile:
+    clone_id: int
+    voice_training_job_id: int | None
+    elevenlabs_voice_id: str
+    status: str
+    is_active: bool
+
+
 def _get_db_config() -> dict[str, Any]:
     config = {
         "host": os.getenv("DB_HOST"),
@@ -164,4 +173,58 @@ def find_member_runtime_profile(user_uuid: str) -> MemberRuntimeProfile:
         job_description=row["job_description"],
         self_introduction=row["self_introduction"],
         mbti=row["mbti"],
+    )
+
+
+def find_active_voice_profile_by_user_uuid(user_uuid: str) -> ActiveVoiceProfile | None:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+
+    query = """
+        SELECT
+            avp.clone_id,
+            avp.voice_training_job_id,
+            avp.elevenlabs_voice_id,
+            avp.status,
+            avp.is_active
+        FROM ai_voice_profiles avp
+        JOIN clones c ON c.id = avp.clone_id
+        JOIN users u ON u.id = c.user_id
+        WHERE u.uuid = %s
+          AND avp.status = 'ACTIVE'
+          AND avp.is_active = TRUE
+        ORDER BY avp.updated_at DESC
+        LIMIT 1
+    """
+
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, (user_uuid,))
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(
+            f"RDS active voice profile lookup failed: {exc}"
+        ) from exc
+
+    if not row:
+        return None
+
+    return ActiveVoiceProfile(
+        clone_id=row["clone_id"],
+        voice_training_job_id=row["voice_training_job_id"],
+        elevenlabs_voice_id=row["elevenlabs_voice_id"],
+        status=row["status"],
+        is_active=bool(row["is_active"]),
     )

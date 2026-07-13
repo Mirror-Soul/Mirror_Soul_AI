@@ -6,6 +6,7 @@ from typing import Any
 
 from model_calling.repository.clone_repository import (
     CloneRepositoryError,
+    find_active_voice_profile_by_user_uuid,
     find_member_runtime_profile,
 )
 from model_calling.schemas import PersonalityProfile, SpeechProfile
@@ -36,10 +37,10 @@ def _default_personality(mbti: str | None) -> PersonalityProfile:
     )
 
 
-def _default_speech(user_id: str) -> SpeechProfile:
+def _default_speech(user_id: str, voice_id: str | None = None) -> SpeechProfile:
     return SpeechProfile(
         user_id=user_id,
-        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
+        voice_id=voice_id or os.getenv("ELEVENLABS_VOICE_ID"),
         speech_speed=50,
         avg_pitch=50,
         honorific_ratio=50,
@@ -80,10 +81,38 @@ async def load_runtime_context(
         "core_values": profile.self_introduction,
         "mbti": profile.mbti,
     }
+
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    try:
+        voice_profile = await asyncio.to_thread(
+            find_active_voice_profile_by_user_uuid,
+            user_id,
+        )
+        if voice_profile:
+            voice_id = voice_profile.elevenlabs_voice_id
+            print(
+                "[REALTIME] active voice profile found: "
+                f"user={user_id} clone_id={voice_profile.clone_id} "
+                f"job_id={voice_profile.voice_training_job_id or 'none'}",
+                flush=True,
+            )
+        else:
+            print(
+                "[REALTIME] active voice profile missing; using default voice: "
+                f"user={user_id}",
+                flush=True,
+            )
+    except CloneRepositoryError as exc:
+        print(
+            "[REALTIME] active voice profile lookup skipped; using default voice: "
+            f"user={user_id} error={exc}",
+            flush=True,
+        )
+
     return (
         user_persona,
         _default_personality(profile.mbti),
-        _default_speech(user_id),
+        _default_speech(user_id, voice_id),
         profile.mbti,
     )
 
