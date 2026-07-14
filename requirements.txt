@@ -11,3 +11,4 @@ PyMySQL
 aiortc
 av
 numpy
+boto3
