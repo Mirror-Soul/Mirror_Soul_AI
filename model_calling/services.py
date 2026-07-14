@@ -361,36 +361,48 @@ async def process_tts_bytes(
     return response.content
 
 
-async def clone_user_voice(user_id: str, audio_bytes: bytes) -> str:
+async def clone_user_voice_from_files(
+    user_id: str,
+    audio_files: list[tuple[str, bytes, str]],
+    *,
+    description: str = "Mirror Soul member voice clone",
+) -> str:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         raise Exception("ElevenLabs API Key가 설정되지 않았습니다.")
+    if not audio_files:
+        raise Exception("Voice cloning requires at least one audio file.")
 
     url = "https://api.elevenlabs.io/v1/voices/add"
-    
-    headers = {
-        "xi-api-key": api_key
-    }
-    
-    files = {
-        "files": ("sample.wav", audio_bytes, "audio/wav")
-    }
-    
+
+    headers = {"xi-api-key": api_key}
+    files = [
+        ("files", (filename, audio_bytes, content_type))
+        for filename, audio_bytes, content_type in audio_files
+    ]
     data = {
-        "name": f"Clone_{user_id}",
-        "description": "User customized voice clone"
+        "name": f"MirrorSoul_{user_id}",
+        "description": description,
     }
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=120.0) as http_client:
         response = await http_client.post(url, headers=headers, data=data, files=files)
-        
-        if response.status_code != 200:
+
+        if response.status_code not in (200, 201):
             raise Exception(f"Voice cloning failed: {response.text}")
-            
+
         response_data = response.json()
         voice_id = response_data.get("voice_id")
-        
+
         if not voice_id:
             raise Exception("Voice ID 발급에 실패했습니다.")
-            
+
         return voice_id
+
+
+async def clone_user_voice(user_id: str, audio_bytes: bytes) -> str:
+    return await clone_user_voice_from_files(
+        user_id,
+        [("sample.wav", audio_bytes, "audio/wav")],
+        description="User customized voice clone",
+    )

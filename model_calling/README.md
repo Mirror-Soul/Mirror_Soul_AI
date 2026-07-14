@@ -30,6 +30,61 @@ DB_USERNAME=
 DB_PASSWORD=
 ```
 
+## Voice training worker
+
+Backend publishes voice clone requests to SQS after onboarding interview audio
+or voice update audio is uploaded to S3. The AI worker consumes that message,
+downloads the audio files, creates an ElevenLabs voice clone, and stores the
+active voice profile in RDS.
+
+Expected SQS message contract:
+
+```json
+{
+  "jobType": "VOICE_TRAINING",
+  "source": "ONBOARDING_INTERVIEW",
+  "jobId": 1,
+  "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
+  "bucket": "mirrorsoul-bucket",
+  "audioObjectKeys": [
+    "interviews/d6bfd311-3c88-40b5-992c-31f12b4f06fd/sample.wav"
+  ],
+  "requestedAt": "2026-07-14T00:00:00Z"
+}
+```
+
+Additional environment variables:
+
+```env
+AWS_REGION=ap-northeast-2
+AWS_SQS_VOICE_TRAINING_QUEUE_URL=
+VOICE_TRAINING_WAIT_SECONDS=20
+VOICE_TRAINING_VISIBILITY_TIMEOUT=600
+VOICE_TRAINING_DELETE_FAILED_MESSAGES=true
+```
+
+Run once for a manual smoke test:
+
+```bash
+python -m model_calling.voice_training.worker --once
+```
+
+Run continuously on the AI server:
+
+```bash
+python -m model_calling.voice_training.worker
+```
+
+Successful worker flow:
+
+```text
+SQS message
+-> S3 audio download
+-> ElevenLabs /v1/voices/add
+-> ai_voice_profiles active row
+-> voice_training_jobs COMPLETED
+```
+
 Optional voice activity detection settings:
 
 ```env

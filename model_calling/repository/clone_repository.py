@@ -50,6 +50,12 @@ class ActiveVoiceProfile:
     is_active: bool
 
 
+@dataclass(frozen=True)
+class VoiceTrainingJobFile:
+    bucket: str
+    object_key: str
+
+
 def _get_db_config() -> dict[str, Any]:
     config = {
         "host": os.getenv("DB_HOST"),
@@ -228,3 +234,213 @@ def find_active_voice_profile_by_user_uuid(user_uuid: str) -> ActiveVoiceProfile
         status=row["status"],
         is_active=bool(row["is_active"]),
     )
+
+
+def find_voice_training_job_status(job_id: int) -> str | None:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status FROM voice_training_jobs WHERE id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(
+            f"RDS voice training job status lookup failed: {exc}"
+        ) from exc
+
+    return row["status"] if row else None
+
+
+def find_voice_training_job_files(job_id: int) -> list[VoiceTrainingJobFile]:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+
+    query = """
+        SELECT bucket, object_key
+        FROM voice_training_job_files
+        WHERE voice_training_job_id = %s
+        ORDER BY id
+    """
+
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, (job_id,))
+                rows = cursor.fetchall()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(
+            f"RDS voice training job files lookup failed: {exc}"
+        ) from exc
+
+    return [
+        VoiceTrainingJobFile(bucket=row["bucket"], object_key=row["object_key"])
+        for row in rows
+    ]
+
+
+def mark_voice_training_job_processing(job_id: int) -> None:
+    _update_voice_training_job(
+        """
+        UPDATE voice_training_jobs
+        SET status = 'PROCESSING',
+            error_message = NULL,
+            started_at = COALESCE(started_at, NOW()),
+            finished_at = NULL
+        WHERE id = %s
+        """,
+        (job_id,),
+    )
+
+
+def mark_voice_training_job_failed(job_id: int, error_message: str) -> None:
+    _update_voice_training_job(
+        """
+        UPDATE voice_training_jobs
+        SET status = 'FAILED',
+            error_message = %s,
+            finished_at = NOW()
+        WHERE id = %s
+        """,
+        (_truncate_error(error_message), job_id),
+    )
+
+
+def complete_voice_training_job(
+    *,
+    job_id: int,
+    clone_id: int,
+    elevenlabs_voice_id: str,
+) -> None:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+    connection = None
+
+    try:
+        connection = pymysql.connect(**config)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE ai_voice_profiles
+                SET is_active = FALSE
+                WHERE clone_id = %s
+                """,
+                (clone_id,),
+            )
+            cursor.execute(
+                """
+                SELECT id
+                FROM ai_voice_profiles
+                WHERE voice_training_job_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (job_id,),
+            )
+            existing_profile = cursor.fetchone()
+            if existing_profile:
+                cursor.execute(
+                    """
+                    UPDATE ai_voice_profiles
+                    SET elevenlabs_voice_id = %s,
+                        status = 'ACTIVE',
+                        is_active = TRUE
+                    WHERE id = %s
+                    """,
+                    (elevenlabs_voice_id, existing_profile["id"]),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO ai_voice_profiles (
+                        clone_id,
+                        voice_training_job_id,
+                        elevenlabs_voice_id,
+                        status,
+                        is_active
+                    )
+                    VALUES (%s, %s, %s, 'ACTIVE', TRUE)
+                    """,
+                    (clone_id, job_id, elevenlabs_voice_id),
+                )
+
+            cursor.execute(
+                """
+                UPDATE voice_training_jobs
+                SET status = 'COMPLETED',
+                    error_message = NULL,
+                    finished_at = NOW()
+                WHERE id = %s
+                """,
+                (job_id,),
+            )
+        connection.commit()
+    except Exception as exc:
+        if connection:
+            connection.rollback()
+        raise CloneRepositoryError(f"RDS voice profile update failed: {exc}") from exc
+    finally:
+        if connection:
+            connection.close()
+
+
+def _update_voice_training_job(query: str, params: tuple[Any, ...]) -> None:
+    try:
+        import pymysql
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, params)
+            connection.commit()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(f"RDS voice training job update failed: {exc}") from exc
+
+
+def _truncate_error(error_message: str, limit: int = 2000) -> str:
+    normalized = error_message.strip() or "Unknown voice training error"
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
