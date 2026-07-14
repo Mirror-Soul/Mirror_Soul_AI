@@ -64,7 +64,6 @@ def _get_db_config() -> dict[str, Any]:
         "password": os.getenv("DB_PASSWORD"),
         "database": os.getenv("DB_NAME"),
         "charset": "utf8mb4",
-        "cursorclass": None,
     }
 
     missing_keys = [
