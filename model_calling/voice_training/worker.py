@@ -5,10 +5,18 @@ import mimetypes
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
+from model_calling.clone_similarity.scorer import calculate_clone_similarity
+from model_calling.clone_similarity.speaker_embedding import (
+    SpeakerSimilarityAudio,
+    SpeakerSimilarityUnavailable,
+    evaluate_speaker_similarity,
+    generate_clone_reference_audio_file,
+)
 from model_calling.repository.clone_repository import (
     CloneRepositoryError,
     complete_voice_training_job,
@@ -17,6 +25,10 @@ from model_calling.repository.clone_repository import (
     find_voice_training_job_status,
     mark_voice_training_job_failed,
     mark_voice_training_job_processing,
+)
+from model_calling.repository.clone_similarity_repository import (
+    load_clone_similarity_snapshot,
+    save_clone_similarity_score,
 )
 from model_calling.services import clone_user_voice_from_files
 
@@ -175,18 +187,135 @@ def _process_voice_training_message(
             ),
         )
     )
+    actual_voice_score = _evaluate_actual_voice_similarity(
+        original_audios=downloaded_files,
+        elevenlabs_voice_id=voice_id,
+        user_uuid=message.user_uuid,
+        job_id=message.job_id,
+    )
 
     complete_voice_training_job(
         job_id=message.job_id,
         clone_id=clone.clone_id,
         elevenlabs_voice_id=voice_id,
     )
+    try:
+        _update_clone_similarity_score(
+            user_uuid=message.user_uuid,
+            voice_training_job_id=message.job_id,
+            actual_voice_score=actual_voice_score,
+        )
+    except Exception as exc:
+        print(
+            "[CLONE_SIMILARITY] update failed after voice clone completion: "
+            f"job_id={message.job_id} user_uuid={message.user_uuid} error={exc}",
+            flush=True,
+        )
     print(
         "[VOICE_TRAINING] completed: "
         f"job_id={message.job_id} clone_id={clone.clone_id} "
         f"voice_id={_mask_voice_id(voice_id)}",
         flush=True,
     )
+
+
+def _update_clone_similarity_score(
+    *,
+    user_uuid: str,
+    voice_training_job_id: int,
+    actual_voice_score: float | None = None,
+) -> None:
+    snapshot = load_clone_similarity_snapshot(
+        user_uuid=user_uuid,
+        voice_training_job_id=voice_training_job_id,
+    )
+    score = calculate_clone_similarity(
+        snapshot,
+        actual_voice_score=actual_voice_score,
+    )
+    detail_saved = save_clone_similarity_score(score)
+    print(
+        "[CLONE_SIMILARITY] updated: "
+        f"user_uuid={user_uuid} clone_id={score.clone_id} "
+        f"total={score.total_score} voice={score.voice_score} "
+        f"interview={score.interview_score} profile={score.profile_score} "
+        f"detail_saved={detail_saved}",
+        flush=True,
+    )
+
+
+def _evaluate_actual_voice_similarity(
+    *,
+    original_audios: list[DownloadedAudio],
+    elevenlabs_voice_id: str,
+    user_uuid: str,
+    job_id: int,
+) -> float | None:
+    reference_audio_path = _build_clone_reference_audio_path(
+        user_uuid=user_uuid,
+        job_id=job_id,
+    )
+    try:
+        generate_clone_reference_audio_file(
+            elevenlabs_voice_id=elevenlabs_voice_id,
+            output_path=reference_audio_path,
+        )
+        print(
+            "[CLONE_SIMILARITY] reference audio saved: "
+            f"path={reference_audio_path}",
+            flush=True,
+        )
+    except SpeakerSimilarityUnavailable as exc:
+        print(
+            "[CLONE_SIMILARITY] reference audio generation skipped: "
+            f"{exc}",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        print(
+            "[CLONE_SIMILARITY] reference audio generation failed: "
+            f"{exc}",
+            flush=True,
+        )
+        return None
+
+    try:
+        result = evaluate_speaker_similarity(
+            original_audios=[
+                SpeakerSimilarityAudio(
+                    filename=audio.filename,
+                    content=audio.content,
+                    content_type=audio.content_type,
+                )
+                for audio in original_audios
+            ],
+            elevenlabs_voice_id=elevenlabs_voice_id,
+            reference_audio_path=reference_audio_path,
+        )
+        print(
+            "[CLONE_SIMILARITY] speaker embedding result: "
+            f"score={result.score} cosine={result.cosine_similarity} "
+            f"samples={result.original_sample_count} model={result.model_name} "
+            f"reference_audio={result.reference_audio_path}",
+            flush=True,
+        )
+        return result.score
+    except SpeakerSimilarityUnavailable as exc:
+        print(
+            "[CLONE_SIMILARITY] speaker embedding skipped: "
+            f"{exc}",
+            flush=True,
+        )
+        return None
+
+
+def _build_clone_reference_audio_path(*, user_uuid: str, job_id: int) -> Path:
+    base_dir = os.getenv(
+        "CLONE_SIMILARITY_REFERENCE_AUDIO_DIR",
+        "model_calling/assets/clone_similarity",
+    )
+    return Path(base_dir) / user_uuid / f"job-{job_id}-reference.mp3"
 
 
 def _parse_message(message_body: str) -> VoiceTrainingMessage:
