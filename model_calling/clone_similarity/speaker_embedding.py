@@ -193,8 +193,46 @@ def _average_embeddings(classifier, paths: Sequence[Path]):
 
 
 def _encode_file(classifier, path: Path):
-    embedding = classifier.encode_file(str(path))
+    if hasattr(classifier, "encode_file"):
+        embedding = classifier.encode_file(str(path))
+        return embedding.squeeze().detach().cpu()
+
+    signal = _load_audio_signal(classifier, path)
+    try:
+        import torch
+    except ImportError as exc:
+        raise SpeakerSimilarityUnavailable(
+            "torch is not installed. Install requirements-voice-similarity.txt."
+        ) from exc
+
+    with torch.no_grad():
+        embedding = classifier.encode_batch(signal.unsqueeze(0))
     return embedding.squeeze().detach().cpu()
+
+
+def _load_audio_signal(classifier, path: Path):
+    if hasattr(classifier, "load_audio"):
+        return classifier.load_audio(str(path)).squeeze()
+
+    try:
+        import torchaudio
+    except ImportError as exc:
+        raise SpeakerSimilarityUnavailable(
+            "torchaudio is not installed. Install requirements-voice-similarity.txt."
+        ) from exc
+
+    signal, sample_rate = torchaudio.load(str(path))
+    if signal.ndim > 1:
+        signal = signal.mean(dim=0)
+
+    target_sample_rate = int(getattr(classifier.hparams, "sample_rate", 16000))
+    if sample_rate != target_sample_rate:
+        signal = torchaudio.functional.resample(
+            signal,
+            sample_rate,
+            target_sample_rate,
+        )
+    return signal.squeeze()
 
 
 def _cosine_similarity(left, right) -> float:

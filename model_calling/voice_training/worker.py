@@ -308,6 +308,13 @@ def _evaluate_actual_voice_similarity(
             flush=True,
         )
         return None
+    except Exception as exc:
+        print(
+            "[CLONE_SIMILARITY] speaker embedding failed; "
+            f"using fallback score: {exc}",
+            flush=True,
+        )
+        return None
 
 
 def _build_clone_reference_audio_path(*, user_uuid: str, job_id: int) -> Path:
