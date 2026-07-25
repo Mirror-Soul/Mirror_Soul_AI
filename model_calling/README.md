@@ -90,9 +90,10 @@ SQS message
 
 After a voice clone is created, the worker calculates an internal clone
 similarity score from the member's active voice clone, onboarding interview
-coverage, and basic profile completeness. Frontend can show the total score as
-the clone similarity. If the user taps the score, show the generated explanation
-text instead of exposing the full formula.
+coverage, basic profile completeness, completed call count, and user-side talk
+log count. Frontend can show the total score as the clone similarity. If the
+user taps the score, show the generated explanation text instead of exposing the
+full formula.
 
 After each voice clone is created, the worker generates and saves a fixed
 reference sentence with the newly created ElevenLabs voice:
@@ -142,9 +143,17 @@ CLONE_SIMILARITY_EXPECTED_VOICE_SAMPLES=5
 CLONE_SIMILARITY_EXCELLENT_VOICE_SAMPLES=20
 CLONE_SIMILARITY_EXPECTED_INTERVIEWS=5
 CLONE_SIMILARITY_EXCELLENT_INTERVIEWS=15
+CLONE_SIMILARITY_EXPECTED_CALLS=3
+CLONE_SIMILARITY_EXCELLENT_CALLS=12
+CLONE_SIMILARITY_EXPECTED_TALK_LOGS=10
+CLONE_SIMILARITY_EXCELLENT_TALK_LOGS=40
 CLONE_SIMILARITY_VOICE_WEIGHT=0.60
 CLONE_SIMILARITY_INTERVIEW_WEIGHT=0.25
 CLONE_SIMILARITY_PROFILE_WEIGHT=0.15
+CLONE_SIMILARITY_SCORE_FLOOR=55
+CLONE_SIMILARITY_ONBOARDING_CAP=64
+CLONE_SIMILARITY_SCORE_MAX=92
+CLONE_SIMILARITY_SCORING_CEILING=96
 CLONE_SIMILARITY_SPEAKER_MODEL=speechbrain/spkrec-ecapa-voxceleb
 CLONE_SIMILARITY_COSINE_LOW=0.20
 CLONE_SIMILARITY_COSINE_HIGH=0.70
@@ -153,9 +162,10 @@ CLONE_SIMILARITY_REFERENCE_TEXT=안녕하세요! 처음뵙겠습니다.
 CLONE_SIMILARITY_REFERENCE_AUDIO_DIR=model_calling/assets/clone_similarity
 ```
 
-The first complete onboarding clone is intentionally calibrated around the
-low-to-mid 60s. More interviews and voice samples raise the score over time;
-scores above 90 should feel exceptional rather than automatic.
+The first complete onboarding clone is intentionally capped near 64, even when
+speaker embedding similarity is high. More interviews, voice samples, completed
+calls, and user-side talk logs raise the score over time. Scores above 90 should
+feel exceptional rather than automatic, and the default maximum score is 92.
 
 Optional voice activity detection settings:
 

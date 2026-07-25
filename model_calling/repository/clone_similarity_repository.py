@@ -68,7 +68,24 @@ def load_clone_similarity_snapshot(
                 WHERE ir.user_id = u.id
                   AND ir.answer_audio_object_key IS NOT NULL
                   AND TRIM(ir.answer_audio_object_key) <> ''
-            ) AS interview_audio_count
+            ) AS interview_audio_count,
+            (
+                SELECT COUNT(*)
+                FROM video_calls vc
+                WHERE vc.user_id = u.id
+                  AND vc.status = 'COMPLETED'
+            ) AS completed_call_count,
+            (
+                SELECT COUNT(*)
+                FROM talk_logs tl
+                JOIN video_calls vc
+                  ON vc.id = tl.video_call_id
+                WHERE vc.user_id = u.id
+                  AND vc.status = 'COMPLETED'
+                  AND tl.speaker = 'USER'
+                  AND tl.message IS NOT NULL
+                  AND TRIM(tl.message) <> ''
+            ) AS user_talk_log_count
         FROM users u
         JOIN clones c ON c.user_id = u.id
         LEFT JOIN mbti_profile mp ON mp.user_id = u.id
@@ -117,6 +134,8 @@ def load_clone_similarity_snapshot(
         interview_answer_count=int(row["interview_answer_count"] or 0),
         interview_text_count=int(row["interview_text_count"] or 0),
         interview_audio_count=int(row["interview_audio_count"] or 0),
+        completed_call_count=int(row["completed_call_count"] or 0),
+        user_talk_log_count=int(row["user_talk_log_count"] or 0),
     )
 
 

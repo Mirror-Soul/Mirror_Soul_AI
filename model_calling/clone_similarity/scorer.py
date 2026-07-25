@@ -22,6 +22,8 @@ class CloneSimilaritySnapshot:
     interview_answer_count: int
     interview_text_count: int
     interview_audio_count: int
+    completed_call_count: int = 0
+    user_talk_log_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -56,11 +58,15 @@ def calculate_clone_similarity(
     if weight_sum <= 0:
         voice_weight, interview_weight, profile_weight, weight_sum = 0.60, 0.25, 0.15, 1.0
 
-    total_score = (
+    raw_score = (
         voice_score * voice_weight
         + interview_score * interview_weight
         + profile_score * profile_weight
     ) / weight_sum
+    total_score = _calibrate_total_score(
+        raw_score=raw_score,
+        snapshot=snapshot,
+    )
 
     return CloneSimilarityScore(
         clone_id=snapshot.clone_id,
@@ -133,6 +139,138 @@ def _calculate_profile_score(snapshot: CloneSimilaritySnapshot) -> float:
     core_score = 20.0 + 45.0 * completed / len(fields)
     detail_bonus = 5.0 if _has_value(snapshot.job_description) else 0.0
     return core_score + detail_bonus
+
+
+def _calibrate_total_score(
+    *,
+    raw_score: float,
+    snapshot: CloneSimilaritySnapshot,
+) -> float:
+    if not snapshot.elevenlabs_voice_id or snapshot.voice_training_status != "COMPLETED":
+        return 0.0
+
+    floor_score = _env_float("CLONE_SIMILARITY_SCORE_FLOOR", 55.0)
+    max_score = _env_float("CLONE_SIMILARITY_SCORE_MAX", 92.0)
+    scoring_ceiling = _env_float("CLONE_SIMILARITY_SCORING_CEILING", 96.0)
+    onboarding_cap = _env_float("CLONE_SIMILARITY_ONBOARDING_CAP", 64.0)
+    data_maturity = _calculate_data_maturity(snapshot)
+    advanced_maturity = _calculate_advanced_maturity(snapshot)
+
+    calibrated = floor_score + (
+        raw_score / 100.0
+    ) * (scoring_ceiling - floor_score) * data_maturity
+    data_cap = onboarding_cap + (max_score - onboarding_cap) * advanced_maturity
+    return min(calibrated, data_cap, max_score)
+
+
+def _calculate_data_maturity(snapshot: CloneSimilaritySnapshot) -> float:
+    expected_samples = _env_int("CLONE_SIMILARITY_EXPECTED_VOICE_SAMPLES", 5)
+    excellent_samples = _env_int("CLONE_SIMILARITY_EXCELLENT_VOICE_SAMPLES", 20)
+    expected_interviews = _env_int("CLONE_SIMILARITY_EXPECTED_INTERVIEWS", 5)
+    excellent_interviews = _env_int("CLONE_SIMILARITY_EXCELLENT_INTERVIEWS", 15)
+    expected_calls = _env_int("CLONE_SIMILARITY_EXPECTED_CALLS", 3)
+    excellent_calls = _env_int("CLONE_SIMILARITY_EXCELLENT_CALLS", 12)
+    expected_talk_logs = _env_int("CLONE_SIMILARITY_EXPECTED_TALK_LOGS", 10)
+    excellent_talk_logs = _env_int("CLONE_SIMILARITY_EXCELLENT_TALK_LOGS", 40)
+
+    voice_maturity = _piecewise_ratio(
+        snapshot.voice_training_audio_count,
+        expected_samples,
+        excellent_samples,
+        expected_weight=0.10,
+        extra_weight=0.15,
+    )
+    interview_maturity = _piecewise_ratio(
+        snapshot.interview_answer_count,
+        expected_interviews,
+        excellent_interviews,
+        expected_weight=0.08,
+        extra_weight=0.15,
+    )
+    profile_maturity = 0.07 * min(_calculate_profile_score(snapshot) / 70.0, 1.0)
+    call_maturity = _piecewise_ratio(
+        snapshot.completed_call_count,
+        expected_calls,
+        excellent_calls,
+        expected_weight=0.08,
+        extra_weight=0.12,
+    )
+    talk_log_maturity = _piecewise_ratio(
+        snapshot.user_talk_log_count,
+        expected_talk_logs,
+        excellent_talk_logs,
+        expected_weight=0.07,
+        extra_weight=0.15,
+    )
+
+    max_maturity = 0.97
+    maturity = (
+        voice_maturity
+        + interview_maturity
+        + profile_maturity
+        + call_maturity
+        + talk_log_maturity
+    ) / max_maturity
+    return max(0.0, min(maturity, 1.0))
+
+
+def _calculate_advanced_maturity(snapshot: CloneSimilaritySnapshot) -> float:
+    expected_samples = _env_int("CLONE_SIMILARITY_EXPECTED_VOICE_SAMPLES", 5)
+    excellent_samples = _env_int("CLONE_SIMILARITY_EXCELLENT_VOICE_SAMPLES", 20)
+    expected_interviews = _env_int("CLONE_SIMILARITY_EXPECTED_INTERVIEWS", 5)
+    excellent_interviews = _env_int("CLONE_SIMILARITY_EXCELLENT_INTERVIEWS", 15)
+    excellent_calls = _env_int("CLONE_SIMILARITY_EXCELLENT_CALLS", 12)
+    excellent_talk_logs = _env_int("CLONE_SIMILARITY_EXCELLENT_TALK_LOGS", 40)
+
+    voice_extra = _ratio_after_expected(
+        snapshot.voice_training_audio_count,
+        expected_samples,
+        excellent_samples,
+    )
+    interview_extra = _ratio_after_expected(
+        snapshot.interview_answer_count,
+        expected_interviews,
+        excellent_interviews,
+    )
+    call_ratio = min(snapshot.completed_call_count / max(excellent_calls, 1), 1.0)
+    talk_log_ratio = min(snapshot.user_talk_log_count / max(excellent_talk_logs, 1), 1.0)
+
+    return (
+        voice_extra * 0.30
+        + interview_extra * 0.30
+        + call_ratio * 0.20
+        + talk_log_ratio * 0.20
+    )
+
+
+def _piecewise_ratio(
+    count: int,
+    expected_count: int,
+    excellent_count: int,
+    *,
+    expected_weight: float,
+    extra_weight: float,
+) -> float:
+    if count <= 0:
+        return 0.0
+    if count <= expected_count:
+        return expected_weight * count / max(expected_count, 1)
+    return expected_weight + extra_weight * _ratio_after_expected(
+        count,
+        expected_count,
+        excellent_count,
+    )
+
+
+def _ratio_after_expected(
+    count: int,
+    expected_count: int,
+    excellent_count: int,
+) -> float:
+    return min(
+        max(count - expected_count, 0) / max(excellent_count - expected_count, 1),
+        1.0,
+    )
 
 
 def _build_explanation(
