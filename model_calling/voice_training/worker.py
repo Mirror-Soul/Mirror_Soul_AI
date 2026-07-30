@@ -4,12 +4,13 @@ import json
 import mimetypes
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
+from model_calling.clone_tags.generator import generate_clone_tags
 from model_calling.clone_similarity.scorer import calculate_clone_similarity
 from model_calling.clone_similarity.speaker_embedding import (
     SpeakerSimilarityAudio,
@@ -30,6 +31,10 @@ from model_calling.repository.clone_similarity_repository import (
     load_clone_similarity_snapshot,
     save_clone_similarity_score,
 )
+from model_calling.repository.clone_tag_repository import (
+    load_clone_tag_context,
+    save_clone_tags,
+)
 from model_calling.services import clone_user_voice_from_files
 
 load_dotenv()
@@ -40,13 +45,13 @@ class VoiceTrainingWorkerError(Exception):
 
 
 @dataclass(frozen=True)
-class VoiceTrainingMessage:
+class WorkerMessage:
     job_type: str
-    source: str
-    job_id: int
     user_uuid: str
-    bucket: str
-    audio_object_keys: list[str]
+    source: str | None = None
+    job_id: int | None = None
+    bucket: str | None = None
+    audio_object_keys: list[str] = field(default_factory=list)
     requested_at: str | None = None
 
 
@@ -120,30 +125,46 @@ def _handle_sqs_message(s3_client: Any, sqs_message: dict[str, Any]) -> bool:
         return True
 
     try:
-        _process_voice_training_message(s3_client, message)
+        _process_worker_message(s3_client, message)
         return True
     except Exception as exc:
         print(
             f"[VOICE_TRAINING] job failed: job_id={message.job_id} error={exc}",
             flush=True,
         )
-        try:
-            mark_voice_training_job_failed(message.job_id, str(exc))
-        except CloneRepositoryError as db_exc:
-            print(
-                "[VOICE_TRAINING] failed to update job failure status: "
-                f"job_id={message.job_id} error={db_exc}",
-                flush=True,
-            )
+        if message.job_type == "VOICE_TRAINING" and message.job_id is not None:
+            try:
+                mark_voice_training_job_failed(message.job_id, str(exc))
+            except CloneRepositoryError as db_exc:
+                print(
+                    "[VOICE_TRAINING] failed to update job failure status: "
+                    f"job_id={message.job_id} error={db_exc}",
+                    flush=True,
+                )
         return _env_bool("VOICE_TRAINING_DELETE_FAILED_MESSAGES", True)
+
+
+def _process_worker_message(
+    s3_client: Any,
+    message: WorkerMessage,
+) -> None:
+    if message.job_type == "VOICE_TRAINING":
+        _process_voice_training_message(s3_client, message)
+        return
+    if message.job_type == "CLONE_TAG_REFRESH":
+        _process_clone_tag_refresh_message(message)
+        return
+    raise VoiceTrainingWorkerError(f"Unsupported jobType: {message.job_type}")
 
 
 def _process_voice_training_message(
     s3_client: Any,
-    message: VoiceTrainingMessage,
+    message: WorkerMessage,
 ) -> None:
-    if message.job_type != "VOICE_TRAINING":
-        raise VoiceTrainingWorkerError(f"Unsupported jobType: {message.job_type}")
+    if message.job_id is None:
+        raise VoiceTrainingWorkerError("VOICE_TRAINING requires jobId")
+    if not message.bucket:
+        raise VoiceTrainingWorkerError("VOICE_TRAINING requires bucket")
 
     current_status = find_voice_training_job_status(message.job_id)
     if current_status == "COMPLETED":
@@ -211,10 +232,27 @@ def _process_voice_training_message(
             f"job_id={message.job_id} user_uuid={message.user_uuid} error={exc}",
             flush=True,
         )
+    try:
+        _update_clone_tags(user_uuid=message.user_uuid)
+    except Exception as exc:
+        print(
+            "[CLONE_TAGS] update failed after voice clone completion: "
+            f"job_id={message.job_id} user_uuid={message.user_uuid} error={exc}",
+            flush=True,
+        )
     print(
         "[VOICE_TRAINING] completed: "
         f"job_id={message.job_id} clone_id={clone.clone_id} "
         f"voice_id={_mask_voice_id(voice_id)}",
+        flush=True,
+    )
+
+
+def _process_clone_tag_refresh_message(message: WorkerMessage) -> None:
+    _update_clone_tags(user_uuid=message.user_uuid)
+    print(
+        "[CLONE_TAGS] refresh completed: "
+        f"user_uuid={message.user_uuid} source={message.source or 'unknown'}",
         flush=True,
     )
 
@@ -240,6 +278,18 @@ def _update_clone_similarity_score(
         f"total={score.total_score} voice={score.voice_score} "
         f"interview={score.interview_score} profile={score.profile_score} "
         f"detail_saved={detail_saved}",
+        flush=True,
+    )
+
+
+def _update_clone_tags(*, user_uuid: str) -> None:
+    context = load_clone_tag_context(user_uuid=user_uuid)
+    tag_result = generate_clone_tags(context)
+    detail_saved = save_clone_tags(tag_result)
+    print(
+        "[CLONE_TAGS] updated: "
+        f"user_uuid={user_uuid} clone_id={tag_result.clone_id} "
+        f"tags={','.join(tag_result.tags)} detail_saved={detail_saved}",
         flush=True,
     )
 
@@ -325,7 +375,7 @@ def _build_clone_reference_audio_path(*, user_uuid: str, job_id: int) -> Path:
     return Path(base_dir) / user_uuid / f"job-{job_id}-reference.mp3"
 
 
-def _parse_message(message_body: str) -> VoiceTrainingMessage:
+def _parse_message(message_body: str) -> WorkerMessage:
     data = json.loads(message_body)
     audio_object_keys = data.get("audioObjectKeys") or []
     if not isinstance(audio_object_keys, list):
@@ -333,7 +383,7 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
 
     missing_fields = [
         field
-        for field in ("jobType", "source", "jobId", "userUuid", "bucket")
+        for field in ("jobType", "userUuid")
         if data.get(field) in (None, "")
     ]
     if missing_fields:
@@ -341,20 +391,37 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
             f"Missing required field(s): {', '.join(missing_fields)}"
         )
 
-    return VoiceTrainingMessage(
-        job_type=str(data["jobType"]),
-        source=str(data["source"]),
-        job_id=int(data["jobId"]),
+    job_type = str(data["jobType"])
+    if job_type == "VOICE_TRAINING":
+        missing_fields = [
+            field
+            for field in ("source", "jobId", "bucket")
+            if data.get(field) in (None, "")
+        ]
+        if missing_fields:
+            raise VoiceTrainingWorkerError(
+                f"Missing required field(s): {', '.join(missing_fields)}"
+            )
+
+    return WorkerMessage(
+        job_type=job_type,
+        source=str(data["source"]) if data.get("source") is not None else None,
+        job_id=int(data["jobId"]) if data.get("jobId") is not None else None,
         user_uuid=str(data["userUuid"]),
-        bucket=str(data["bucket"]),
+        bucket=str(data["bucket"]) if data.get("bucket") is not None else None,
         audio_object_keys=[str(object_key) for object_key in audio_object_keys],
         requested_at=data.get("requestedAt"),
     )
 
 
-def _resolve_audio_sources(message: VoiceTrainingMessage) -> list[tuple[str, str]]:
+def _resolve_audio_sources(message: WorkerMessage) -> list[tuple[str, str]]:
     if message.audio_object_keys:
+        if not message.bucket:
+            raise VoiceTrainingWorkerError("audioObjectKeys require bucket")
         return [(message.bucket, object_key) for object_key in message.audio_object_keys]
+
+    if message.job_id is None:
+        raise VoiceTrainingWorkerError("voice training jobId is required")
 
     return [
         (job_file.bucket, job_file.object_key)

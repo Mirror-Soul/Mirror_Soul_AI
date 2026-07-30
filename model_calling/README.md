@@ -53,6 +53,19 @@ Expected SQS message contract:
 }
 ```
 
+The same worker can refresh profile tags after profile updates, new interview
+answers, or completed calls. Backend can publish this lighter message whenever
+the member's clone profile data changes:
+
+```json
+{
+  "jobType": "CLONE_TAG_REFRESH",
+  "source": "CALL_COMPLETED",
+  "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
+  "requestedAt": "2026-07-14T00:00:00Z"
+}
+```
+
 Additional environment variables:
 
 ```env
@@ -83,6 +96,7 @@ SQS message
 -> ElevenLabs /v1/voices/add
 -> ai_voice_profiles active row
 -> clone similarity score update
+-> clone profile tag update
 -> voice_training_jobs COMPLETED
 ```
 
@@ -166,6 +180,47 @@ The first complete onboarding clone is intentionally capped near 64, even when
 speaker embedding similarity is high. More interviews, voice samples, completed
 calls, and user-side talk logs raise the score over time. Scores above 90 should
 feel exceptional rather than automatic, and the default maximum score is 92.
+
+## Clone profile tags
+
+After a voice clone is created, the worker also generates short personality
+hashtags for the frontend's `AI Personality Scan` area. Tags are generated from
+MBTI, basic profile text, interview answers, and user-side talk logs. This is a
+deterministic rule-based pass, so it does not add LLM latency or token cost.
+The same generation path is used by `CLONE_TAG_REFRESH`, so tags are replaced
+with the latest best-fit set as member interests change over time.
+
+Examples:
+
+```text
+#사고가 깊은
+#차분한 말투
+#성장 지향적
+#예술적 감수성
+```
+
+If the optional tag table exists, the worker stores the current tag set there.
+If the table is missing, the worker logs the generated tags and continues
+without failing the voice training job.
+
+```sql
+CREATE TABLE ai_clone_tags (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    clone_id BIGINT NOT NULL,
+    tag_text VARCHAR(50) NOT NULL,
+    rank_order INT NOT NULL,
+    source VARCHAR(30) NOT NULL DEFAULT 'AI_PERSONALITY_SCAN',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_ai_clone_tags_clone_source_rank (clone_id, source, rank_order)
+);
+```
+
+Optional tuning:
+
+```env
+CLONE_TAG_MAX_COUNT=4
+```
 
 Optional voice activity detection settings:
 
