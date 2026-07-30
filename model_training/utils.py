@@ -179,3 +179,31 @@ def build_training_text(
     ]
 
     return "\n".join(sections)
+
+
+def create_call_memory_document_id(user_id: str, call_id: int | str | None = None) -> str:
+    """Create a unique vector-store document id for one spoken call utterance."""
+    safe_user_id = re.sub(r"[^0-9A-Za-z_.-]", "_", user_id)
+    call_key = str(call_id) if call_id is not None else "unknown"
+    safe_call_key = re.sub(r"[^0-9A-Za-z_.-]", "_", call_key)
+    return f"call_memory_{safe_user_id}_{safe_call_key}_{uuid4().hex}"
+
+
+def build_call_memory_text(
+    *,
+    transcript: str,
+    clone_user_id: str | None = None,
+) -> str:
+    """Build a RAG document from what the real caller said during a call."""
+    sections = [
+        "[Call Memory]",
+        "This is something the member said during a realtime voice call.",
+        "",
+        "[Spoken By Member]",
+        transcript.strip(),
+    ]
+
+    if clone_user_id:
+        sections.extend(["", f"[Conversation Partner Clone User UUID]\n{clone_user_id}"])
+
+    return "\n".join(sections)

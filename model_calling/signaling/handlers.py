@@ -7,6 +7,7 @@ from model_calling.repository.clone_repository import (
     CloneRepositoryError,
     CloneRepositoryNotConfigured,
     find_clone_by_user_uuid,
+    find_call_participants,
 )
 
 from model_calling.webrtc.peer import (
@@ -92,6 +93,22 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
         )
         return
 
+    caller_user_uuid = None
+    try:
+        participants = await asyncio.to_thread(find_call_participants, int(call_id))
+        caller_user_uuid = participants.caller_user_uuid
+        if participants.clone_user_uuid != clone_info.clone_user_uuid:
+            print(
+                "[SIGNALING] call clone mismatch: "
+                f"callId={call_id} invite_clone={clone_info.clone_user_uuid} "
+                f"db_clone={participants.clone_user_uuid}",
+                flush=True,
+            )
+    except (TypeError, ValueError):
+        print(f"[SIGNALING] callId is not numeric; caller lookup skipped: {call_id}", flush=True)
+    except CloneRepositoryError as exc:
+        print(f"[SIGNALING] caller lookup skipped: callId={call_id} error={exc}", flush=True)
+
     accept_message = {
         "type": "CALL_ACCEPT",
         "roomId": message.get("roomId"),
@@ -105,8 +122,13 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
     }
 
     await send_json(ws, accept_message)
-    register_call_user(call_id, clone_info.clone_user_uuid)
-    print(f"[SIGNALING] CALL_ACCEPT sent: callId={call_id}")
+    register_call_user(call_id, clone_info.clone_user_uuid, caller_user_uuid)
+    print(
+        "[SIGNALING] CALL_ACCEPT sent: "
+        f"callId={call_id} clone_user={clone_info.clone_user_uuid} "
+        f"learning_user={caller_user_uuid or 'none'}",
+        flush=True,
+    )
 
 
 async def send_call_reject(

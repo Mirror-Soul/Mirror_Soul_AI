@@ -5,7 +5,9 @@ from openai import OpenAI
 
 from model_training.utils import (
     build_member_profile_summary_text,
+    build_call_memory_text,
     build_training_text,
+    create_call_memory_document_id,
     create_member_profile_document_id,
     create_document_id,
     create_sample_id,
@@ -160,6 +162,50 @@ def add_member_profile_to_rag(
         "status": "stored",
         "keywords": keywords,
         "profileSummary": text,
+    }
+
+
+def add_call_utterance_to_rag(
+    *,
+    user_id: str,
+    transcript: str,
+    call_id: int | str | None = None,
+    clone_user_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_transcript = transcript.strip()
+    if not normalized_transcript:
+        return {
+            "status": "skipped",
+            "reason": "empty_transcript",
+        }
+
+    document_id = create_call_memory_document_id(user_id, call_id)
+    text = build_call_memory_text(
+        transcript=normalized_transcript,
+        clone_user_id=clone_user_id,
+    )
+    embedding = create_embedding(text)
+
+    metadata: dict[str, Any] = {
+        "userId": user_id,
+        "sourceType": "call_user_utterance",
+        "transcriptChars": len(normalized_transcript),
+    }
+    if call_id is not None:
+        metadata["callId"] = str(call_id)
+    if clone_user_id:
+        metadata["cloneUserId"] = clone_user_id
+
+    collection.add(
+        ids=[document_id],
+        documents=[text],
+        embeddings=[embedding],
+        metadatas=[metadata],
+    )
+
+    return {
+        "documentId": document_id,
+        "status": "stored",
     }
 
 

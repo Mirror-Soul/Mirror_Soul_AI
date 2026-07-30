@@ -14,7 +14,7 @@ from model_calling.services import process_llm, process_stt, process_tts_bytes
 from model_calling.utils import load_user_persona
 from model_calling.realtime.audio import QueuedAudioTrack, receive_utterances
 from model_training.base_profiles import get_mbti_base_profile
-from model_training.services import search_user_memories
+from model_training.services import add_call_utterance_to_rag, search_user_memories
 
 
 def _calculate_age(birth_date: date | None) -> int | None:
@@ -117,21 +117,95 @@ async def load_runtime_context(
     )
 
 
-async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
+def _call_memory_enabled() -> bool:
+    return os.getenv("REALTIME_CALL_MEMORY_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _call_memory_min_chars() -> int:
+    try:
+        return int(os.getenv("REALTIME_CALL_MEMORY_MIN_CHARS", "8"))
+    except ValueError:
+        return 8
+
+
+async def _store_call_memory(
+    *,
+    learning_user_id: str | None,
+    clone_user_id: str,
+    call_id: int | str | None,
+    transcript: str,
+) -> None:
+    normalized_transcript = transcript.strip()
+    if not _call_memory_enabled():
+        return
+    if not learning_user_id:
+        print("[CALL_MEMORY] skipped: learning user missing", flush=True)
+        return
+    if len(normalized_transcript) < _call_memory_min_chars():
+        print(
+            "[CALL_MEMORY] skipped: transcript too short "
+            f"user={learning_user_id} chars={len(normalized_transcript)}",
+            flush=True,
+        )
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            add_call_utterance_to_rag,
+            user_id=learning_user_id,
+            transcript=normalized_transcript,
+            call_id=call_id,
+            clone_user_id=clone_user_id,
+        )
+        print(
+            "[CALL_MEMORY] stored: "
+            f"learning_user={learning_user_id} clone_user={clone_user_id} "
+            f"callId={call_id or 'none'} documentId={result.get('documentId')}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            "[CALL_MEMORY] store failed: "
+            f"learning_user={learning_user_id} callId={call_id or 'none'} error={exc!r}",
+            flush=True,
+        )
+
+
+async def generate_reply_audio(
+    clone_user_id: str,
+    wav_bytes: bytes,
+    *,
+    learning_user_id: str | None = None,
+    call_id: int | str | None = None,
+) -> bytes | None:
     print(
-        f"[REALTIME] STT start: user={user_id} wav_bytes={len(wav_bytes)}",
+        f"[REALTIME] STT start: clone_user={clone_user_id} wav_bytes={len(wav_bytes)}",
         flush=True,
     )
     transcript = await process_stt(wav_bytes, "realtime_utterance.wav")
     if not transcript:
-        print(f"[REALTIME] STT empty result: user={user_id}", flush=True)
+        print(f"[REALTIME] STT empty result: clone_user={clone_user_id}", flush=True)
         return None
 
-    print(f"[REALTIME] STT user={user_id}: {transcript}", flush=True)
-    user_persona, personality, speech, mbti = await load_runtime_context(user_id)
+    print(f"[REALTIME] STT clone_user={clone_user_id}: {transcript}", flush=True)
+    asyncio.create_task(
+        _store_call_memory(
+            learning_user_id=learning_user_id,
+            clone_user_id=clone_user_id,
+            call_id=call_id,
+            transcript=transcript,
+        )
+    )
+
+    user_persona, personality, speech, mbti = await load_runtime_context(clone_user_id)
     print(
         "[REALTIME] context ready: "
-        f"user={user_id} mbti={mbti or 'none'} "
+        f"clone_user={clone_user_id} mbti={mbti or 'none'} "
         f"voice_id={'set' if speech.voice_id else 'fallback-or-missing'}",
         flush=True,
     )
@@ -139,19 +213,19 @@ async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
     try:
         memories = await asyncio.to_thread(
             search_user_memories,
-            user_id,
+            clone_user_id,
             transcript,
             5,
         )
         print(
-            f"[REALTIME] RAG lookup complete: user={user_id} count={len(memories)}",
+            f"[REALTIME] RAG lookup complete: clone_user={clone_user_id} count={len(memories)}",
             flush=True,
         )
     except Exception as exc:
         print(f"[REALTIME] RAG lookup skipped: {exc}", flush=True)
         memories = []
 
-    print(f"[REALTIME] LLM start: user={user_id}", flush=True)
+    print(f"[REALTIME] LLM start: clone_user={clone_user_id}", flush=True)
     response_text = await process_llm(
         user_text=transcript,
         user_persona=user_persona,
@@ -160,16 +234,16 @@ async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
         mbti_base_profile=get_mbti_base_profile(mbti),
         retrieved_memories=memories,
     )
-    print(f"[REALTIME] LLM user={user_id}: {response_text}", flush=True)
+    print(f"[REALTIME] LLM clone_user={clone_user_id}: {response_text}", flush=True)
 
-    print(f"[REALTIME] TTS start: user={user_id}", flush=True)
+    print(f"[REALTIME] TTS start: clone_user={clone_user_id}", flush=True)
     tts_bytes = await process_tts_bytes(
         ai_text=response_text,
         speech=speech,
         personality=personality,
     )
     print(
-        f"[REALTIME] TTS complete: user={user_id} audio_bytes={len(tts_bytes)}",
+        f"[REALTIME] TTS complete: clone_user={clone_user_id} audio_bytes={len(tts_bytes)}",
         flush=True,
     )
     return tts_bytes
@@ -177,7 +251,9 @@ async def generate_reply_audio(user_id: str, wav_bytes: bytes) -> bytes | None:
 
 async def start_realtime_audio(
     *,
-    user_id: str,
+    clone_user_id: str,
+    learning_user_id: str | None = None,
+    call_id: int | str | None = None,
     incoming_track: Any,
     output_track: QueuedAudioTrack,
     utterance_queue: asyncio.Queue[bytes],
@@ -189,7 +265,8 @@ async def start_realtime_audio(
         await utterance_queue.put(wav_bytes)
         print(
             "[REALTIME] utterance enqueued: "
-            f"user={user_id} queue_size={utterance_queue.qsize()} "
+            f"clone_user={clone_user_id} learning_user={learning_user_id or 'none'} "
+            f"queue_size={utterance_queue.qsize()} "
             f"wav_bytes={len(wav_bytes)}",
             flush=True,
         )
@@ -199,22 +276,31 @@ async def start_realtime_audio(
             wav_bytes = await utterance_queue.get()
             print(
                 "[REALTIME] utterance dequeued: "
-                f"user={user_id} queue_size={utterance_queue.qsize()} "
+                f"clone_user={clone_user_id} learning_user={learning_user_id or 'none'} "
+                f"queue_size={utterance_queue.qsize()} "
                 f"wav_bytes={len(wav_bytes)}",
                 flush=True,
             )
             try:
-                reply_audio = await generate_reply_audio(user_id, wav_bytes)
+                reply_audio = await generate_reply_audio(
+                    clone_user_id,
+                    wav_bytes,
+                    learning_user_id=learning_user_id,
+                    call_id=call_id,
+                )
                 if reply_audio:
                     print(
                         "[REALTIME] queueing reply audio: "
-                        f"user={user_id} audio_bytes={len(reply_audio)}",
+                        f"clone_user={clone_user_id} audio_bytes={len(reply_audio)}",
                         flush=True,
                     )
                     output_track.enqueue_encoded_audio(reply_audio)
                     print("[REALTIME] reply audio queued", flush=True)
                 else:
-                    print(f"[REALTIME] no reply audio generated: user={user_id}", flush=True)
+                    print(
+                        f"[REALTIME] no reply audio generated: clone_user={clone_user_id}",
+                        flush=True,
+                    )
             except CloneRepositoryError as exc:
                 print(f"[REALTIME] member profile lookup failed: {exc}", flush=True)
             except Exception as exc:
@@ -222,14 +308,19 @@ async def start_realtime_audio(
             finally:
                 utterance_queue.task_done()
 
-    print(f"[REALTIME] starting realtime audio tasks: user={user_id}", flush=True)
+    print(
+        "[REALTIME] starting realtime audio tasks: "
+        f"clone_user={clone_user_id} learning_user={learning_user_id or 'none'}",
+        flush=True,
+    )
     receiver_task = asyncio.create_task(
         receive_utterances(incoming_track, output_track, enqueue_utterance)
     )
     pipeline_task = asyncio.create_task(process_queue())
     print(
         "[REALTIME] realtime audio tasks started: "
-        f"user={user_id} receiver_task={id(receiver_task)} "
+        f"clone_user={clone_user_id} learning_user={learning_user_id or 'none'} "
+        f"receiver_task={id(receiver_task)} "
         f"pipeline_task={id(pipeline_task)}",
         flush=True,
     )

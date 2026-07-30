@@ -13,21 +13,40 @@ class WebRTCSession:
     caller_signal_id: str
     peer_connection: RTCPeerConnection
     clone_user_uuid: str
+    caller_user_uuid: str | None
     output_track: Any
     utterance_queue: asyncio.Queue[bytes]
     receiver_task: asyncio.Task | None = None
     pipeline_task: asyncio.Task | None = None
 
 
+@dataclass(frozen=True)
+class CallUserContext:
+    clone_user_uuid: str
+    caller_user_uuid: str | None = None
+
+
 _sessions: dict[int, WebRTCSession] = {}
-_call_users: dict[int, str] = {}
+_call_users: dict[int, CallUserContext] = {}
 
 
-def register_call_user(call_id: int, clone_user_uuid: str) -> None:
-    _call_users[call_id] = clone_user_uuid
+def register_call_user(
+    call_id: int,
+    clone_user_uuid: str,
+    caller_user_uuid: str | None = None,
+) -> None:
+    _call_users[call_id] = CallUserContext(
+        clone_user_uuid=clone_user_uuid,
+        caller_user_uuid=caller_user_uuid,
+    )
 
 
 def get_call_user(call_id: int) -> str | None:
+    context = _call_users.get(call_id)
+    return context.clone_user_uuid if context else None
+
+
+def get_call_user_context(call_id: int) -> CallUserContext | None:
     return _call_users.get(call_id)
 
 

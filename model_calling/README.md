@@ -230,6 +230,8 @@ REALTIME_VAD_SILENCE_SECONDS=0.8
 REALTIME_VAD_MIN_SPEECH_SECONDS=0.7
 REALTIME_VAD_MAX_SPEECH_SECONDS=15
 REALTIME_VAD_STARTUP_GRACE_SECONDS=1.5
+REALTIME_CALL_MEMORY_ENABLED=true
+REALTIME_CALL_MEMORY_MIN_CHARS=8
 ```
 
 Successful conversation logs:
@@ -238,12 +240,19 @@ Successful conversation logs:
 [WEBRTC] track received: kind=audio
 [REALTIME] STT user=...: ...
 [REALTIME] LLM user=...: ...
+[CALL_MEMORY] stored: learning_user=... clone_user=... callId=...
 [REALTIME] reply audio queued
 ```
 
 If `data/{user_id}/persona.json` exists, the realtime pipeline uses its
 personality, speech style, and ElevenLabs voice ID. Otherwise it loads the
 member profile and MBTI from RDS.
+
+During realtime calls, `cloneUserUuid` selects which clone speaks. The caller is
+looked up from `video_calls.user_id`, and the caller's own STT transcript is
+stored in the RAG collection as `sourceType=call_user_utterance`. This lets a
+member's own clone learn from what the member said even when the member was
+talking to somebody else's clone.
 
 For RDS-backed calls, the pipeline first looks for an active voice profile:
 

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from model_calling.webrtc.session import (
     WebRTCSession,
     close_session,
-    get_call_user,
+    get_call_user_context,
     get_session,
     save_session,
 )
@@ -89,11 +89,14 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
         async def start_pipeline() -> None:
             print(
                 "[WEBRTC] starting realtime pipeline for track: "
-                f"callId={call_id} user={session.clone_user_uuid}",
+                f"callId={call_id} clone_user={session.clone_user_uuid} "
+                f"learning_user={session.caller_user_uuid or 'none'}",
                 flush=True,
             )
             receiver_task, pipeline_task = await start_realtime_audio(
-                user_id=session.clone_user_uuid,
+                clone_user_id=session.clone_user_uuid,
+                learning_user_id=session.caller_user_uuid,
+                call_id=call_id,
                 incoming_track=track,
                 output_track=session.output_track,
                 utterance_queue=session.utterance_queue,
@@ -122,8 +125,8 @@ async def create_answer_from_offer(
     session = get_session(call_id)
 
     if session is None:
-        clone_user_uuid = get_call_user(call_id)
-        if not clone_user_uuid:
+        call_context = get_call_user_context(call_id)
+        if not call_context:
             raise ValueError(f"Call user not registered: callId={call_id}")
 
         pc = create_peer_connection(call_id)
@@ -136,14 +139,17 @@ async def create_answer_from_offer(
             ai_signal_id=ai_signal_id,
             caller_signal_id=caller_signal_id,
             peer_connection=pc,
-            clone_user_uuid=clone_user_uuid,
+            clone_user_uuid=call_context.clone_user_uuid,
+            caller_user_uuid=call_context.caller_user_uuid,
             output_track=output_track,
             utterance_queue=asyncio.Queue(maxsize=2),
         )
         save_session(session)
         print(
             "[WEBRTC] session created: "
-            f"callId={call_id} roomId={room_id} user={clone_user_uuid}",
+            f"callId={call_id} roomId={room_id} "
+            f"clone_user={call_context.clone_user_uuid} "
+            f"learning_user={call_context.caller_user_uuid or 'none'}",
             flush=True,
         )
 

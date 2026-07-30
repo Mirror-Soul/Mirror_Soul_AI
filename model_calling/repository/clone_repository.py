@@ -56,6 +56,14 @@ class VoiceTrainingJobFile:
     object_key: str
 
 
+@dataclass(frozen=True)
+class CallParticipantInfo:
+    call_id: int
+    caller_user_uuid: str
+    clone_user_uuid: str
+    clone_id: int
+
+
 def _get_db_config() -> dict[str, Any]:
     config = {
         "host": os.getenv("DB_HOST"),
@@ -302,6 +310,54 @@ def find_voice_training_job_files(job_id: int) -> list[VoiceTrainingJobFile]:
         VoiceTrainingJobFile(bucket=row["bucket"], object_key=row["object_key"])
         for row in rows
     ]
+
+
+def find_call_participants(call_id: int) -> CallParticipantInfo:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+    except ImportError as exc:
+        raise CloneRepositoryNotConfigured(
+            "PyMySQL is not installed. Add PyMySQL to requirements.txt and install it."
+        ) from exc
+
+    config = _get_db_config()
+    config["cursorclass"] = DictCursor
+
+    query = """
+        SELECT
+            vc.id AS call_id,
+            caller.uuid AS caller_user_uuid,
+            clone_owner.uuid AS clone_user_uuid,
+            c.id AS clone_id
+        FROM video_calls vc
+        JOIN users caller ON caller.id = vc.user_id
+        JOIN clones c ON c.id = vc.clone_id
+        JOIN users clone_owner ON clone_owner.id = c.user_id
+        WHERE vc.id = %s
+        LIMIT 1
+    """
+
+    try:
+        connection = pymysql.connect(**config)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, (call_id,))
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise CloneRepositoryError(f"RDS call participant lookup failed: {exc}") from exc
+
+    if not row:
+        raise CloneNotFound(f"Call not found: {call_id}")
+
+    return CallParticipantInfo(
+        call_id=row["call_id"],
+        caller_user_uuid=str(row["caller_user_uuid"]),
+        clone_user_uuid=str(row["clone_user_uuid"]),
+        clone_id=row["clone_id"],
+    )
 
 
 def mark_voice_training_job_processing(job_id: int) -> None:
