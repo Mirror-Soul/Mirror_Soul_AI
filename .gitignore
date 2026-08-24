@@ -25,6 +25,8 @@ data/*
 # Generated outputs
 outputs/*
 !outputs/.gitkeep
+tmp/face_training/
+contact-sheet*.jpg
 
 # RAG / vector DB local files
 rag_store/*
