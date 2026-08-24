@@ -9,6 +9,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from model_training.face_training.frame_analyzer import (
+    FrameQualityConfig,
+    FrameSelectionResult,
+    analyze_face_frames,
+)
 from model_training.face_training.message import (
     FaceTrainingMessage,
     FaceTrainingMessageError,
@@ -152,6 +157,7 @@ def _preprocess_face_training_message(
     ]
 
     preprocess_results = []
+    frame_selection_results = []
     for index, video in enumerate(downloaded_videos, start=1):
         result = preprocess_face_video(
             video.local_path,
@@ -169,6 +175,11 @@ def _preprocess_face_training_message(
             ),
         )
         preprocess_results.append(result)
+        selection = analyze_face_frames(
+            result.frame_paths,
+            config=_frame_quality_config(),
+        )
+        frame_selection_results.append(selection)
         print(
             "[FACE_TRAINING] video preprocessed: "
             f"path={video.local_path} duration={result.metadata.duration_seconds:.2f}s "
@@ -176,11 +187,24 @@ def _preprocess_face_training_message(
             f"frames={len(result.frame_paths)}",
             flush=True,
         )
+        print(
+            "[FACE_TRAINING] frame analysis completed: "
+            f"accepted={selection.accepted_count} "
+            f"rejected={selection.rejected_count} "
+            f"quality_gate={selection.quality_gate_passed} "
+            f"source={selection.selected_source_path}",
+            flush=True,
+        )
 
     manifest_path = workspace / "preprocess-manifest.json"
     manifest_path.write_text(
         json.dumps(
-            _build_manifest(message, downloaded_videos, preprocess_results),
+            _build_manifest(
+                message,
+                downloaded_videos,
+                preprocess_results,
+                frame_selection_results,
+            ),
             ensure_ascii=False,
             indent=2,
         ),
@@ -269,6 +293,7 @@ def _build_manifest(
     message: FaceTrainingMessage,
     downloaded_videos: list[DownloadedFaceVideo],
     preprocess_results: list[FaceVideoPreprocessResult],
+    frame_selection_results: list[FrameSelectionResult],
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -283,10 +308,27 @@ def _build_manifest(
                 "sizeBytes": video.size_bytes,
                 "metadata": result.metadata.to_dict(),
                 "frames": [str(path) for path in result.frame_paths],
+                "frameSelection": selection.to_dict(),
             }
-            for video, result in zip(downloaded_videos, preprocess_results)
+            for video, result, selection in zip(
+                downloaded_videos,
+                preprocess_results,
+                frame_selection_results,
+            )
         ],
     }
+
+
+def _frame_quality_config() -> FrameQualityConfig:
+    return FrameQualityConfig(
+        min_sharpness=_env_float("FACE_TRAINING_MIN_SHARPNESS", 40.0),
+        min_brightness=_env_float("FACE_TRAINING_MIN_BRIGHTNESS", 40.0),
+        max_brightness=_env_float("FACE_TRAINING_MAX_BRIGHTNESS", 215.0),
+        min_contrast=_env_float("FACE_TRAINING_MIN_CONTRAST", 18.0),
+        min_face_coverage=_env_float("FACE_TRAINING_MIN_FACE_COVERAGE", 0.05),
+        max_face_coverage=_env_float("FACE_TRAINING_MAX_FACE_COVERAGE", 0.70),
+        max_center_offset=_env_float("FACE_TRAINING_MAX_CENTER_OFFSET", 0.55),
+    )
 
 
 def _safe_filename(object_key: str) -> str:

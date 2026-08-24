@@ -29,6 +29,8 @@ python -m model_training.face_training.worker --once --dry-run
 - S3 얼굴 영상 다운로드
 - FFprobe 영상 메타데이터 검사
 - FFmpeg 프레임 추출
+- 선명도, 밝기, 대비, 얼굴 크기 및 중앙 정렬 품질 검사
+- 정면 및 좌우 프로필 대표 프레임 자동 선택
 - 작업별 전처리 manifest 저장
 - SQS 메시지 유지
 
@@ -49,6 +51,12 @@ python -m model_training.face_training.worker --once --dry-run
 
 LivePortrait 캐시 생성, 결과 S3 업로드, 백엔드 완료 처리가 연결되기 전에는
 상시 워커로 실행하지 않는다.
+
+GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
+
+```bash
+python -m pip install -r requirements-face.txt
+```
 
 학교 GPU 서버처럼 AWS IAM Role이 없는 외부 서버에서는 얼굴 작업 큐 수신과
 S3 입출력만 허용한 제한적 AWS 자격 증명을 환경변수로 주입해야 한다. 실제 키는
