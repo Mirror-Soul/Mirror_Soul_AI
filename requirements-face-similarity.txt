@@ -1,0 +1,3 @@
+# Face similarity evaluation on top of the face preprocessing environment.
+-r requirements-face.txt
+insightface==1.0.1

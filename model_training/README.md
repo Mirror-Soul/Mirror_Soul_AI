@@ -82,6 +82,54 @@ GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
 python -m pip install -r requirements-face.txt
 ```
 
+### 얼굴 유사도 평가
+
+LivePortrait 결과와 원본 회원 얼굴을 비교하려면 별도 의존성을 설치하고 설정을
+활성화한다.
+
+```bash
+python -m pip install -r requirements-face-similarity.txt
+```
+
+```env
+FACE_SIMILARITY_ENABLE=true
+FACE_SIMILARITY_REQUIRED=false
+FACE_SIMILARITY_ACCEPT_INSIGHTFACE_NON_COMMERCIAL_LICENSE=true
+FACE_SIMILARITY_CALIBRATION_VERSION=provisional-v1
+FACE_SIMILARITY_CALIBRATED=false
+```
+
+InsightFace 공개 모델 가중치는 비상업 연구 용도로만 사용한다. 라이선스를 확인하고
+동의한 개발 환경에서만 승인 설정을 `true`로 바꾼다.
+
+평가는 생성 영상에서 균등 추출한 프레임을 회원의 품질 통과 원본 프레임 및 같은
+시점의 driving video 프레임과 비교한다. 결과는 manifest의 `faceSimilarity`에
+기록된다.
+
+- `score`: UI와 향후 종합 유사도 계산에 사용할 0~95 얼굴 점수
+- `identityScore`: 얼굴 임베딩 기반 정체성 보존 점수
+- `renderQualityScore`: 얼굴 검출률, 시간적 안정성, 선명도 보존 점수
+- `confidence`: 평가 표본 충분성을 나타내는 `low`, `medium`, `high`
+- `cosineSimilarity`: 재보정에 사용할 원시 코사인 유사도
+- `calibrationVersion`, `calibrated`: 점수 보정 버전과 검증 완료 여부
+
+코사인 유사도는 확률이나 퍼센트가 아니다. 현재 기본 임계값은 파이프라인 검증용
+`provisional-v1`이므로 `calibrated=false`로 유지한다. 여러 회원의 동일인 결과와
+다른 사람 결과를 모아 임계값을 보정한 뒤에만 UI의 공식 얼굴 유사도로 사용한다.
+얼굴 임베딩 자체는 생체정보이므로 manifest나 DB에 저장하지 않고 집계 지표만
+보관한다.
+
+생성 결과 하나를 수동 평가할 수도 있다.
+
+```bash
+python -m model_training.face_training.face_similarity \
+  --reference /path/to/front.jpg \
+  --reference /path/to/left-profile.jpg \
+  --reference /path/to/right-profile.jpg \
+  --generated /path/to/generated.mp4 \
+  --driving /path/to/original-driving.mp4
+```
+
 학교 GPU 서버처럼 AWS IAM Role이 없는 외부 서버에서는 얼굴 작업 큐 수신과
 S3 입출력만 허용한 제한적 AWS 자격 증명을 환경변수로 주입해야 한다. 실제 키는
 `.env` 또는 Git에 커밋하지 않는다.

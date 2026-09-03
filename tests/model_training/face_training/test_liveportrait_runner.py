@@ -1,8 +1,10 @@
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from model_training.face_training.liveportrait_runner import (
     LivePortraitConfig,
@@ -21,9 +23,11 @@ class LivePortraitRunnerTests(unittest.TestCase):
             source.write_bytes(b"source")
             driving.write_bytes(b"driving")
             captured_command = []
+            captured_environment = {}
 
             def fake_runner(command, **kwargs):
                 captured_command.extend(command)
+                captured_environment.update(kwargs["env"])
                 output_dir = Path(command[command.index("-o") + 1])
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / "source--driving.mp4").write_bytes(b"result")
@@ -37,16 +41,24 @@ class LivePortraitRunnerTests(unittest.TestCase):
                     stderr="",
                 )
 
-            result = run_liveportrait(
-                source,
-                driving,
-                root / "outputs",
-                config=LivePortraitConfig(
-                    repository_dir=repository,
-                    python_binary=Path(sys.executable),
-                ),
-                command_runner=fake_runner,
-            )
+            ffmpeg_dir = root / "ffmpeg-bin"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "FFMPEG_BINARY": str(ffmpeg_dir / "ffmpeg"),
+                    "FFPROBE_BINARY": str(ffmpeg_dir / "ffprobe"),
+                },
+            ):
+                result = run_liveportrait(
+                    source,
+                    driving,
+                    root / "outputs",
+                    config=LivePortraitConfig(
+                        repository_dir=repository,
+                        python_binary=Path(sys.executable),
+                    ),
+                    command_runner=fake_runner,
+                )
 
             self.assertEqual(result.output_path.name, "source--driving.mp4")
             self.assertEqual(
@@ -56,6 +68,10 @@ class LivePortraitRunnerTests(unittest.TestCase):
             self.assertIn("--driving_option", captured_command)
             self.assertIn("expression-friendly", captured_command)
             self.assertIn("completed", result.log_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                captured_environment["PATH"].split(os.pathsep)[0],
+                str(ffmpeg_dir),
+            )
 
     def test_reports_nonzero_inference_exit_and_keeps_log(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

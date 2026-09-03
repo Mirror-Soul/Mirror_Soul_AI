@@ -96,8 +96,7 @@ def run_liveportrait(
         *tuple(extra_arguments),
     )
 
-    environment = os.environ.copy()
-    environment["PYTHONUNBUFFERED"] = "1"
+    environment = _liveportrait_environment()
     started_at = time.monotonic()
     try:
         completed = command_runner(
@@ -148,6 +147,37 @@ def run_liveportrait(
         duration_seconds=duration_seconds,
         command=command,
     )
+
+
+def _liveportrait_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONUNBUFFERED"] = "1"
+
+    executable_directories: list[str] = []
+    for variable_name in ("FFMPEG_BINARY", "FFPROBE_BINARY"):
+        configured_binary = environment.get(variable_name)
+        if not configured_binary:
+            continue
+        binary_path = Path(configured_binary).expanduser()
+        if not binary_path.is_absolute():
+            continue
+        binary_directory = str(binary_path.parent)
+        if binary_directory not in executable_directories:
+            executable_directories.append(binary_directory)
+
+    current_path = environment.get("PATH", "")
+    current_directories = [entry for entry in current_path.split(os.pathsep) if entry]
+    environment["PATH"] = os.pathsep.join(
+        [
+            *executable_directories,
+            *(
+                entry
+                for entry in current_directories
+                if entry not in executable_directories
+            ),
+        ]
+    )
+    return environment
 
 
 def _validate_inputs(
