@@ -16,8 +16,14 @@ from model_training.face_training.worker import (
     DownloadedFaceVideo,
     FaceTrainingWorkerError,
     _download_face_video,
+    _evaluate_liveportrait_similarity,
     _select_liveportrait_inputs,
 )
+from model_training.face_training.face_similarity import (
+    FaceSimilarityResult,
+    FaceSimilarityUnavailable,
+)
+from model_training.face_training.liveportrait_runner import LivePortraitResult
 
 
 class _FakeS3Client:
@@ -135,6 +141,91 @@ class FaceTrainingWorkerTests(unittest.TestCase):
             "No face video passed",
         ):
             _select_liveportrait_inputs([video], [selection])
+
+    def test_evaluates_liveportrait_against_all_accepted_frames(self) -> None:
+        selected = SimpleNamespace(path=Path("front.jpg"), accepted=True)
+        rejected = SimpleNamespace(path=Path("blurred.jpg"), accepted=False)
+        selection = SimpleNamespace(frames=[selected, rejected])
+        liveportrait = LivePortraitResult(
+            source_path=Path("front.jpg"),
+            driving_path=Path("driving.mp4"),
+            output_path=Path("generated.mp4"),
+            comparison_path=None,
+            log_path=Path("liveportrait.log"),
+            duration_seconds=1.0,
+            command=("python", "inference.py"),
+        )
+        expected = FaceSimilarityResult(
+            score=88.0,
+            identity_score=90.0,
+            render_quality_score=80.0,
+            cosine_similarity=0.68,
+            aligned_cosine_similarity=0.69,
+            gallery_cosine_similarity=0.66,
+            detection_rate=1.0,
+            temporal_consistency=0.9,
+            sharpness_retention=0.8,
+            evaluated_frame_count=16,
+            detected_frame_count=16,
+            reference_count=1,
+            confidence="low",
+            model_name="buffalo_l",
+            provider="CPUExecutionProvider",
+            calibration_version="provisional-v1",
+            calibrated=False,
+        )
+
+        with patch.dict(os.environ, {"FACE_SIMILARITY_ENABLE": "true"}):
+            with patch(
+                "model_training.face_training.worker.evaluate_face_similarity",
+                return_value=expected,
+            ) as evaluate:
+                actual = _evaluate_liveportrait_similarity(
+                    [selection],
+                    liveportrait,
+                )
+
+        self.assertIs(actual, expected)
+        self.assertEqual(
+            evaluate.call_args.kwargs["reference_images"],
+            [Path("front.jpg")],
+        )
+        self.assertEqual(
+            evaluate.call_args.kwargs["generated_video"],
+            Path("generated.mp4"),
+        )
+
+    def test_optional_similarity_failure_keeps_face_output(self) -> None:
+        selection = SimpleNamespace(
+            frames=[SimpleNamespace(path=Path("front.jpg"), accepted=True)]
+        )
+        liveportrait = LivePortraitResult(
+            source_path=Path("front.jpg"),
+            driving_path=Path("driving.mp4"),
+            output_path=Path("generated.mp4"),
+            comparison_path=None,
+            log_path=Path("liveportrait.log"),
+            duration_seconds=1.0,
+            command=("python", "inference.py"),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "FACE_SIMILARITY_ENABLE": "true",
+                "FACE_SIMILARITY_REQUIRED": "false",
+            },
+        ):
+            with patch(
+                "model_training.face_training.worker.evaluate_face_similarity",
+                side_effect=FaceSimilarityUnavailable("model unavailable"),
+            ):
+                result = _evaluate_liveportrait_similarity(
+                    [selection],
+                    liveportrait,
+                )
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

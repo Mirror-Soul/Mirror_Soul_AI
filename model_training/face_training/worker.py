@@ -15,6 +15,11 @@ from model_training.face_training.frame_analyzer import (
     FrameSelectionResult,
     analyze_face_frames,
 )
+from model_training.face_training.face_similarity import (
+    FaceSimilarityResult,
+    FaceSimilarityUnavailable,
+    evaluate_face_similarity,
+)
 from model_training.face_training.message import (
     FaceTrainingMessage,
     FaceTrainingMessageError,
@@ -203,6 +208,7 @@ def _preprocess_face_training_message(
         )
 
     liveportrait_result = None
+    face_similarity_result = None
     if _env_bool("FACE_TRAINING_RUN_LIVEPORTRAIT", False):
         source_path, driving_path = _select_liveportrait_inputs(
             downloaded_videos,
@@ -225,6 +231,10 @@ def _preprocess_face_training_message(
             f"duration={liveportrait_result.duration_seconds:.2f}s",
             flush=True,
         )
+        face_similarity_result = _evaluate_liveportrait_similarity(
+            frame_selection_results,
+            liveportrait_result,
+        )
 
     manifest_path = workspace / "preprocess-manifest.json"
     manifest_path.write_text(
@@ -235,6 +245,7 @@ def _preprocess_face_training_message(
                 preprocess_results,
                 frame_selection_results,
                 liveportrait_result,
+                face_similarity_result,
             ),
             ensure_ascii=False,
             indent=2,
@@ -326,6 +337,7 @@ def _build_manifest(
     preprocess_results: list[FaceVideoPreprocessResult],
     frame_selection_results: list[FrameSelectionResult],
     liveportrait_result: LivePortraitResult | None = None,
+    face_similarity_result: FaceSimilarityResult | None = None,
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -353,7 +365,63 @@ def _build_manifest(
             if liveportrait_result is not None
             else None
         ),
+        "faceSimilarity": (
+            face_similarity_result.to_dict()
+            if face_similarity_result is not None
+            else None
+        ),
     }
+
+
+def _evaluate_liveportrait_similarity(
+    frame_selection_results: list[FrameSelectionResult],
+    liveportrait_result: LivePortraitResult,
+) -> FaceSimilarityResult | None:
+    if not _env_bool("FACE_SIMILARITY_ENABLE", False):
+        return None
+
+    reference_paths = [
+        frame.path
+        for selection in frame_selection_results
+        for frame in selection.frames
+        if frame.accepted
+    ]
+    required = _env_bool("FACE_SIMILARITY_REQUIRED", False)
+    try:
+        result = evaluate_face_similarity(
+            reference_images=reference_paths,
+            generated_video=liveportrait_result.output_path,
+            driving_video=liveportrait_result.driving_path,
+        )
+    except FaceSimilarityUnavailable as exc:
+        if required:
+            raise FaceTrainingWorkerError(
+                f"Face similarity evaluation is required but unavailable: {exc}"
+            ) from exc
+        print(
+            f"[FACE_SIMILARITY] skipped: reason={exc}",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        if required:
+            raise FaceTrainingWorkerError(
+                f"Face similarity evaluation failed: {exc}"
+            ) from exc
+        print(
+            f"[FACE_SIMILARITY] failed but face output was retained: error={exc}",
+            flush=True,
+        )
+        return None
+
+    print(
+        "[FACE_SIMILARITY] completed: "
+        f"score={result.score:.2f} identity={result.identity_score:.2f} "
+        f"render={result.render_quality_score:.2f} "
+        f"confidence={result.confidence} calibrated={result.calibrated}",
+        flush=True,
+    )
+    return result
 
 
 def _select_liveportrait_inputs(
