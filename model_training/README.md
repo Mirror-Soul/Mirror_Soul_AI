@@ -17,7 +17,7 @@
 백엔드가 온보딩 얼굴 영상을 S3에 저장한 뒤 SQS에 발행하는
 `FACE_PROFILE_BUILD` 작업을 소비한다.
 
-현재 1차 버전은 운영 메시지 유실을 막기 위해 검증 모드만 지원한다.
+현재 버전은 운영 메시지 유실을 막기 위해 검증 모드만 지원한다.
 
 ```bash
 python -m model_training.face_training.worker --once --dry-run
@@ -34,6 +34,31 @@ python -m model_training.face_training.worker --once --dry-run
 - 작업별 전처리 manifest 저장
 - SQS 메시지 유지
 
+GPU 서버에 LivePortrait와 가중치가 준비되어 있으면 검증 모드에서 결과 영상까지
+자동 생성할 수 있다. `.env`에서 다음 설정을 활성화한다.
+
+```env
+FACE_TRAINING_RUN_LIVEPORTRAIT=true
+FACE_TRAINING_LIVEPORTRAIT_REPO_DIR=/workspace/mirror-soul-face/liveportrait
+FACE_TRAINING_LIVEPORTRAIT_PYTHON=/opt/conda/envs/mirrorsoul-face/bin/python
+```
+
+활성화하면 품질 게이트를 통과한 영상 중 가장 점수가 높은 정면 프레임을 source로,
+해당 원본 영상을 driving video로 사용한다. 생성 영상과 실행 로그 경로는
+`preprocess-manifest.json`의 `livePortrait` 항목에 기록된다.
+
+SQS 작업이나 S3 결과 업로드 없이 기존 S3 영상으로 얼굴 품질을 반복 검증하려면
+preview 명령을 사용한다.
+
+```bash
+python -m model_training.face_training.preview \
+  --object-key face-videos/00000000-0000-0000-0000-000000000000/face-scan.mov
+```
+
+이 명령은 object key에서 사용자 UUID를 추론하고 로컬 작업 디렉터리에 결과를
+생성한다. SQS 메시지를 받거나 삭제하지 않으며 결과도 S3에 업로드하지 않는다.
+여러 영상을 함께 비교하려면 같은 회원의 `--object-key`를 반복해서 지정한다.
+
 백엔드 메시지 계약:
 
 ```json
@@ -49,8 +74,7 @@ python -m model_training.face_training.worker --once --dry-run
 }
 ```
 
-LivePortrait 캐시 생성, 결과 S3 업로드, 백엔드 완료 처리가 연결되기 전에는
-상시 워커로 실행하지 않는다.
+결과 S3 업로드와 백엔드 완료 처리가 연결되기 전에는 상시 워커로 실행하지 않는다.
 
 GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
 

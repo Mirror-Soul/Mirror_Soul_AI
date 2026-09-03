@@ -2,6 +2,7 @@ import argparse
 import json
 import mimetypes
 import os
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,11 @@ from model_training.face_training.message import (
     FaceTrainingMessage,
     FaceTrainingMessageError,
     parse_face_training_message,
+)
+from model_training.face_training.liveportrait_runner import (
+    LivePortraitConfig,
+    LivePortraitResult,
+    run_liveportrait,
 )
 from model_training.face_training.video_processor import (
     FaceVideoPreprocessResult,
@@ -196,6 +202,30 @@ def _preprocess_face_training_message(
             flush=True,
         )
 
+    liveportrait_result = None
+    if _env_bool("FACE_TRAINING_RUN_LIVEPORTRAIT", False):
+        source_path, driving_path = _select_liveportrait_inputs(
+            downloaded_videos,
+            frame_selection_results,
+        )
+        print(
+            "[FACE_TRAINING] LivePortrait started: "
+            f"source={source_path} driving={driving_path}",
+            flush=True,
+        )
+        liveportrait_result = run_liveportrait(
+            source_path,
+            driving_path,
+            workspace / "outputs" / "liveportrait",
+            config=_liveportrait_config(),
+        )
+        print(
+            "[FACE_TRAINING] LivePortrait completed: "
+            f"output={liveportrait_result.output_path} "
+            f"duration={liveportrait_result.duration_seconds:.2f}s",
+            flush=True,
+        )
+
     manifest_path = workspace / "preprocess-manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -204,6 +234,7 @@ def _preprocess_face_training_message(
                 downloaded_videos,
                 preprocess_results,
                 frame_selection_results,
+                liveportrait_result,
             ),
             ensure_ascii=False,
             indent=2,
@@ -294,6 +325,7 @@ def _build_manifest(
     downloaded_videos: list[DownloadedFaceVideo],
     preprocess_results: list[FaceVideoPreprocessResult],
     frame_selection_results: list[FrameSelectionResult],
+    liveportrait_result: LivePortraitResult | None = None,
 ) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
@@ -316,7 +348,71 @@ def _build_manifest(
                 frame_selection_results,
             )
         ],
+        "livePortrait": (
+            liveportrait_result.to_dict()
+            if liveportrait_result is not None
+            else None
+        ),
     }
+
+
+def _select_liveportrait_inputs(
+    downloaded_videos: list[DownloadedFaceVideo],
+    frame_selection_results: list[FrameSelectionResult],
+) -> tuple[Path, Path]:
+    candidates = []
+    for video, selection in zip(downloaded_videos, frame_selection_results):
+        if not selection.quality_gate_passed or selection.selected_source_path is None:
+            continue
+        selected_analysis = next(
+            (
+                frame
+                for frame in selection.frames
+                if frame.path == selection.selected_source_path
+            ),
+            None,
+        )
+        if selected_analysis is not None:
+            candidates.append(
+                (
+                    selected_analysis.quality_score,
+                    selection.selected_source_path,
+                    video.local_path,
+                )
+            )
+
+    if not candidates:
+        raise FaceTrainingWorkerError(
+            "No face video passed the quality gate for LivePortrait."
+        )
+
+    _, source_path, driving_path = max(candidates, key=lambda item: item[0])
+    return source_path, driving_path
+
+
+def _liveportrait_config() -> LivePortraitConfig:
+    return LivePortraitConfig(
+        repository_dir=Path(
+            os.getenv(
+                "FACE_TRAINING_LIVEPORTRAIT_REPO_DIR",
+                "/workspace/mirror-soul-face/liveportrait",
+            )
+        ),
+        python_binary=Path(
+            os.getenv("FACE_TRAINING_LIVEPORTRAIT_PYTHON", sys.executable)
+        ),
+        timeout_seconds=_env_int("FACE_TRAINING_LIVEPORTRAIT_TIMEOUT_SECONDS", 900),
+        driving_option=os.getenv(
+            "FACE_TRAINING_LIVEPORTRAIT_DRIVING_OPTION",
+            "expression-friendly",
+        ),
+        driving_multiplier=_env_float(
+            "FACE_TRAINING_LIVEPORTRAIT_DRIVING_MULTIPLIER",
+            1.0,
+        ),
+        source_max_dim=_env_int("FACE_TRAINING_LIVEPORTRAIT_SOURCE_MAX_DIM", 1280),
+        source_division=_env_int("FACE_TRAINING_LIVEPORTRAIT_SOURCE_DIVISION", 2),
+    )
 
 
 def _frame_quality_config() -> FrameQualityConfig:
@@ -356,6 +452,18 @@ def _env_int(name: str, default: int) -> int:
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     return float(value) if value else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise FaceTrainingWorkerError(f"{name} must be a boolean value.")
 
 
 if __name__ == "__main__":
