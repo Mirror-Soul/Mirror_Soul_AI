@@ -13,8 +13,10 @@ except ImportError:
     sys.modules["dotenv"] = SimpleNamespace(load_dotenv=lambda: None)
 
 from model_training.face_training.worker import (
+    DownloadedFaceVideo,
     FaceTrainingWorkerError,
     _download_face_video,
+    _select_liveportrait_inputs,
 )
 
 
@@ -74,6 +76,65 @@ class FaceTrainingWorkerTests(unittest.TestCase):
                     )
 
             self.assertFalse(destination.exists())
+
+    def test_selects_highest_quality_liveportrait_source_and_matching_video(
+        self,
+    ) -> None:
+        first_source = Path("first-front.jpg")
+        second_source = Path("second-front.jpg")
+        videos = [
+            DownloadedFaceVideo(
+                bucket="bucket",
+                object_key="first.mp4",
+                content_type="video/mp4",
+                local_path=Path("first.mp4"),
+                size_bytes=1,
+            ),
+            DownloadedFaceVideo(
+                bucket="bucket",
+                object_key="second.mp4",
+                content_type="video/mp4",
+                local_path=Path("second.mp4"),
+                size_bytes=1,
+            ),
+        ]
+        selections = [
+            SimpleNamespace(
+                quality_gate_passed=True,
+                selected_source_path=first_source,
+                frames=[SimpleNamespace(path=first_source, quality_score=70.0)],
+            ),
+            SimpleNamespace(
+                quality_gate_passed=True,
+                selected_source_path=second_source,
+                frames=[SimpleNamespace(path=second_source, quality_score=82.0)],
+            ),
+        ]
+
+        source, driving = _select_liveportrait_inputs(videos, selections)
+
+        self.assertEqual(source, second_source)
+        self.assertEqual(driving, Path("second.mp4"))
+
+    def test_rejects_liveportrait_when_quality_gate_does_not_pass(self) -> None:
+        video = DownloadedFaceVideo(
+            bucket="bucket",
+            object_key="input.mp4",
+            content_type="video/mp4",
+            local_path=Path("input.mp4"),
+            size_bytes=1,
+        )
+        selection = SimpleNamespace(
+            quality_gate_passed=False,
+            selected_source_path=None,
+            frames=[],
+        )
+
+        with self.assertRaisesRegex(
+            FaceTrainingWorkerError,
+            "No face video passed",
+        ):
+            _select_liveportrait_inputs([video], [selection])
 
 
 if __name__ == "__main__":
