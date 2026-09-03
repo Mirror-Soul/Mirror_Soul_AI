@@ -27,8 +27,10 @@ class FaceSimilarityConfig:
     cosine_high: float = 0.70
     max_score: float = 95.0
     min_detection_rate: float = 0.75
-    identity_weight: float = 0.85
-    render_quality_weight: float = 0.15
+    identity_weight: float = 0.65
+    render_quality_weight: float = 0.35
+    min_temporal_consistency: float = 0.60
+    stability_floor: float = 0.70
     model_name: str = "buffalo_l"
     model_root: Path = Path("/workspace/mirror-soul-face/insightface")
     providers: tuple[str, ...] = (
@@ -50,8 +52,10 @@ class FaceSimilarityResult:
     detection_rate: float
     temporal_consistency: float
     sharpness_retention: float
+    stability_factor: float
     evaluated_frame_count: int
     detected_frame_count: int
+    aligned_frame_count: int
     reference_count: int
     confidence: str
     model_name: str
@@ -70,8 +74,10 @@ class FaceSimilarityResult:
             "detectionRate": self.detection_rate,
             "temporalConsistency": self.temporal_consistency,
             "sharpnessRetention": self.sharpness_retention,
+            "stabilityFactor": self.stability_factor,
             "evaluatedFrameCount": self.evaluated_frame_count,
             "detectedFrameCount": self.detected_frame_count,
+            "alignedFrameCount": self.aligned_frame_count,
             "referenceCount": self.reference_count,
             "confidence": self.confidence,
             "modelName": self.model_name,
@@ -127,7 +133,7 @@ def evaluate_face_similarity(
     driving_observations: list[FaceObservation | None] | None = None
     if driving_video is not None:
         driving_frames = sample_video(driving_video, len(generated_frames))
-        if len(driving_frames) == len(generated_frames):
+        if driving_frames:
             driving_observations = [encoder(frame) for frame in driving_frames]
 
     return score_face_observations(
@@ -201,7 +207,7 @@ def score_face_observations(
     detection_rate = len(detected_generated) / len(generated_observations)
     temporal_consistency = _temporal_consistency(gallery_similarities)
     sharpness_retention = (
-        float(np.median(sharpness_ratios)) if sharpness_ratios else 1.0
+        float(np.median(sharpness_ratios)) if sharpness_ratios else 0.0
     )
     render_quality_score = 100.0 * (
         0.50 * detection_rate
@@ -216,12 +222,26 @@ def score_face_observations(
         identity_score * scoring_config.identity_weight
         + render_quality_score * scoring_config.render_quality_weight
     ) / weight_sum
+
+    stability_ratio = min(
+        temporal_consistency / scoring_config.min_temporal_consistency,
+        1.0,
+    )
+    stability_factor = scoring_config.stability_floor + (
+        1.0 - scoring_config.stability_floor
+    ) * stability_ratio
+    blended_score *= stability_factor
+
     coverage_ratio = min(
         detection_rate / scoring_config.min_detection_rate,
         1.0,
     )
     if coverage_ratio < 1.0:
         blended_score *= 0.50 + 0.50 * coverage_ratio
+
+    # Rendering quality may refine a matching identity, but it must not make a
+    # different person look similar on its own.
+    blended_score = min(blended_score, identity_score + 15.0)
 
     return FaceSimilarityResult(
         score=_round_score(min(blended_score, scoring_config.max_score)),
@@ -237,8 +257,10 @@ def score_face_observations(
         detection_rate=round(detection_rate, 4),
         temporal_consistency=round(temporal_consistency, 4),
         sharpness_retention=round(sharpness_retention, 4),
+        stability_factor=round(stability_factor, 4),
         evaluated_frame_count=len(generated_observations),
         detected_frame_count=len(detected_generated),
+        aligned_frame_count=len(aligned_similarities),
         reference_count=len(reference_observations),
         confidence=_confidence(
             detection_rate=detection_rate,
@@ -343,11 +365,16 @@ def face_similarity_config_from_env() -> FaceSimilarityConfig:
             "FACE_SIMILARITY_MIN_DETECTION_RATE",
             0.75,
         ),
-        identity_weight=_env_float("FACE_SIMILARITY_IDENTITY_WEIGHT", 0.85),
+        identity_weight=_env_float("FACE_SIMILARITY_IDENTITY_WEIGHT", 0.65),
         render_quality_weight=_env_float(
             "FACE_SIMILARITY_RENDER_QUALITY_WEIGHT",
-            0.15,
+            0.35,
         ),
+        min_temporal_consistency=_env_float(
+            "FACE_SIMILARITY_MIN_TEMPORAL_CONSISTENCY",
+            0.60,
+        ),
+        stability_floor=_env_float("FACE_SIMILARITY_STABILITY_FLOOR", 0.70),
         model_name=os.getenv("FACE_SIMILARITY_MODEL", "buffalo_l"),
         model_root=Path(
             os.getenv(
@@ -494,6 +521,10 @@ def _validate_config(config: FaceSimilarityConfig) -> None:
         raise ValueError("similarity weights cannot be negative")
     if config.identity_weight + config.render_quality_weight <= 0:
         raise ValueError("at least one similarity weight must be positive")
+    if not 0.0 < config.min_temporal_consistency <= 1.0:
+        raise ValueError("min_temporal_consistency must be between 0 and 1")
+    if not 0.0 <= config.stability_floor <= 1.0:
+        raise ValueError("stability_floor must be between 0 and 1")
 
 
 def _round_score(value: float) -> float:

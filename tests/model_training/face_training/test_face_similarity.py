@@ -48,6 +48,8 @@ class FaceSimilarityTests(unittest.TestCase):
         self.assertEqual(result.provider, "CUDAExecutionProvider")
         self.assertFalse(result.calibrated)
         self.assertEqual(result.detected_frame_count, 16)
+        self.assertEqual(result.aligned_frame_count, 16)
+        self.assertEqual(result.stability_factor, 1.0)
 
     def test_different_identity_receives_low_score(self) -> None:
         generated = [_observation([0.0, 1.0]) for _ in range(16)]
@@ -62,6 +64,31 @@ class FaceSimilarityTests(unittest.TestCase):
 
         self.assertLess(result.score, 20.0)
         self.assertEqual(result.identity_score, 0.0)
+
+    def test_unstable_identity_is_penalized(self) -> None:
+        stable = [_observation([1.0, 0.0]) for _ in range(16)]
+        unstable = [
+            _observation([1.0, 0.0]) if index % 2 == 0
+            else _observation([0.4, 0.9165])
+            for index in range(16)
+        ]
+
+        stable_result = score_face_observations(
+            reference_observations=self.references,
+            generated_observations=stable,
+            config=self.config,
+        )
+        unstable_result = score_face_observations(
+            reference_observations=self.references,
+            generated_observations=unstable,
+            config=self.config,
+        )
+
+        self.assertLess(
+            unstable_result.stability_factor,
+            stable_result.stability_factor,
+        )
+        self.assertLess(unstable_result.score, stable_result.score)
 
     def test_low_detection_rate_reduces_score_and_confidence(self) -> None:
         generated = [
