@@ -103,14 +103,17 @@ InsightFace 공개 모델 가중치는 비상업 연구 용도로만 사용한�
 동의한 개발 환경에서만 승인 설정을 `true`로 바꾼다.
 
 평가는 생성 영상에서 균등 추출한 프레임을 회원의 품질 통과 원본 프레임 및 같은
-시점의 driving video 프레임과 비교한다. 결과는 manifest의 `faceSimilarity`에
-기록된다.
+시점의 driving video 프레임과 비교한다. 정체성 점수 65%, 렌더링 품질 35%를
+기본으로 합산하고 시간적 일관성이 낮은 결과에는 추가 감점을 적용한다. 결과는
+manifest의 `faceSimilarity`에 기록된다.
 
 - `score`: UI와 향후 종합 유사도 계산에 사용할 0~95 얼굴 점수
 - `identityScore`: 얼굴 임베딩 기반 정체성 보존 점수
 - `renderQualityScore`: 얼굴 검출률, 시간적 안정성, 선명도 보존 점수
 - `confidence`: 평가 표본 충분성을 나타내는 `low`, `medium`, `high`
 - `cosineSimilarity`: 재보정에 사용할 원시 코사인 유사도
+- `alignedFrameCount`: 생성 영상과 원본 영상을 같은 순서로 비교한 프레임 수
+- `stabilityFactor`: 시간적 일관성으로 최종 점수에 적용된 배율
 - `calibrationVersion`, `calibrated`: 점수 보정 버전과 검증 완료 여부
 
 코사인 유사도는 확률이나 퍼센트가 아니다. 현재 기본 임계값은 파이프라인 검증용
