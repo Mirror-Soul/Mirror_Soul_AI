@@ -133,6 +133,31 @@ python -m model_training.face_training.face_similarity \
   --driving /path/to/original-driving.mp4
 ```
 
+여러 LivePortrait 설정을 한 번에 생성하고 얼굴 점수로 순위를 매기려면 기존
+전처리 manifest를 사용한다. InsightFace 모델은 한 번만 GPU에 로드되며 각 후보의
+점수와 경로는 `variant-sweep.json`에 저장된다. 최고점 결과는 `best.mp4`, 원본
+비교 영상은 `best-concat.mp4`로 복사된다.
+
+```bash
+python -m model_training.face_training.variant_sweep \
+  --manifest /path/to/preprocess-manifest.json \
+  --multipliers 0.65 0.75 0.85 \
+  --crop-scales 2.5 2.7
+```
+
+기본 조합은 6개다. 자동 점수는 후보를 줄이기 위한 기준이며, 보정 완료 전에는
+`best-concat.mp4`를 사람이 확인한 뒤 최종 결과를 확정한다.
+
+PyTorch 2.3 CUDA 12.1 환경에서는 InsightFace 설치 후 CPU ONNX Runtime이
+선택될 수 있다. 이 경우 CUDA 12 및 cuDNN 8과 호환되는 GPU 빌드를 마지막에
+설치한다.
+
+```bash
+python -m pip install --force-reinstall --no-deps \
+  --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/ \
+  onnxruntime-gpu==1.18.0
+```
+
 학교 GPU 서버처럼 AWS IAM Role이 없는 외부 서버에서는 얼굴 작업 큐 수신과
 S3 입출력만 허용한 제한적 AWS 자격 증명을 환경변수로 주입해야 한다. 실제 키는
 `.env` 또는 Git에 커밋하지 않는다.

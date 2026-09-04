@@ -21,6 +21,7 @@ class LivePortraitConfig:
     driving_multiplier: float = 1.0
     source_max_dim: int = 1280
     source_division: int = 2
+    crop_scale: float | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,11 @@ def run_liveportrait(
     output.mkdir(parents=True, exist_ok=True)
     log_path = output / "liveportrait.log"
 
+    crop_arguments = (
+        ("--scale", str(config.crop_scale))
+        if config.crop_scale is not None
+        else ()
+    )
     command = (
         str(python_binary),
         str(repository / "inference.py"),
@@ -93,6 +99,7 @@ def run_liveportrait(
         str(config.source_max_dim),
         "--source_division",
         str(config.source_division),
+        *crop_arguments,
         *tuple(extra_arguments),
     )
 

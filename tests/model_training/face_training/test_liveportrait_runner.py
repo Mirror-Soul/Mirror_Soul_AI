@@ -56,6 +56,7 @@ class LivePortraitRunnerTests(unittest.TestCase):
                     config=LivePortraitConfig(
                         repository_dir=repository,
                         python_binary=Path(sys.executable),
+                        crop_scale=2.7,
                     ),
                     command_runner=fake_runner,
                 )
@@ -67,6 +68,10 @@ class LivePortraitRunnerTests(unittest.TestCase):
             )
             self.assertIn("--driving_option", captured_command)
             self.assertIn("expression-friendly", captured_command)
+            self.assertEqual(
+                captured_command[captured_command.index("--scale") + 1],
+                "2.7",
+            )
             self.assertIn("completed", result.log_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 captured_environment["PATH"].split(os.pathsep)[0],
