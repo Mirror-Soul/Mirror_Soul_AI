@@ -480,6 +480,11 @@ def _liveportrait_config() -> LivePortraitConfig:
         ),
         source_max_dim=_env_int("FACE_TRAINING_LIVEPORTRAIT_SOURCE_MAX_DIM", 1280),
         source_division=_env_int("FACE_TRAINING_LIVEPORTRAIT_SOURCE_DIVISION", 2),
+        crop_scale=(
+            _env_float("FACE_TRAINING_LIVEPORTRAIT_CROP_SCALE", 2.3)
+            if os.getenv("FACE_TRAINING_LIVEPORTRAIT_CROP_SCALE")
+            else None
+        ),
     )
 
 
