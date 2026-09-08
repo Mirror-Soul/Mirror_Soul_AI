@@ -30,6 +30,7 @@ from model_training.face_training.member_voice_preview import (
     generate_member_face_preview,
 )
 from model_training.face_training.musetalk_runner import MuseTalkConfig
+from model_training.face_training.natural_motion import NaturalMotionConfig
 from model_training.face_training.liveportrait_runner import (
     LivePortraitConfig,
     LivePortraitResult,
@@ -272,6 +273,11 @@ def _preprocess_face_training_message(
                 DEFAULT_MEMBER_PREVIEW_TEXT,
             ),
             musetalk_config=_musetalk_config(),
+            natural_motion_config=(
+                _natural_motion_config()
+                if _env_bool("FACE_TRAINING_NATURAL_MOTION_ENABLE", True)
+                else None
+            ),
         )
         print(
             "[FACE_TRAINING] member voice face preview completed: "
@@ -534,6 +540,19 @@ def _musetalk_config() -> MuseTalkConfig:
             900,
         ),
         bbox_shift=_env_int("FACE_TRAINING_MUSETALK_BBOX_SHIFT", 0),
+    )
+
+
+def _natural_motion_config() -> NaturalMotionConfig:
+    return NaturalMotionConfig(
+        ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
+        ffprobe_binary=os.getenv("FFPROBE_BINARY", "ffprobe"),
+        output_fps=_env_int("FACE_TRAINING_NATURAL_MOTION_FPS", 25),
+        crf=_env_int("FACE_TRAINING_NATURAL_MOTION_CRF", 18),
+        minimum_front_ratio=_env_float(
+            "FACE_TRAINING_NATURAL_MOTION_MIN_FRONT_RATIO",
+            0.60,
+        ),
     )
 
 

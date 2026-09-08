@@ -14,6 +14,10 @@ from model_training.face_training.musetalk_runner import (
     MuseTalkConfig,
     MuseTalkResult,
 )
+from model_training.face_training.natural_motion import (
+    NaturalMotionClipResult,
+    NaturalMotionConfig,
+)
 from shared.clone_voice import ActiveCloneVoice
 
 
@@ -133,6 +137,68 @@ class MemberVoicePreviewTests(unittest.TestCase):
             self.assertEqual(recorded["audioPath"], str(audio_path))
             self.assertEqual(recorded["museTalk"]["outputPath"], str(output_path))
             self.assertNotIn("voiceId", recorded)
+
+    def test_uses_natural_motion_video_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = root / "preprocess-manifest.json"
+            manifest_path.write_text('{"videos": []}', encoding="utf-8")
+            audio_path = root / "member.mp3"
+            clip_path = root / "natural-motion.mp4"
+            voice_result = MemberVoicePreviewResult(
+                user_uuid="member",
+                clone_id=4,
+                voice_training_job_id=4,
+                text="hello",
+                audio_path=audio_path,
+            )
+            motion_result = NaturalMotionClipResult(
+                source_video_path=root / "source.mov",
+                clip_path=clip_path,
+                start_seconds=1.0,
+                duration_seconds=3.0,
+                score=80.0,
+                front_frame_ratio=1.0,
+                confidence="high",
+            )
+            musetalk_result = MuseTalkResult(
+                source_path=clip_path,
+                audio_path=audio_path,
+                output_path=root / "result.mp4",
+                log_path=root / "musetalk.log",
+                inference_config_path=root / "inference-config.json",
+                bbox_shift=0,
+            )
+
+            with patch(
+                "model_training.face_training.member_voice_preview."
+                "generate_member_voice_preview",
+                return_value=voice_result,
+            ), patch(
+                "model_training.face_training.member_voice_preview."
+                "prepare_natural_motion_clip",
+                return_value=motion_result,
+            ), patch(
+                "model_training.face_training.member_voice_preview."
+                "run_musetalk_preview",
+                return_value=musetalk_result,
+            ) as run_musetalk:
+                result = generate_member_face_preview(
+                    manifest_path=manifest_path,
+                    user_uuid="member",
+                    clone_id=4,
+                    text="hello",
+                    musetalk_config=MuseTalkConfig(root, root / "python"),
+                    natural_motion_config=NaturalMotionConfig(),
+                )
+
+            self.assertEqual(run_musetalk.call_args.args[0], clip_path)
+            self.assertEqual(result.natural_motion, motion_result)
+            recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                recorded["memberVoicePreview"]["naturalMotion"]["confidence"],
+                "high",
+            )
 
 
 if __name__ == "__main__":

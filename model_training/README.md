@@ -92,6 +92,33 @@ FACE_TRAINING_MUSETALK_BBOX_SHIFT=0
 생성된 음성과 MuseTalk 영상 경로는 manifest의 `memberVoicePreview`에 기록한다.
 Voice ID 원문은 manifest나 로그에 기록하지 않는다.
 
+기본적으로 정지 프레임 대신 원본 얼굴 영상에서 음성 길이에 맞는 정면 구간을
+자동 선택한다. 이 방식은 회원의 실제 눈 깜빡임, 미세한 고개 움직임과 배경 움직임을
+유지하고 MuseTalk는 입 모양만 변경한다. 정면 구간의 품질과 비율은 manifest의
+`memberVoicePreview.naturalMotion`에 기록된다.
+
+이미 생성한 전처리 manifest와 회원 음성이 있으면 DB나 S3를 다시 조회하지 않고
+다음 명령으로 자연스러운 움직임 프리뷰만 만들 수 있다.
+
+```bash
+python -m model_training.face_training.natural_motion_preview \
+  --manifest /workspace/Mirror_Soul_AI/tmp/face_training/<user>/job-<id>/<run>/preprocess-manifest.json \
+  --audio /shareHost/C084003-musetalk/test-inputs/member-preview.mp3 \
+  --output-dir /shareHost/C084003-musetalk/test-results/member-natural-motion
+```
+
+긴 통화에서 사용할 듣기 상태의 움직임을 검증하려면 짧은 정면 구간을 정방향과
+역방향으로 부드럽게 순환한 무음 idle 영상을 만든다. 큰 몸짓을 생성하지 않고 실제
+영상의 눈 깜빡임과 미세한 움직임만 유지한다.
+
+```bash
+python -m model_training.face_training.idle_motion_preview \
+  --manifest /workspace/Mirror_Soul_AI/tmp/face_training/<user>/job-<id>/<run>/preprocess-manifest.json \
+  --output /shareHost/C084003-musetalk/test-results/member-idle-30s.mp4 \
+  --duration 30 \
+  --segment-duration 2.5
+```
+
 백엔드 메시지 계약:
 
 ```json
