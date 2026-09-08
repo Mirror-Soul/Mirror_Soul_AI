@@ -59,6 +59,39 @@ python -m model_training.face_training.preview \
 생성한다. SQS 메시지를 받거나 삭제하지 않으며 결과도 S3에 업로드하지 않는다.
 여러 영상을 함께 비교하려면 같은 회원의 `--object-key`를 반복해서 지정한다.
 
+### 회원 음성 얼굴 프리뷰
+
+얼굴과 음성을 같은 회원 기준으로 검증하려면 `--member-voice-preview`를 사용한다.
+이 모드는 SQS 메시지의 `userUuid`와 `cloneId`에 해당하는 활성 음성 프로필을
+RDS에서 조회하고, 그 회원의 ElevenLabs 복제 음성으로 고정 문장을 생성한 뒤
+선택된 얼굴 프레임을 MuseTalk로 애니메이션한다.
+
+```bash
+python -m model_training.face_training.preview \
+  --object-key face-videos/00000000-0000-0000-0000-000000000000/face-scan.mov \
+  --clone-id 1 \
+  --member-voice-preview
+```
+
+얼굴의 `cloneId`와 활성 음성 프로필의 `clone_id`가 다르거나 활성 Voice ID가
+없으면 작업은 즉시 실패한다. 공통 `ELEVENLABS_VOICE_ID`로 다른 회원 목소리를
+대체하지 않는다. `ELEVENLABS_API_KEY`와 DB 연결 정보는 필요하지만 Voice ID는
+환경변수에 저장하지 않는다.
+
+로컬 GPU 서버에서는 다음 MuseTalk 설정을 사용한다.
+
+```env
+FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT=안녕하세요. 처음 뵙겠습니다.
+FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE=false
+FACE_TRAINING_MUSETALK_REPO_DIR=/shareHost/C084003-musetalk/MuseTalk
+FACE_TRAINING_MUSETALK_PYTHON=/shareHost/C084003-musetalk/conda-env/bin/python
+FACE_TRAINING_MUSETALK_TIMEOUT_SECONDS=900
+FACE_TRAINING_MUSETALK_BBOX_SHIFT=0
+```
+
+생성된 음성과 MuseTalk 영상 경로는 manifest의 `memberVoicePreview`에 기록한다.
+Voice ID 원문은 manifest나 로그에 기록하지 않는다.
+
 백엔드 메시지 계약:
 
 ```json

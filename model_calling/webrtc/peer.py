@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from model_calling.webrtc.session import (
     WebRTCSession,
     close_session,
+    get_call_clone_id,
     get_call_user,
     get_session,
     save_session,
@@ -89,11 +90,13 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
         async def start_pipeline() -> None:
             print(
                 "[WEBRTC] starting realtime pipeline for track: "
-                f"callId={call_id} user={session.clone_user_uuid}",
+                f"callId={call_id} user={session.clone_user_uuid} "
+                f"clone_id={session.clone_id}",
                 flush=True,
             )
             receiver_task, pipeline_task = await start_realtime_audio(
                 user_id=session.clone_user_uuid,
+                clone_id=session.clone_id,
                 incoming_track=track,
                 output_track=session.output_track,
                 utterance_queue=session.utterance_queue,
@@ -125,6 +128,9 @@ async def create_answer_from_offer(
         clone_user_uuid = get_call_user(call_id)
         if not clone_user_uuid:
             raise ValueError(f"Call user not registered: callId={call_id}")
+        clone_id = get_call_clone_id(call_id)
+        if clone_id is None:
+            raise ValueError(f"Call clone not registered: callId={call_id}")
 
         pc = create_peer_connection(call_id)
         output_track = QueuedAudioTrack()
@@ -137,13 +143,15 @@ async def create_answer_from_offer(
             caller_signal_id=caller_signal_id,
             peer_connection=pc,
             clone_user_uuid=clone_user_uuid,
+            clone_id=clone_id,
             output_track=output_track,
             utterance_queue=asyncio.Queue(maxsize=2),
         )
         save_session(session)
         print(
             "[WEBRTC] session created: "
-            f"callId={call_id} roomId={room_id} user={clone_user_uuid}",
+            f"callId={call_id} roomId={room_id} "
+            f"user={clone_user_uuid} clone_id={clone_id}",
             flush=True,
         )
 
