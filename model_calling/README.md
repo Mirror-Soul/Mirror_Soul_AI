@@ -21,7 +21,6 @@ Required environment variables:
 ```env
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=
 
 DB_HOST=
 DB_PORT=3306
@@ -204,5 +203,7 @@ ORDER BY avp.updated_at DESC
 LIMIT 1;
 ```
 
-If no active `ai_voice_profiles` row exists, or the table is not available yet,
-the call continues with the default `ELEVENLABS_VOICE_ID`.
+An active `ai_voice_profiles` row matching both the invited member UUID and
+`cloneId` is required. Calls fail explicitly when the member voice is missing,
+the clone IDs differ, or RDS cannot be queried; the server never substitutes
+another member's voice from a global environment variable.

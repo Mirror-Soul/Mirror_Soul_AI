@@ -1,5 +1,7 @@
 # GPU face preprocessing worker dependencies.
 boto3
 python-dotenv
+httpx
+PyMySQL
 numpy==1.26.4
 opencv-python-headless==4.10.0.84

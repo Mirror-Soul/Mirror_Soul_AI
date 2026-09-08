@@ -9,6 +9,7 @@ from uuid import UUID
 from dotenv import load_dotenv
 
 from model_training.face_training.message import FaceTrainingMessage
+from model_training.face_training.member_voice_preview import DEFAULT_MEMBER_PREVIEW_TEXT
 from model_training.face_training.worker import (
     FaceTrainingWorkerError,
     _boto3_client,
@@ -48,15 +49,48 @@ def main() -> None:
         action="store_true",
         help="Stop after frame analysis without running LivePortrait.",
     )
+    parser.add_argument(
+        "--member-voice-preview",
+        action="store_true",
+        help=(
+            "Resolve this member's active voice from RDS, generate the fixed "
+            "preview sentence, and animate the selected face with MuseTalk."
+        ),
+    )
+    parser.add_argument(
+        "--preview-text",
+        default=os.getenv(
+            "FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT",
+            DEFAULT_MEMBER_PREVIEW_TEXT,
+        ),
+    )
+    parser.add_argument(
+        "--musetalk-bbox-shift",
+        type=int,
+        default=int(os.getenv("FACE_TRAINING_MUSETALK_BBOX_SHIFT", "0")),
+    )
     args = parser.parse_args()
 
     user_uuid = args.user_uuid or infer_user_uuid(args.object_keys)
     job_id = args.job_id or int(time.time())
     if args.clone_id <= 0 or job_id <= 0:
         raise FaceTrainingWorkerError("clone-id and job-id must be positive.")
+    if args.preprocess_only and args.member_voice_preview:
+        raise FaceTrainingWorkerError(
+            "--preprocess-only and --member-voice-preview cannot be combined."
+        )
 
     os.environ["FACE_TRAINING_RUN_LIVEPORTRAIT"] = (
-        "false" if args.preprocess_only else "true"
+        "false"
+        if args.preprocess_only or args.member_voice_preview
+        else "true"
+    )
+    os.environ["FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE"] = (
+        "true" if args.member_voice_preview else "false"
+    )
+    os.environ["FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT"] = args.preview_text
+    os.environ["FACE_TRAINING_MUSETALK_BBOX_SHIFT"] = str(
+        args.musetalk_bbox_shift
     )
     message = FaceTrainingMessage(
         schema_version=1,

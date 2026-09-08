@@ -9,6 +9,10 @@ import httpx
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from model_calling.schemas import PersonalityProfile, SpeechProfile
+from shared.elevenlabs_tts import (
+    ElevenLabsVoiceSettings,
+    synthesize_member_speech,
+)
 
 # 환경 변수 로드 및 API 클라이언트 초기화
 load_dotenv()
@@ -238,8 +242,7 @@ async def process_tts(
 ) -> str:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
 
-    # DB(speech)에서 voice_id를 가져오되, 없으면 .env 참조
-    voice_id = getattr(speech, "voice_id", None) or os.environ.get("ELEVENLABS_VOICE_ID")
+    voice_id = getattr(speech, "voice_id", None)
 
     if not api_key or not voice_id:
         raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
@@ -253,35 +256,19 @@ async def process_tts(
     output_m4a_path = user_assets_dir / "result_audio.m4a"
 
     print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": api_key,
-    }
-
     stability_val, style_val = calculate_voice_settings(personality)
-
-    data = {
-        "text": ai_text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": stability_val,
-            "similarity_boost": 0.9,
-            "style": style_val,
-            "use_speaker_boost": True,
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as http_client:
-        response = await http_client.post(url, json=data, headers=headers)
-
-        if response.status_code != 200:
-            error_detail = response.text
-            raise Exception(f"ElevenLabs API 오류 [{response.status_code}]: {error_detail}")
-
-        temp_mp3_path.write_bytes(response.content)
+    audio_bytes = await synthesize_member_speech(
+        text=ai_text,
+        voice_id=voice_id,
+        api_key=api_key,
+        settings=ElevenLabsVoiceSettings(
+            stability=stability_val,
+            similarity_boost=0.9,
+            style=style_val,
+            use_speaker_boost=True,
+        ),
+    )
+    temp_mp3_path.write_bytes(audio_bytes)
 
     # mp3 → m4a 변환
     # ffmpeg가 로컬/서버 환경에 설치되어 있어야 한다.
@@ -324,41 +311,24 @@ async def process_tts_bytes(
     personality: PersonalityProfile,
 ) -> bytes:
     api_key = os.environ.get("ELEVENLABS_API_KEY")
-    voice_id = getattr(speech, "voice_id", None) or os.environ.get(
-        "ELEVENLABS_VOICE_ID"
-    )
+    voice_id = getattr(speech, "voice_id", None)
 
     if not api_key or not voice_id:
         raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
 
     print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
     stability_val, style_val = calculate_voice_settings(personality)
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": api_key,
-    }
-    data = {
-        "text": ai_text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": stability_val,
-            "similarity_boost": 0.9,
-            "style": style_val,
-            "use_speaker_boost": True,
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as http_client:
-        response = await http_client.post(url, json=data, headers=headers)
-
-    if response.status_code != 200:
-        raise Exception(
-            f"ElevenLabs API 오류 [{response.status_code}]: {response.text}"
-        )
-
-    return response.content
+    return await synthesize_member_speech(
+        text=ai_text,
+        voice_id=voice_id,
+        api_key=api_key,
+        settings=ElevenLabsVoiceSettings(
+            stability=stability_val,
+            similarity_boost=0.9,
+            style=style_val,
+            use_speaker_boost=True,
+        ),
+    )
 
 
 async def clone_user_voice_from_files(

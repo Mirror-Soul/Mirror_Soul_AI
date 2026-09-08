@@ -25,6 +25,11 @@ from model_training.face_training.message import (
     FaceTrainingMessageError,
     parse_face_training_message,
 )
+from model_training.face_training.member_voice_preview import (
+    DEFAULT_MEMBER_PREVIEW_TEXT,
+    generate_member_face_preview,
+)
+from model_training.face_training.musetalk_runner import MuseTalkConfig
 from model_training.face_training.liveportrait_runner import (
     LivePortraitConfig,
     LivePortraitResult,
@@ -252,6 +257,28 @@ def _preprocess_face_training_message(
         ),
         encoding="utf-8",
     )
+    if _env_bool("FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE", False):
+        print(
+            "[FACE_TRAINING] member voice face preview started: "
+            f"user_uuid={message.user_uuid} clone_id={message.clone_id}",
+            flush=True,
+        )
+        preview_result = generate_member_face_preview(
+            manifest_path=manifest_path,
+            user_uuid=message.user_uuid,
+            clone_id=message.clone_id,
+            text=os.getenv(
+                "FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT",
+                DEFAULT_MEMBER_PREVIEW_TEXT,
+            ),
+            musetalk_config=_musetalk_config(),
+        )
+        print(
+            "[FACE_TRAINING] member voice face preview completed: "
+            f"user_uuid={message.user_uuid} clone_id={message.clone_id} "
+            f"output={preview_result.musetalk.output_path}",
+            flush=True,
+        )
     return manifest_path
 
 
@@ -485,6 +512,28 @@ def _liveportrait_config() -> LivePortraitConfig:
             if os.getenv("FACE_TRAINING_LIVEPORTRAIT_CROP_SCALE")
             else None
         ),
+    )
+
+
+def _musetalk_config() -> MuseTalkConfig:
+    return MuseTalkConfig(
+        repository_dir=Path(
+            os.getenv(
+                "FACE_TRAINING_MUSETALK_REPO_DIR",
+                "/shareHost/C084003-musetalk/MuseTalk",
+            )
+        ),
+        python_binary=Path(
+            os.getenv(
+                "FACE_TRAINING_MUSETALK_PYTHON",
+                "/shareHost/C084003-musetalk/conda-env/bin/python",
+            )
+        ),
+        timeout_seconds=_env_int(
+            "FACE_TRAINING_MUSETALK_TIMEOUT_SECONDS",
+            900,
+        ),
+        bbox_shift=_env_int("FACE_TRAINING_MUSETALK_BBOX_SHIFT", 0),
     )
 
 

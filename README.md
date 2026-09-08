@@ -90,7 +90,6 @@ pip install -r requirements.txt
 ```env
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=
 
 DB_HOST=
 DB_PORT=3306

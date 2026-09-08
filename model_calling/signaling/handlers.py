@@ -105,7 +105,7 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
     }
 
     await send_json(ws, accept_message)
-    register_call_user(call_id, clone_info.clone_user_uuid)
+    register_call_user(call_id, clone_info.clone_user_uuid, clone_info.clone_id)
     print(f"[SIGNALING] CALL_ACCEPT sent: callId={call_id}")
 
 
