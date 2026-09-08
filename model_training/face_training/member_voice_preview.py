@@ -9,6 +9,11 @@ from model_training.face_training.musetalk_runner import (
     MuseTalkResult,
     run_musetalk_preview,
 )
+from model_training.face_training.natural_motion import (
+    NaturalMotionClipResult,
+    NaturalMotionConfig,
+    prepare_natural_motion_clip,
+)
 from shared.clone_voice import ActiveCloneVoice, find_active_clone_voice
 from shared.elevenlabs_tts import (
     ElevenLabsVoiceSettings,
@@ -41,6 +46,7 @@ class MemberVoicePreviewResult:
 class MemberFacePreviewResult:
     voice: MemberVoicePreviewResult
     musetalk: MuseTalkResult
+    natural_motion: NaturalMotionClipResult | None = None
 
 
 async def generate_member_voice_preview(
@@ -92,8 +98,8 @@ def generate_member_face_preview(
     clone_id: int,
     text: str,
     musetalk_config: MuseTalkConfig,
+    natural_motion_config: NaturalMotionConfig | None = None,
 ) -> MemberFacePreviewResult:
-    source_path = select_source_from_manifest(manifest_path)
     output_root = manifest_path.parent / "outputs" / "member-voice-preview"
     voice_result = asyncio.run(
         generate_member_voice_preview(
@@ -103,6 +109,17 @@ def generate_member_face_preview(
             text=text,
         )
     )
+    natural_motion_result = None
+    if natural_motion_config is not None:
+        natural_motion_result = prepare_natural_motion_clip(
+            manifest_path,
+            voice_result.audio_path,
+            output_root / "natural-motion-source.mp4",
+            config=natural_motion_config,
+        )
+        source_path = natural_motion_result.clip_path
+    else:
+        source_path = select_source_from_manifest(manifest_path)
     musetalk_result = run_musetalk_preview(
         source_path,
         voice_result.audio_path,
@@ -113,10 +130,16 @@ def generate_member_face_preview(
         manifest_path,
         voice_result.to_dict(),
         musetalk_result.to_dict(),
+        (
+            natural_motion_result.to_dict()
+            if natural_motion_result is not None
+            else None
+        ),
     )
     return MemberFacePreviewResult(
         voice=voice_result,
         musetalk=musetalk_result,
+        natural_motion=natural_motion_result,
     )
 
 
@@ -150,11 +173,13 @@ def _record_member_face_preview(
     manifest_path: Path,
     voice_result: dict[str, object],
     musetalk_result: dict[str, object],
+    natural_motion_result: dict[str, object] | None = None,
 ) -> None:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     data["memberVoicePreview"] = {
         **voice_result,
         "museTalk": musetalk_result,
+        "naturalMotion": natural_motion_result,
     }
     temporary_path = manifest_path.with_suffix(".json.tmp")
     try:
