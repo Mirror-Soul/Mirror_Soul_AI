@@ -51,6 +51,28 @@ class NaturalMotionClipResult:
         }
 
 
+@dataclass(frozen=True)
+class NaturalIdleClipResult:
+    source_video_path: Path
+    output_path: Path
+    start_seconds: float
+    segment_duration_seconds: float
+    output_duration_seconds: float
+    front_frame_ratio: float
+    confidence: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "sourceVideoPath": str(self.source_video_path),
+            "outputPath": str(self.output_path),
+            "startSeconds": round(self.start_seconds, 3),
+            "segmentDurationSeconds": round(self.segment_duration_seconds, 3),
+            "outputDurationSeconds": round(self.output_duration_seconds, 3),
+            "frontFrameRatio": round(self.front_frame_ratio, 3),
+            "confidence": self.confidence,
+        }
+
+
 def prepare_natural_motion_clip(
     manifest_path: Path,
     audio_path: Path,
@@ -120,6 +142,104 @@ def prepare_natural_motion_clip(
         start_seconds=window.start_seconds,
         duration_seconds=audio_duration,
         score=window.score,
+        front_frame_ratio=window.front_frame_ratio,
+        confidence=window.confidence,
+    )
+
+
+def prepare_natural_idle_clip(
+    manifest_path: Path,
+    output_path: Path,
+    *,
+    output_duration_seconds: float = 30.0,
+    segment_duration_seconds: float = 2.5,
+    config: NaturalMotionConfig | None = None,
+) -> NaturalIdleClipResult:
+    if output_duration_seconds <= 0 or segment_duration_seconds <= 0:
+        raise NaturalMotionError("Idle clip durations must be greater than zero.")
+
+    motion_config = config or NaturalMotionConfig()
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    window = select_natural_motion_window(
+        data.get("videos", []),
+        target_duration_seconds=segment_duration_seconds,
+        minimum_front_ratio=motion_config.minimum_front_ratio,
+    )
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cycle_path = output_path.with_name(f".{output_path.stem}-cycle.mp4")
+
+    cycle_command = [
+        motion_config.ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{window.start_seconds:.3f}",
+        "-i",
+        str(window.source_video_path),
+        "-t",
+        f"{segment_duration_seconds:.3f}",
+        "-an",
+        "-filter_complex",
+        (
+            f"[0:v]fps={motion_config.output_fps},setpts=PTS-STARTPTS,"
+            "split=2[forward][reverse_input];"
+            "[reverse_input]reverse,setpts=PTS-STARTPTS[backward];"
+            "[forward][backward]concat=n=2:v=1:a=0[video]"
+        ),
+        "-map",
+        "[video]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "14",
+        "-pix_fmt",
+        "yuv420p",
+        str(cycle_path),
+    ]
+    loop_command = [
+        motion_config.ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(cycle_path),
+        "-t",
+        f"{output_duration_seconds:.3f}",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        str(motion_config.crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        _run_ffmpeg(cycle_command, motion_config.ffmpeg_binary)
+        _run_ffmpeg(loop_command, motion_config.ffmpeg_binary)
+    finally:
+        cycle_path.unlink(missing_ok=True)
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise NaturalMotionError(f"Natural idle clip was not created: {output_path}")
+    return NaturalIdleClipResult(
+        source_video_path=window.source_video_path,
+        output_path=output_path,
+        start_seconds=window.start_seconds,
+        segment_duration_seconds=segment_duration_seconds,
+        output_duration_seconds=output_duration_seconds,
         front_frame_ratio=window.front_frame_ratio,
         confidence=window.confidence,
     )
@@ -226,6 +346,16 @@ def probe_media_duration(path: Path, *, ffprobe_binary: str = "ffprobe") -> floa
     if duration <= 0:
         raise NaturalMotionError(f"Media duration must be greater than zero: {path}")
     return duration
+
+
+def _run_ffmpeg(command: list[str], ffmpeg_binary: str) -> None:
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise NaturalMotionError(f"ffmpeg executable not found: {ffmpeg_binary}") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "ffmpeg failed").strip()
+        raise NaturalMotionError(f"Natural idle clip creation failed: {detail}") from exc
 
 
 def _frame_penalty(frame: dict[str, Any]) -> float:

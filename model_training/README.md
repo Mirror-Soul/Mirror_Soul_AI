@@ -107,6 +107,18 @@ python -m model_training.face_training.natural_motion_preview \
   --output-dir /shareHost/C084003-musetalk/test-results/member-natural-motion
 ```
 
+긴 통화에서 사용할 듣기 상태의 움직임을 검증하려면 짧은 정면 구간을 정방향과
+역방향으로 부드럽게 순환한 무음 idle 영상을 만든다. 큰 몸짓을 생성하지 않고 실제
+영상의 눈 깜빡임과 미세한 움직임만 유지한다.
+
+```bash
+python -m model_training.face_training.idle_motion_preview \
+  --manifest /workspace/Mirror_Soul_AI/tmp/face_training/<user>/job-<id>/<run>/preprocess-manifest.json \
+  --output /shareHost/C084003-musetalk/test-results/member-idle-30s.mp4 \
+  --duration 30 \
+  --segment-duration 2.5
+```
+
 백엔드 메시지 계약:
 
 ```json

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from model_training.face_training.natural_motion import (
     NaturalMotionConfig,
+    prepare_natural_idle_clip,
     prepare_natural_motion_clip,
     select_natural_motion_window,
 )
@@ -114,6 +115,57 @@ class NaturalMotionTests(unittest.TestCase):
             ffmpeg_command = subprocess_run.call_args_list[1].args[0]
             self.assertIn("3.096", ffmpeg_command)
             self.assertIn("fps=25", ffmpeg_command)
+
+    def test_builds_long_idle_clip_from_ping_pong_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "member.mov"
+            source.write_bytes(b"video")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "videos": [
+                            {
+                                "localPath": str(source),
+                                "metadata": {"duration_seconds": 8.0},
+                                "frameSelection": {
+                                    "frames": [
+                                        _frame("front", 70.0) for _ in range(8)
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "idle.mp4"
+
+            def run(command, **kwargs):
+                Path(command[-1]).write_bytes(b"video")
+                return SimpleNamespace(stdout="", stderr="")
+
+            with patch(
+                "model_training.face_training.natural_motion.subprocess.run",
+                side_effect=run,
+            ) as subprocess_run:
+                result = prepare_natural_idle_clip(
+                    manifest,
+                    output,
+                    output_duration_seconds=30.0,
+                    segment_duration_seconds=2.5,
+                    config=NaturalMotionConfig(ffmpeg_binary="encode"),
+                )
+
+            self.assertEqual(result.output_path, output.resolve())
+            self.assertEqual(result.output_duration_seconds, 30.0)
+            self.assertEqual(subprocess_run.call_count, 2)
+            cycle_command = subprocess_run.call_args_list[0].args[0]
+            loop_command = subprocess_run.call_args_list[1].args[0]
+            self.assertIn("reverse", " ".join(cycle_command))
+            self.assertIn("-stream_loop", loop_command)
+            self.assertFalse(output.with_name(".idle-cycle.mp4").exists())
 
 
 def _frame(
