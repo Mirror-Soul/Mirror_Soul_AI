@@ -17,13 +17,29 @@
 백엔드가 온보딩 얼굴 영상을 S3에 저장한 뒤 SQS에 발행하는
 `FACE_PROFILE_BUILD` 작업을 소비한다.
 
-현재 버전은 운영 메시지 유실을 막기 위해 검증 모드만 지원한다.
+운영 모드는 얼굴 영상을 전처리해 회원별 Ditto 얼굴 프로필을 S3에 저장하고,
+처리 상태를 결과 SQS로 발행한다. 회원가입 버튼을 누른 시점이 아니라 얼굴 영상의
+S3 업로드가 완료된 시점에 백엔드가 작업을 발행해야 한다.
+
+상시 워커:
+
+```bash
+python -m model_training.face_training.worker
+```
+
+한 건만 운영 처리:
+
+```bash
+python -m model_training.face_training.worker --once
+```
+
+S3 업로드와 요청 삭제 없이 한 건을 검증:
 
 ```bash
 python -m model_training.face_training.worker --once --dry-run
 ```
 
-1차 처리 범위:
+처리 범위:
 
 - SQS 메시지 계약 검증
 - S3 얼굴 영상 다운로드
@@ -32,7 +48,14 @@ python -m model_training.face_training.worker --once --dry-run
 - 선명도, 밝기, 대비, 얼굴 크기 및 중앙 정렬 품질 검사
 - 정면 및 좌우 프로필 대표 프레임 자동 선택
 - 작업별 전처리 manifest 저장
-- SQS 메시지 유지
+- 선택된 대표 얼굴과 manifest를 회원별 S3 경로에 업로드
+- Ditto 엔진 버전과 검증된 렌더 설정을 `face-profile.json`에 저장
+- 결과 SQS에 `PROCESSING`, `COMPLETED`, `FAILED` 상태 발행
+- `COMPLETED` 발행이 성공한 뒤에만 요청 SQS 메시지 삭제
+
+얼굴 프로필은 고정 문장을 말하는 완성 영상이 아니다. 회원의 대표 얼굴, 품질 정보,
+Ditto 렌더 설정을 묶은 통화용 프로필이며 실제 통화 음성이 들어올 때 Ditto가 얼굴
+움직임을 생성한다. 가입 시 프리뷰 영상 생성은 선택 기능으로 유지한다.
 
 GPU 서버에 LivePortrait와 가중치가 준비되어 있으면 검증 모드에서 결과 영상까지
 자동 생성할 수 있다. `.env`에서 다음 설정을 활성화한다.
@@ -134,7 +157,64 @@ python -m model_training.face_training.idle_motion_preview \
 }
 ```
 
-결과 S3 업로드와 백엔드 완료 처리가 연결되기 전에는 상시 워커로 실행하지 않는다.
+성공 시 S3에 다음 객체가 생성된다.
+
+```text
+face-results/<userUuid>/job-<jobId>/portrait.jpg
+face-results/<userUuid>/job-<jobId>/preprocess-manifest.json
+face-results/<userUuid>/job-<jobId>/face-profile.json
+face-results/<userUuid>/job-<jobId>/preview.mp4  # 프리뷰가 있을 때만
+```
+
+결과 SQS 메시지 계약:
+
+```json
+{
+  "schemaVersion": 1,
+  "eventType": "FACE_PROFILE_BUILD_STATUS",
+  "jobId": 1,
+  "userUuid": "00000000-0000-0000-0000-000000000000",
+  "cloneId": 1,
+  "attemptNumber": 1,
+  "occurredAt": "2026-09-09T00:00:00+00:00",
+  "status": "COMPLETED",
+  "result": {
+    "profileStatus": "READY_FOR_RENDERING",
+    "artifacts": {
+      "bucket": "bucket-name",
+      "profileKey": "face-results/<userUuid>/job-1/face-profile.json",
+      "portraitKey": "face-results/<userUuid>/job-1/portrait.jpg",
+      "manifestKey": "face-results/<userUuid>/job-1/preprocess-manifest.json"
+    },
+    "qualityGatePassed": true
+  }
+}
+```
+
+실패 메시지는 `error.code`, `error.message`, `error.retryable=true`를 포함한다.
+기본값에서는 실패한 요청을 삭제하지 않으므로 재시도 후 DLQ로 이동하도록 요청
+큐에 redrive policy를 설정해야 한다. 백엔드는 동일 `jobId` 이벤트를 멱등하게
+처리하고, `retryable=true` 실패를 최종 실패로 확정하지 않아야 한다.
+
+운영에 필요한 환경 변수:
+
+```env
+AWS_SQS_FACE_TRAINING_QUEUE_URL=
+AWS_SQS_FACE_TRAINING_RESULT_QUEUE_URL=
+FACE_TRAINING_RESULT_PREFIX=face-results
+FACE_TRAINING_VISIBILITY_TIMEOUT=900
+FACE_TRAINING_VISIBILITY_HEARTBEAT_SECONDS=60
+FACE_TRAINING_DELETE_FAILED_MESSAGES=false
+FACE_TRAINING_ENGINE=ditto
+FACE_TRAINING_ENGINE_VERSION=v0.4-hubert-pytorch
+FACE_TRAINING_DITTO_CROP_SCALE=2.3
+FACE_TRAINING_DITTO_SMO_K_D=5
+FACE_TRAINING_DITTO_SAMPLING_TIMESTEPS=50
+```
+
+GPU IAM에는 요청 큐의 receive/delete/change-visibility 권한, 결과 큐의
+`sqs:SendMessage`, 입력 및 결과 prefix의 S3 get/put 권한이 필요하다. 백엔드는
+결과 큐의 receive/delete 권한과 DB 작업 상태 갱신 로직이 필요하다.
 
 GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
 
