@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -17,13 +18,16 @@ from model_training.face_training.worker import (
     FaceTrainingWorkerError,
     _download_face_video,
     _evaluate_liveportrait_similarity,
+    _handle_sqs_message,
     _select_liveportrait_inputs,
+    run_worker,
 )
 from model_training.face_training.face_similarity import (
     FaceSimilarityResult,
     FaceSimilarityUnavailable,
 )
 from model_training.face_training.liveportrait_runner import LivePortraitResult
+from model_training.face_training.profile_artifacts import FaceProfileArtifacts
 
 
 class _FakeS3Client:
@@ -39,7 +43,41 @@ class _FakeS3Client:
         }
 
 
+class _FakeWorkerSqsClient:
+    def __init__(self, message_body: str) -> None:
+        self.message_body = message_body
+        self.delete_calls = []
+
+    def receive_message(self, **_kwargs):
+        return {
+            "Messages": [
+                {
+                    "Body": self.message_body,
+                    "ReceiptHandle": "receipt-1",
+                    "Attributes": {"ApproximateReceiveCount": "1"},
+                }
+            ]
+        }
+
+    def delete_message(self, **kwargs):
+        self.delete_calls.append(kwargs)
+
+
 class FaceTrainingWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.message_body = json.dumps(
+            {
+                "schemaVersion": 1,
+                "jobType": "FACE_PROFILE_BUILD",
+                "jobId": 12,
+                "source": "ONBOARDING_FACE",
+                "userUuid": "16dc9bb9-e097-415f-9241-8dee558d858b",
+                "cloneId": 3,
+                "bucket": "mirror-soul-test",
+                "objectKeys": ["face-videos/member/input.mp4"],
+            }
+        )
+
     def test_downloads_video_to_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "input.mp4"
@@ -228,6 +266,136 @@ class FaceTrainingWorkerTests(unittest.TestCase):
                 )
 
         self.assertIsNone(result)
+
+    def test_production_message_publishes_completion_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "preprocess-manifest.json"
+            manifest_path.write_text(
+                '{"videos": [{"frameSelection": '
+                '{"qualityGatePassed": true}}], "faceSimilarity": null}',
+                encoding="utf-8",
+            )
+            artifacts = FaceProfileArtifacts(
+                bucket="mirror-soul-test",
+                prefix="face-results/member/job-12",
+                profile_key="face-results/member/job-12/face-profile.json",
+                portrait_key="face-results/member/job-12/portrait.jpg",
+                manifest_key=(
+                    "face-results/member/job-12/preprocess-manifest.json"
+                ),
+                preview_key=None,
+            )
+            published = []
+
+            def record_result(_client, *, queue_url, message):
+                published.append((queue_url, message))
+                return "message-id"
+
+            with patch(
+                "model_training.face_training.worker."
+                "_preprocess_face_training_message",
+                return_value=manifest_path,
+            ), patch(
+                "model_training.face_training.worker."
+                "upload_face_profile_artifacts",
+                return_value=artifacts,
+            ), patch(
+                "model_training.face_training.worker."
+                "publish_face_training_result",
+                side_effect=record_result,
+            ):
+                should_delete = _handle_sqs_message(
+                    object(),
+                    object(),
+                    {
+                        "Body": self.message_body,
+                        "Attributes": {"ApproximateReceiveCount": "2"},
+                    },
+                    result_queue_url="https://sqs.example/results",
+                )
+
+        self.assertTrue(should_delete)
+        self.assertEqual(
+            [message.status for _, message in published],
+            ["PROCESSING", "COMPLETED"],
+        )
+        self.assertEqual(published[-1][1].attempt_number, 2)
+        self.assertEqual(
+            published[-1][1].result["profileStatus"],
+            "READY_FOR_RENDERING",
+        )
+
+    def test_failed_message_is_retained_for_retry(self) -> None:
+        published = []
+
+        def record_result(_client, *, queue_url, message):
+            published.append(message)
+            return "message-id"
+
+        with patch(
+            "model_training.face_training.worker."
+            "_preprocess_face_training_message",
+            side_effect=RuntimeError("render failed"),
+        ), patch(
+            "model_training.face_training.worker."
+            "publish_face_training_result",
+            side_effect=record_result,
+        ), patch.dict(
+            os.environ,
+            {"FACE_TRAINING_DELETE_FAILED_MESSAGES": "false"},
+        ):
+            should_delete = _handle_sqs_message(
+                object(),
+                object(),
+                {"Body": self.message_body},
+                result_queue_url="https://sqs.example/results",
+            )
+
+        self.assertFalse(should_delete)
+        self.assertEqual(
+            [message.status for message in published],
+            ["PROCESSING", "FAILED"],
+        )
+        self.assertEqual(published[-1].error["code"], "RuntimeError")
+
+    def test_once_worker_deletes_only_completed_request(self) -> None:
+        sqs_client = _FakeWorkerSqsClient(self.message_body)
+
+        def client_for(service_name):
+            return sqs_client if service_name == "sqs" else object()
+
+        with patch.dict(
+            os.environ,
+            {
+                "AWS_SQS_FACE_TRAINING_QUEUE_URL": (
+                    "https://sqs.example/requests"
+                ),
+                "AWS_SQS_FACE_TRAINING_RESULT_QUEUE_URL": (
+                    "https://sqs.example/results"
+                ),
+                "FACE_TRAINING_VISIBILITY_TIMEOUT": "30",
+                "FACE_TRAINING_VISIBILITY_HEARTBEAT_SECONDS": "10",
+            },
+        ), patch(
+            "model_training.face_training.worker._boto3_client",
+            side_effect=client_for,
+        ), patch(
+            "model_training.face_training.worker._handle_sqs_message",
+            return_value=True,
+        ), patch(
+            "model_training.face_training.worker._VisibilityHeartbeat"
+        ):
+            run_worker(once=True)
+
+        self.assertEqual(
+            sqs_client.delete_calls,
+            [
+                {
+                    "QueueUrl": "https://sqs.example/requests",
+                    "ReceiptHandle": "receipt-1",
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

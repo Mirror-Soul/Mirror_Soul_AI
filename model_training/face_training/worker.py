@@ -3,6 +3,8 @@ import json
 import mimetypes
 import os
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,16 @@ from model_training.face_training.message import (
     FaceTrainingMessage,
     FaceTrainingMessageError,
     parse_face_training_message,
+)
+from model_training.face_training.profile_artifacts import (
+    FaceProfileArtifacts,
+    upload_face_profile_artifacts,
+)
+from model_training.face_training.result_message import (
+    FaceTrainingResultMessage,
+    FaceTrainingStatus,
+    failure_detail,
+    publish_face_training_result,
 )
 from model_training.face_training.member_voice_preview import (
     DEFAULT_MEMBER_PREVIEW_TEXT,
@@ -71,7 +83,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Download and preprocess one job without deleting its SQS message. "
-            "Required until the LivePortrait completion pipeline is connected."
+            "Must be combined with --once."
         ),
     )
     args = parser.parse_args()
@@ -79,10 +91,10 @@ def main() -> None:
 
 
 def run_worker(*, once: bool = False, dry_run: bool = False) -> None:
-    if not (once and dry_run):
+    if dry_run and not once:
         raise FaceTrainingWorkerError(
-            "The first worker version only supports --once --dry-run so that "
-            "production SQS messages cannot be deleted prematurely."
+            "--dry-run must be combined with --once so the same retained "
+            "message is not processed repeatedly."
         )
 
     queue_url = os.getenv("AWS_SQS_FACE_TRAINING_QUEUE_URL")
@@ -91,41 +103,186 @@ def run_worker(*, once: bool = False, dry_run: bool = False) -> None:
             "AWS_SQS_FACE_TRAINING_QUEUE_URL is not configured."
         )
 
+    result_queue_url = os.getenv("AWS_SQS_FACE_TRAINING_RESULT_QUEUE_URL")
+    if not dry_run and not result_queue_url:
+        raise FaceTrainingWorkerError(
+            "AWS_SQS_FACE_TRAINING_RESULT_QUEUE_URL is required in production mode."
+        )
+
     sqs_client = _boto3_client("sqs")
     s3_client = _boto3_client("s3")
     wait_seconds = _env_int("FACE_TRAINING_WAIT_SECONDS", 20)
     visibility_timeout = _env_int("FACE_TRAINING_VISIBILITY_TIMEOUT", 900)
-
-    print("[FACE_TRAINING] worker started: mode=dry-run", flush=True)
-    response = sqs_client.receive_message(
-        QueueUrl=queue_url,
-        MaxNumberOfMessages=1,
-        WaitTimeSeconds=wait_seconds,
-        VisibilityTimeout=visibility_timeout,
+    heartbeat_seconds = _env_int(
+        "FACE_TRAINING_VISIBILITY_HEARTBEAT_SECONDS",
+        min(60, max(1, visibility_timeout // 3)),
     )
-    messages = response.get("Messages", [])
-    if not messages:
-        print("[FACE_TRAINING] no message available", flush=True)
-        return
+    if heartbeat_seconds <= 0 or heartbeat_seconds >= visibility_timeout:
+        raise FaceTrainingWorkerError(
+            "FACE_TRAINING_VISIBILITY_HEARTBEAT_SECONDS must be greater than "
+            "zero and smaller than FACE_TRAINING_VISIBILITY_TIMEOUT."
+        )
 
-    sqs_message = messages[0]
+    mode = "dry-run" if dry_run else "production"
+    print(f"[FACE_TRAINING] worker started: mode={mode}", flush=True)
+    while True:
+        response = sqs_client.receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=wait_seconds,
+            VisibilityTimeout=visibility_timeout,
+            AttributeNames=["ApproximateReceiveCount"],
+        )
+        messages = response.get("Messages", [])
+        if not messages:
+            if once:
+                print("[FACE_TRAINING] no message available", flush=True)
+                return
+            continue
+
+        for sqs_message in messages:
+            if dry_run:
+                try:
+                    _handle_sqs_message_dry_run(s3_client, sqs_message)
+                finally:
+                    _restore_message_visibility(
+                        sqs_client,
+                        queue_url=queue_url,
+                        sqs_message=sqs_message,
+                    )
+            else:
+                heartbeat = _VisibilityHeartbeat(
+                    sqs_client,
+                    queue_url=queue_url,
+                    receipt_handle=str(sqs_message["ReceiptHandle"]),
+                    visibility_timeout=visibility_timeout,
+                    interval_seconds=heartbeat_seconds,
+                )
+                heartbeat.start()
+                try:
+                    should_delete = _handle_sqs_message(
+                        s3_client,
+                        sqs_client,
+                        sqs_message,
+                        result_queue_url=str(result_queue_url),
+                    )
+                finally:
+                    heartbeat.stop()
+                if should_delete:
+                    sqs_client.delete_message(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=sqs_message["ReceiptHandle"],
+                    )
+                    print("[FACE_TRAINING] request message deleted", flush=True)
+
+            if once:
+                return
+
+        time.sleep(_env_float("FACE_TRAINING_POLL_INTERVAL_SECONDS", 0.0))
+
+
+def _handle_sqs_message(
+    s3_client: Any,
+    sqs_client: Any,
+    sqs_message: dict[str, Any],
+    *,
+    result_queue_url: str,
+) -> bool:
     try:
-        _handle_sqs_message(s3_client, sqs_message)
-    finally:
-        receipt_handle = sqs_message.get("ReceiptHandle")
-        if receipt_handle:
-            sqs_client.change_message_visibility(
-                QueueUrl=queue_url,
-                ReceiptHandle=receipt_handle,
-                VisibilityTimeout=0,
+        message = parse_face_training_message(sqs_message.get("Body", ""))
+    except FaceTrainingMessageError as exc:
+        print(f"[FACE_TRAINING] invalid message: {exc}", flush=True)
+        return _env_bool("FACE_TRAINING_DELETE_INVALID_MESSAGES", True)
+
+    attempt_number = _receive_count(sqs_message)
+    try:
+        _publish_status(
+            sqs_client,
+            result_queue_url=result_queue_url,
+            message=message,
+            status="PROCESSING",
+            attempt_number=attempt_number,
+        )
+    except Exception as exc:
+        print(
+            "[FACE_TRAINING] processing status publish failed; request retained: "
+            f"job_id={message.job_id} error={exc}",
+            flush=True,
+        )
+        return False
+
+    try:
+        manifest_path = _preprocess_face_training_message(s3_client, message)
+        artifacts = upload_face_profile_artifacts(
+            s3_client,
+            message=message,
+            manifest_path=manifest_path,
+            result_prefix=os.getenv("FACE_TRAINING_RESULT_PREFIX", "face-results"),
+            engine=os.getenv("FACE_TRAINING_ENGINE", "ditto"),
+            engine_version=os.getenv(
+                "FACE_TRAINING_ENGINE_VERSION",
+                "v0.4-hubert-pytorch",
+            ),
+            crop_scale=_env_float("FACE_TRAINING_DITTO_CROP_SCALE", 2.3),
+            smoothing_kernel=_env_int("FACE_TRAINING_DITTO_SMO_K_D", 5),
+            sampling_timesteps=_env_int(
+                "FACE_TRAINING_DITTO_SAMPLING_TIMESTEPS",
+                50,
+            ),
+        )
+    except Exception as exc:
+        print(
+            f"[FACE_TRAINING] job failed: job_id={message.job_id} error={exc}",
+            flush=True,
+        )
+        try:
+            _publish_status(
+                sqs_client,
+                result_queue_url=result_queue_url,
+                message=message,
+                status="FAILED",
+                attempt_number=attempt_number,
+                error=failure_detail(exc),
             )
+        except Exception as publish_exc:
             print(
-                "[FACE_TRAINING] dry-run message visibility restored",
+                "[FACE_TRAINING] failure status publish failed; request retained: "
+                f"job_id={message.job_id} error={publish_exc}",
                 flush=True,
             )
+            return False
+        return _env_bool("FACE_TRAINING_DELETE_FAILED_MESSAGES", False)
+
+    try:
+        _publish_status(
+            sqs_client,
+            result_queue_url=result_queue_url,
+            message=message,
+            status="COMPLETED",
+            attempt_number=attempt_number,
+            result=_completion_result(manifest_path, artifacts),
+        )
+    except Exception as exc:
+        print(
+            "[FACE_TRAINING] completion status publish failed; request retained: "
+            f"job_id={message.job_id} error={exc}",
+            flush=True,
+        )
+        return False
+
+    print(
+        "[FACE_TRAINING] completed: "
+        f"job_id={message.job_id} profile=s3://{artifacts.bucket}/"
+        f"{artifacts.profile_key}",
+        flush=True,
+    )
+    return True
 
 
-def _handle_sqs_message(s3_client: Any, sqs_message: dict[str, Any]) -> None:
+def _handle_sqs_message_dry_run(
+    s3_client: Any,
+    sqs_message: dict[str, Any],
+) -> None:
     try:
         message = parse_face_training_message(sqs_message.get("Body", ""))
     except FaceTrainingMessageError as exc:
@@ -146,6 +303,132 @@ def _handle_sqs_message(s3_client: Any, sqs_message: dict[str, Any]) -> None:
         f"job_id={message.job_id} manifest={manifest_path}",
         flush=True,
     )
+
+
+def _publish_status(
+    sqs_client: Any,
+    *,
+    result_queue_url: str,
+    message: FaceTrainingMessage,
+    status: FaceTrainingStatus,
+    attempt_number: int,
+    result: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+) -> None:
+    message_id = publish_face_training_result(
+        sqs_client,
+        queue_url=result_queue_url,
+        message=FaceTrainingResultMessage(
+            job_id=message.job_id,
+            user_uuid=message.user_uuid,
+            clone_id=message.clone_id,
+            status=status,
+            attempt_number=attempt_number,
+            result=result,
+            error=error,
+        ),
+    )
+    print(
+        "[FACE_TRAINING] status published: "
+        f"job_id={message.job_id} status={status} message_id={message_id}",
+        flush=True,
+    )
+
+
+def _completion_result(
+    manifest_path: Path,
+    artifacts: FaceProfileArtifacts,
+) -> dict[str, Any]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    selections = [
+        video.get("frameSelection") or {}
+        for video in manifest.get("videos", [])
+    ]
+    return {
+        "profileStatus": "READY_FOR_RENDERING",
+        "artifacts": artifacts.to_dict(),
+        "qualityGatePassed": any(
+            bool(selection.get("qualityGatePassed")) for selection in selections
+        ),
+        "faceSimilarity": manifest.get("faceSimilarity"),
+    }
+
+
+def _receive_count(sqs_message: dict[str, Any]) -> int:
+    raw_value = (sqs_message.get("Attributes") or {}).get(
+        "ApproximateReceiveCount",
+        "1",
+    )
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _restore_message_visibility(
+    sqs_client: Any,
+    *,
+    queue_url: str,
+    sqs_message: dict[str, Any],
+) -> None:
+    receipt_handle = sqs_message.get("ReceiptHandle")
+    if not receipt_handle:
+        return
+    sqs_client.change_message_visibility(
+        QueueUrl=queue_url,
+        ReceiptHandle=receipt_handle,
+        VisibilityTimeout=0,
+    )
+    print("[FACE_TRAINING] dry-run message visibility restored", flush=True)
+
+
+class _VisibilityHeartbeat:
+    def __init__(
+        self,
+        sqs_client: Any,
+        *,
+        queue_url: str,
+        receipt_handle: str,
+        visibility_timeout: int,
+        interval_seconds: int,
+    ) -> None:
+        self._sqs_client = sqs_client
+        self._queue_url = queue_url
+        self._receipt_handle = receipt_handle
+        self._visibility_timeout = visibility_timeout
+        self._interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="face-training-visibility-heartbeat",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=max(1, self._interval_seconds + 1))
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                self._sqs_client.change_message_visibility(
+                    QueueUrl=self._queue_url,
+                    ReceiptHandle=self._receipt_handle,
+                    VisibilityTimeout=self._visibility_timeout,
+                )
+                print(
+                    "[FACE_TRAINING] request visibility extended",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    "[FACE_TRAINING] visibility extension failed: "
+                    f"error={exc}",
+                    flush=True,
+                )
 
 
 def _preprocess_face_training_message(
