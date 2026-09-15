@@ -26,7 +26,7 @@ Mirror Soul 프로젝트의 AI 응답 생성, 회원별 개인화, 음성 합성
 - 회원별 음성 ID 또는 기본 음성을 이용한 답변 생성
 - Big Five 성격 수치를 반영한 TTS 설정 조정
 
-### 실시간 AI 음성통화
+### 실시간 AI 통화
 
 - 백엔드 WebSocket 시그널링 서버에 `ai-server`로 접속
 - `CALL_INVITE`, `CALL_ACCEPT`, `OFFER`, `ANSWER`, `ICE`, `CALL_END` 처리
@@ -43,6 +43,10 @@ Mirror Soul 프로젝트의 AI 응답 생성, 회원별 개인화, 음성 합성
 → WebRTC 오디오 송출
 → 프론트 스피커
 ```
+
+`VIDEO` 통화는 같은 TTS 음성을 Ditto GPU 서비스로 렌더링한 뒤 WebRTC 비디오
+트랙으로 함께 송출한다. 현재 방식은 답변 단위 MP4 렌더 후 재생하는 턴 기반 연결이며,
+Ditto 생성 도중의 프레임 스트리밍은 후속 최적화 범위다.
 
 실시간 파이프라인은 코드 구현 및 로컬 WebRTC 검증을 완료했으며, 실제 앱·통화 서버·외부 API를 함께 사용하는 통합 테스트가 필요합니다.
 
@@ -140,6 +144,7 @@ AI 응답 파이프라인이 정상적으로 처리되면 다음 로그가 추�
 ## 현재 확인이 필요한 항목
 
 - 실제 React Native 앱과 통화 서버를 이용한 통합 테스트
+- React Native `VIDEO` offer의 수신 비디오 transceiver 및 원격 트랙 표시
 - 서버 환경의 TURN 연결 및 외부 네트워크 통화 검증
 - 회원별 ElevenLabs Voice ID 저장·조회 계약
 - 통화 지연시간, STT 정확도 및 음성 자연스러움 개선

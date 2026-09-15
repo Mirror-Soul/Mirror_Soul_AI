@@ -61,6 +61,16 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
         )
         return
 
+    media_type = str(media_type).upper()
+    if media_type not in {"VOICE", "VIDEO"}:
+        await send_call_reject(
+            ws,
+            message,
+            reason="INVALID_MEDIA_TYPE",
+            detail="지원하지 않는 통화 미디어 형식입니다.",
+        )
+        return
+
     try:
         # RDS 접근은 동기 DB 드라이버를 사용하므로 이벤트 루프를 막지 않도록 별도 스레드에서 실행한다.
         clone_info = await asyncio.to_thread(
@@ -105,7 +115,12 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
     }
 
     await send_json(ws, accept_message)
-    register_call_user(call_id, clone_info.clone_user_uuid, clone_info.clone_id)
+    register_call_user(
+        call_id,
+        clone_info.clone_user_uuid,
+        clone_info.clone_id,
+        media_type,
+    )
     print(f"[SIGNALING] CALL_ACCEPT sent: callId={call_id}")
 
 
