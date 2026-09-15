@@ -57,6 +57,34 @@ python -m model_training.face_training.worker --once --dry-run
 Ditto 렌더 설정을 묶은 통화용 프로필이며 실제 통화 음성이 들어올 때 Ditto가 얼굴
 움직임을 생성한다. 가입 시 프리뷰 영상 생성은 선택 기능으로 유지한다.
 
+### Ditto 독립 렌더 검증
+
+백엔드, SQS 또는 S3 없이 얼굴 이미지와 WAV 파일로 Ditto 실행 경계를 검증할 수 있다.
+기본값은 v7 비교에서 선택한 `crop_scale=2.3`, `smo_k_d=5`,
+`sampling_timesteps=50`, seed `1024`다.
+
+```bash
+python -m model_training.face_training.ditto_preview \
+  --source /shareHost/C084003-ditto/test-inputs/namseonghyeon-front.jpg \
+  --audio /shareHost/C084003-ditto/test-inputs/namseonghyeon-preview.wav \
+  --output /shareHost/C084003-ditto/test-results/runner-smoke-test.mp4
+```
+
+S3에서 내려받은 `face-profile.json`의 회원별 설정을 사용하려면 `--profile`을
+추가한다. 명령줄의 `--crop-scale`, `--smo-k-d`, `--sampling-timesteps`는 프로필
+값보다 우선한다.
+
+```bash
+python -m model_training.face_training.ditto_preview \
+  --source /path/to/portrait.jpg \
+  --audio /path/to/member.wav \
+  --profile /path/to/face-profile.json \
+  --output /path/to/member-preview.mp4
+```
+
+실행 결과와 오류는 출력 영상 옆의 `*.ditto.log`에 저장된다. 이 실행 모듈은 향후
+GPU 렌더링 API와 WebRTC 비디오 트랙이 공통으로 사용한다.
+
 GPU 서버에 LivePortrait와 가중치가 준비되어 있으면 검증 모드에서 결과 영상까지
 자동 생성할 수 있다. `.env`에서 다음 설정을 활성화한다.
 
