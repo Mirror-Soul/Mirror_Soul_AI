@@ -11,6 +11,7 @@ from model_calling.schemas import PersonalityProfile, SpeechProfile
 from model_calling.services import process_llm, process_stt, process_tts_bytes
 from model_calling.utils import load_user_persona
 from model_calling.realtime.audio import QueuedAudioTrack, receive_utterances
+from model_calling.realtime.ditto import DittoVideoSession
 from model_training.base_profiles import get_mbti_base_profile
 from model_training.services import search_user_memories
 from shared.clone_voice import find_active_clone_voice
@@ -194,6 +195,7 @@ async def start_realtime_audio(
     incoming_track: Any,
     output_track: QueuedAudioTrack,
     utterance_queue: asyncio.Queue[bytes],
+    video_renderer: DittoVideoSession | None = None,
 ) -> tuple[asyncio.Task, asyncio.Task]:
     async def enqueue_utterance(wav_bytes: bytes) -> None:
         if utterance_queue.full():
@@ -224,6 +226,25 @@ async def start_realtime_audio(
                         f"user={user_id} audio_bytes={len(reply_audio)}",
                         flush=True,
                     )
+                    if video_renderer is not None:
+                        try:
+                            print(
+                                "[REALTIME] Ditto reply render started: "
+                                f"user={user_id}",
+                                flush=True,
+                            )
+                            await video_renderer.enqueue_reply(reply_audio)
+                            print(
+                                "[REALTIME] Ditto reply video queued: "
+                                f"user={user_id}",
+                                flush=True,
+                            )
+                        except Exception as exc:
+                            print(
+                                "[REALTIME] Ditto reply render failed; "
+                                f"continuing audio only: {exc!r}",
+                                flush=True,
+                            )
                     output_track.enqueue_encoded_audio(reply_audio)
                     print("[REALTIME] reply audio queued", flush=True)
                 else:

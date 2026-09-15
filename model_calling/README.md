@@ -1,6 +1,6 @@
 # Model Calling
 
-## Realtime voice call
+## Realtime call
 
 The realtime call pipeline runs automatically when `main.py` starts.
 
@@ -12,6 +12,55 @@ WebRTC microphone track
 -> ElevenLabs TTS
 -> WebRTC output audio track
 ```
+
+For a `VIDEO` call, the same synthesized reply is rendered by the persistent
+Ditto GPU service before playback.
+
+```text
+ElevenLabs MP3
+-> Ditto GPU render API
+-> queued 25 fps video track
+-> audio and video playback
+-> idle portrait after the reply ends
+```
+
+`VOICE` calls keep the existing audio-only behavior. `VIDEO` calls add both an
+audio and video sender before the answer SDP is created. The caller's offer must
+therefore include a video transceiver capable of receiving the AI video track.
+
+Required video-call environment variables:
+
+```env
+DITTO_CALL_SERVICE_URL=https://ditto.internal:8080
+DITTO_CALL_SERVICE_API_KEY=
+DITTO_CALL_S3_BUCKET=mirrorsoul-storage-64
+DITTO_CALL_FACE_RESULT_PREFIX=face-results
+REALTIME_VIDEO_WIDTH=540
+REALTIME_VIDEO_HEIGHT=960
+REALTIME_VIDEO_FPS=25
+```
+
+The call server loads the newest
+`face-results/{userUuid}/job-*/face-profile.json` and its portrait from S3 once
+per call. Its IAM role needs `s3:ListBucket` on the configured prefix and
+`s3:GetObject` for profile and portrait objects. A local portrait can be used
+for an integration test before the backend profile tables are ready:
+
+```env
+DITTO_CALL_SERVICE_URL=http://127.0.0.1:8080
+DITTO_CALL_SERVICE_API_KEY=
+DITTO_CALL_LOCAL_PORTRAIT_PATH=/path/to/portrait.jpg
+DITTO_CALL_LOCAL_PROFILE_PATH=/path/to/face-profile.json
+```
+
+Plain HTTP is accepted only for loopback by default. For a Tailscale,
+WireGuard, or equivalent encrypted private tunnel, set
+`DITTO_CALL_ALLOW_INSECURE_HTTP=true`; use HTTPS on other networks.
+
+The current implementation is turn-based: it waits for the complete TTS audio
+and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the
+first video-call integration but does not yet provide frame-by-frame streaming
+while the answer is being generated.
 
 The first implementation is turn based. A user utterance is finalized after a
 short silence, then the answer is generated and played.

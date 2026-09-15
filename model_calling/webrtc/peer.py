@@ -14,12 +14,17 @@ from model_calling.webrtc.session import (
     WebRTCSession,
     close_session,
     get_call_clone_id,
+    get_call_media_type,
     get_call_user,
     get_session,
     save_session,
 )
 from model_calling.realtime.audio import QueuedAudioTrack
-from model_calling.realtime import start_realtime_audio
+from model_calling.realtime.ditto import (
+    DittoRealtimeError,
+    create_ditto_video_session,
+)
+from model_calling.realtime.video import QueuedVideoTrack
 
 load_dotenv()
 
@@ -88,6 +93,8 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
             return
 
         async def start_pipeline() -> None:
+            from model_calling.realtime.pipeline import start_realtime_audio
+
             print(
                 "[WEBRTC] starting realtime pipeline for track: "
                 f"callId={call_id} user={session.clone_user_uuid} "
@@ -100,6 +107,7 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
                 incoming_track=track,
                 output_track=session.output_track,
                 utterance_queue=session.utterance_queue,
+                video_renderer=session.video_renderer,
             )
             session.receiver_task = receiver_task
             session.pipeline_task = pipeline_task
@@ -131,11 +139,38 @@ async def create_answer_from_offer(
         clone_id = get_call_clone_id(call_id)
         if clone_id is None:
             raise ValueError(f"Call clone not registered: callId={call_id}")
+        media_type = get_call_media_type(call_id) or "VOICE"
 
         pc = create_peer_connection(call_id)
         output_track = QueuedAudioTrack()
         pc.addTrack(output_track)
         print(f"[WEBRTC] output audio track added: callId={call_id}", flush=True)
+        output_video_track = None
+        video_renderer = None
+        if media_type == "VIDEO":
+            output_video_track = QueuedVideoTrack(
+                width=int(os.getenv("REALTIME_VIDEO_WIDTH", "540")),
+                height=int(os.getenv("REALTIME_VIDEO_HEIGHT", "960")),
+                fps=int(os.getenv("REALTIME_VIDEO_FPS", "25")),
+            )
+            pc.addTrack(output_video_track)
+            try:
+                video_renderer = create_ditto_video_session(
+                    user_id=clone_user_uuid,
+                    clone_id=clone_id,
+                    track=output_video_track,
+                )
+            except DittoRealtimeError as exc:
+                print(
+                    "[WEBRTC] Ditto video renderer unavailable: "
+                    f"callId={call_id} error={exc}",
+                    flush=True,
+                )
+            print(
+                "[WEBRTC] output video track added: "
+                f"callId={call_id} renderer={'enabled' if video_renderer else 'disabled'}",
+                flush=True,
+            )
         session = WebRTCSession(
             call_id=call_id,
             room_id=room_id,
@@ -146,8 +181,27 @@ async def create_answer_from_offer(
             clone_id=clone_id,
             output_track=output_track,
             utterance_queue=asyncio.Queue(maxsize=2),
+            media_type=media_type,
+            output_video_track=output_video_track,
+            video_renderer=video_renderer,
         )
         save_session(session)
+        if video_renderer is not None:
+            async def prepare_video() -> None:
+                try:
+                    await video_renderer.prepare()
+                    print(
+                        f"[WEBRTC] idle portrait ready: callId={call_id}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(
+                        "[WEBRTC] idle portrait preparation failed: "
+                        f"callId={call_id} error={exc!r}",
+                        flush=True,
+                    )
+
+            session.video_prepare_task = asyncio.create_task(prepare_video())
         print(
             "[WEBRTC] session created: "
             f"callId={call_id} roomId={room_id} "
