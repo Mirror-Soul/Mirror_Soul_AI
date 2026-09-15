@@ -1,5 +1,95 @@
 # Mirror Soul GPU 서버 접속 가이드
 
+## 현재 기본 작업 환경: Ditto + VS Code Remote-SSH
+
+얼굴 모델의 최신 작업은 LivePortrait 환경이 아니라 Ditto 환경이다. CMD 또는
+PowerShell에서는 GPU 호스트에 접속해 팀 컨테이너만 시작한다. 코드 편집과 실행은
+반드시 VS Code Remote-SSH의 `mirrorsoul-gpu-container`에서 진행한다.
+
+### 마지막 정상 접속 상태
+
+2026-09-15에 아래 상태로 재접속을 확인했다.
+
+```text
+(/shareHost/C084003-ditto/conda-env) mirrorsoul@TeamC084003:/shareHost/C084003-ditto/ditto-talkinghead$
+```
+
+이 프롬프트가 보이면 최신 Ditto 작업 환경 복구가 완료된 것이다. VS Code 터미널이
+좁아 경로가 두 줄로 나뉘어 보여도 단순 화면 줄바꿈이므로 문제가 아니다.
+
+중요: CMD에서는 GPU 호스트에 로그인하여 `sudo docker start C084003`만 실행하고
+`exit`한다. 이후 VS Code Remote-SSH에서 `mirrorsoul-gpu-container`를 선택한다.
+`docker exec`로 개발을 이어가는 방식은 최신 Ditto 작업 흐름이 아니다.
+
+### 1. CMD에서 컨테이너만 시작
+
+```powershell
+ssh -p 20405 C084003@203.249.75.55
+```
+
+GPU 호스트에 로그인한 뒤:
+
+```bash
+sudo docker start C084003
+exit
+```
+
+여기서는 `docker exec`로 개발 환경에 들어가지 않는다.
+
+### 2. VS Code에서 Ditto 컨테이너 접속
+
+VS Code에서 `Ctrl+Shift+P`를 누르고 다음 순서로 선택한다.
+
+```text
+Remote-SSH: Connect to Host...
+mirrorsoul-gpu-container
+```
+
+접속 후 `File > Open Folder...`에서 다음 폴더를 연다.
+
+```text
+/shareHost/C084003-ditto/ditto-talkinghead
+```
+
+로컬 PowerShell에서 VS Code를 바로 열 때는 다음 명령도 사용할 수 있다.
+
+```powershell
+code --remote ssh-remote+mirrorsoul-gpu-container /shareHost/C084003-ditto/ditto-talkinghead
+```
+
+### 3. VS Code 통합 터미널에서 환경 활성화
+
+```bash
+conda activate /shareHost/C084003-ditto/conda-env
+cd /shareHost/C084003-ditto/ditto-talkinghead
+```
+
+최신 작업 기준은 다음과 같다.
+
+| 구분 | 값 |
+| --- | --- |
+| Ditto 커밋 | `c3e47ee` |
+| Conda 환경 | `/shareHost/C084003-ditto/conda-env` |
+| GPU | RTX 4090 |
+| PyTorch | `2.5.1+cu121` |
+| ONNX Runtime | `1.20.2` |
+| 체크포인트 | `checkpoints/` (약 2.2GB) |
+| 서버 결과 | `/shareHost/C084003-ditto/test-results/namseonghyeon-hello-ditto.mp4` |
+| 최초 Ditto 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v6\namseonghyeon-hello-ditto.mp4` |
+| 최신 비교 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v7` |
+| 최종 선택 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v7\02-smooth.mp4` |
+
+남성현 얼굴과 실제 복제 음성으로 Ditto 생성까지 성공했다. v7에서 `balanced`,
+`smooth`, `very-smooth`, `high-quality` 설정 후보 4개를 비교했고,
+`02-smooth.mp4`가 가장 자연스럽다는 결론을 내렸다. 다음 작업은 smooth 설정을 최종
+기준으로 고정한 뒤 회원별 자동 생성 파이프라인과 S3 업로드로 이어간다.
+
+---
+
+## 이전 환경: LivePortrait 직접 셸 작업
+
+아래 절차는 과거 LivePortrait 환경을 복구해야 할 때만 사용한다.
+
 이 문서는 홍익대학교 GPU 5번 서버의 Mirror Soul 팀 컨테이너에 다시 접속해
 얼굴 모델 개발 환경을 이어서 사용하는 절차를 정리한다.
 
