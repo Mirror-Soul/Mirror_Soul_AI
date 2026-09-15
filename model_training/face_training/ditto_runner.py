@@ -85,7 +85,7 @@ def load_ditto_render_settings(profile_path: Path) -> DittoRenderSettings:
             "Face profile is missing valid Ditto render settings."
         ) from exc
 
-    _validate_settings(settings)
+    validate_ditto_render_settings(settings)
     return settings
 
 
@@ -241,7 +241,7 @@ def _validate_inputs(
     config: DittoConfig,
     settings: DittoRenderSettings,
 ) -> None:
-    _validate_settings(settings)
+    validate_ditto_render_settings(settings)
     if config.timeout_seconds <= 0:
         raise DittoRunnerError("Ditto timeout must be positive.")
     if output_path.suffix.lower() != ".mp4":
@@ -265,7 +265,7 @@ def _validate_inputs(
             raise DittoRunnerError(f"{label} not found: {path}")
 
 
-def _validate_settings(settings: DittoRenderSettings) -> None:
+def validate_ditto_render_settings(settings: DittoRenderSettings) -> None:
     if settings.crop_scale <= 0:
         raise DittoRunnerError("Ditto crop scale must be positive.")
     if settings.smoothing_kernel <= 0 or settings.smoothing_kernel % 2 == 0:
