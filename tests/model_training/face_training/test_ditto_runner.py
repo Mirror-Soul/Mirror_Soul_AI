@@ -65,11 +65,23 @@ class DittoRunnerTests(unittest.TestCase):
                         smoothing_kernel=5,
                         sampling_timesteps=50,
                     ),
+                    drive_eye=True,
+                    blink_strength=0.7,
                 )
 
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--crop-scale") + 1], "2.3")
             self.assertEqual(command[command.index("--smo-k-d") + 1], "5")
+            self.assertEqual(command[command.index("--smo-k-s") + 1], "13")
+            self.assertEqual(
+                command[command.index("--blink-open-frames") + 1],
+                "0",
+            )
+            self.assertIn("--drive-eye", command)
+            self.assertEqual(
+                command[command.index("--blink-strength") + 1],
+                "0.7",
+            )
             self.assertEqual(
                 command[command.index("--sampling-timesteps") + 1], "50"
             )
@@ -130,6 +142,57 @@ class DittoRunnerTests(unittest.TestCase):
                         python_binary=python,
                     ),
                     settings=DittoRenderSettings(smoothing_kernel=4),
+                )
+
+    def test_rejects_even_source_smoothing_kernel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository, python, source, audio, output = self._paths(directory)
+            with self.assertRaisesRegex(
+                DittoRunnerError,
+                "source smoothing kernel",
+            ):
+                run_ditto_preview(
+                    source,
+                    audio,
+                    output,
+                    config=DittoConfig(
+                        repository_dir=repository,
+                        python_binary=python,
+                    ),
+                    source_smoothing_kernel=12,
+                )
+
+    def test_rejects_negative_blink_open_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository, python, source, audio, output = self._paths(directory)
+            with self.assertRaisesRegex(
+                DittoRunnerError,
+                "blink open frames",
+            ):
+                run_ditto_preview(
+                    source,
+                    audio,
+                    output,
+                    config=DittoConfig(
+                        repository_dir=repository,
+                        python_binary=python,
+                    ),
+                    blink_open_frames=-1,
+                )
+
+    def test_rejects_blink_strength_above_one(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository, python, source, audio, output = self._paths(directory)
+            with self.assertRaisesRegex(DittoRunnerError, "blink strength"):
+                run_ditto_preview(
+                    source,
+                    audio,
+                    output,
+                    config=DittoConfig(
+                        repository_dir=repository,
+                        python_binary=python,
+                    ),
+                    blink_strength=1.1,
                 )
 
     def test_reports_process_failure_with_log_path(self) -> None:

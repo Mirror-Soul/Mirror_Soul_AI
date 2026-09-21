@@ -1,5 +1,8 @@
 from fastapi import APIRouter
 
+from model_training.clone_training_callback import (
+    notify_personality_training_complete,
+)
 from model_training.schemas import (
     DeleteRagDataResponse,
     MemberProfileRequest,
@@ -60,6 +63,7 @@ def add_member_profile(request: MemberProfileRequest):
         interview_samples=interview_samples,
         keyword_limit=request.keywordLimit,
     )
+    notify_personality_training_complete(request.cloneId)
 
     return MemberProfileResponse(
         success=True,

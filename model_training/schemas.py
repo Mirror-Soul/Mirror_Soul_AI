@@ -29,6 +29,7 @@ class InterviewKeywordSource(BaseModel):
 
 class MemberProfileRequest(BaseModel):
     userId: str = Field(..., description="백엔드 회원 ID")
+    cloneId: int = Field(..., gt=0, description="완료 처리할 클론 ID")
     aiProfileId: str | None = Field(None, description="AI 프로필 ID")
     age: int | None = Field(None, ge=0, le=130, description="회원 나이")
     gender: str | None = Field(None, description="회원 성별")

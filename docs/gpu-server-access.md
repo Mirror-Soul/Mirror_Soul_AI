@@ -76,13 +76,14 @@ cd /shareHost/C084003-ditto/ditto-talkinghead
 | 체크포인트 | `checkpoints/` (약 2.2GB) |
 | 서버 결과 | `/shareHost/C084003-ditto/test-results/namseonghyeon-hello-ditto.mp4` |
 | 최초 Ditto 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v6\namseonghyeon-hello-ditto.mp4` |
-| 최신 비교 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v7` |
-| 최종 선택 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v7\02-smooth.mp4` |
+| 최신 비교 결과 | `E:\Mirror_Soul_AI\얼굴 모델 작업\v12` |
+| 김동빈 최신 추천 | `v12\review\recommended-clone-5-advance00.mp4` |
+| 남성현 최신 추천 | `v12\review\recommended-clone-4-advance20.mp4` |
 
-남성현 얼굴과 실제 복제 음성으로 Ditto 생성까지 성공했다. v7에서 `balanced`,
-`smooth`, `very-smooth`, `high-quality` 설정 후보 4개를 비교했고,
-`02-smooth.mp4`가 가장 자연스럽다는 결론을 내렸다. 다음 작업은 smooth 설정을 최종
-기준으로 고정한 뒤 회원별 자동 생성 파이프라인과 S3 업로드로 이어간다.
+남성현 얼굴과 실제 복제 음성으로 Ditto 생성까지 성공했다. v7의 `02-smooth`를
+출발점으로 v8~v12에서 자연 움직임, 부드러운 눈 깜빡임, 다중 회원, 입 벌림 강도,
+VAD와 회원별 립싱크 타이밍을 개선했다. 최신 품질 기준과 운영 파이프라인 중단점은
+`docs/face-model-current-state.md`의 12~14절을 확인한다.
 
 ---
 

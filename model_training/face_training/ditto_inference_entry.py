@@ -18,6 +18,14 @@ def main() -> None:
     parser.add_argument("--output-path", required=True)
     parser.add_argument("--crop-scale", type=float, required=True)
     parser.add_argument("--smo-k-d", type=int, required=True)
+    parser.add_argument("--smo-k-s", type=int, default=13)
+    parser.add_argument("--blink-open-frames", type=int, default=0)
+    parser.add_argument(
+        "--drive-eye",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--blink-strength", type=float, default=1.0)
     parser.add_argument("--sampling-timesteps", type=int, required=True)
     parser.add_argument("--seed", type=int, default=1024)
     args = parser.parse_args()
@@ -31,6 +39,13 @@ def main() -> None:
 
     seed_everything(args.seed)
     sdk = StreamSDK(args.config_path, args.data_root)
+    if args.blink_strength != 1.0:
+        delta_eye_arr = sdk.default_kwargs.get("delta_eye_arr")
+        if delta_eye_arr is None:
+            raise RuntimeError("Ditto config does not contain delta_eye_arr.")
+        sdk.default_kwargs["delta_eye_arr"] = (
+            delta_eye_arr * args.blink_strength
+        )
     run(
         sdk,
         args.audio_path,
@@ -40,6 +55,9 @@ def main() -> None:
             "setup_kwargs": {
                 "crop_scale": args.crop_scale,
                 "smo_k_d": args.smo_k_d,
+                "smo_k_s": args.smo_k_s,
+                "delta_eye_open_n": args.blink_open_frames,
+                "drive_eye": args.drive_eye,
                 "sampling_timesteps": args.sampling_timesteps,
             }
         },

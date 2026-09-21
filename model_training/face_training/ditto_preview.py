@@ -27,6 +27,14 @@ def main() -> None:
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--crop-scale", type=float)
     parser.add_argument("--smo-k-d", type=int)
+    parser.add_argument("--smo-k-s", type=int)
+    parser.add_argument("--blink-open-frames", type=int)
+    parser.add_argument(
+        "--drive-eye",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--blink-strength", type=float)
     parser.add_argument("--sampling-timesteps", type=int)
     parser.add_argument("--seed", type=int)
     args = parser.parse_args()
@@ -83,6 +91,22 @@ def main() -> None:
             ),
         ),
         settings=settings,
+        source_smoothing_kernel=(
+            args.smo_k_s
+            if args.smo_k_s is not None
+            else _env_int("FACE_TRAINING_DITTO_SMO_K_S", 13)
+        ),
+        blink_open_frames=(
+            args.blink_open_frames
+            if args.blink_open_frames is not None
+            else _env_int("FACE_TRAINING_DITTO_BLINK_OPEN_FRAMES", 0)
+        ),
+        drive_eye=args.drive_eye,
+        blink_strength=(
+            args.blink_strength
+            if args.blink_strength is not None
+            else _env_float("FACE_TRAINING_DITTO_BLINK_STRENGTH", 1.0)
+        ),
     )
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
 
