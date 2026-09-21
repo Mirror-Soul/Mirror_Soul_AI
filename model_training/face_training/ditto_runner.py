@@ -96,6 +96,10 @@ def run_ditto_preview(
     *,
     config: DittoConfig,
     settings: DittoRenderSettings = DittoRenderSettings(),
+    source_smoothing_kernel: int = 13,
+    blink_open_frames: int = 0,
+    drive_eye: bool | None = None,
+    blink_strength: float = 1.0,
 ) -> DittoResult:
     source_path = source_path.resolve()
     audio_path = audio_path.resolve()
@@ -125,13 +129,16 @@ def run_ditto_preview(
         entry_path=entry_path,
         config=config,
         settings=settings,
+        source_smoothing_kernel=source_smoothing_kernel,
+        blink_open_frames=blink_open_frames,
+        blink_strength=blink_strength,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_output_path = output_path.with_name(
         f".{output_path.stem}.{uuid4().hex}.tmp{output_path.suffix}"
     )
 
-    command = (
+    command = [
         str(python_binary),
         str(entry_path),
         "--repository-dir",
@@ -150,11 +157,20 @@ def run_ditto_preview(
         str(settings.crop_scale),
         "--smo-k-d",
         str(settings.smoothing_kernel),
+        "--smo-k-s",
+        str(source_smoothing_kernel),
+        "--blink-open-frames",
+        str(blink_open_frames),
+        "--blink-strength",
+        str(blink_strength),
         "--sampling-timesteps",
         str(settings.sampling_timesteps),
         "--seed",
         str(config.seed),
-    )
+    ]
+    if drive_eye is not None:
+        command.append("--drive-eye" if drive_eye else "--no-drive-eye")
+    command = tuple(command)
     environment = os.environ.copy()
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PATH"] = os.pathsep.join(
@@ -240,8 +256,23 @@ def _validate_inputs(
     entry_path: Path,
     config: DittoConfig,
     settings: DittoRenderSettings,
+    source_smoothing_kernel: int,
+    blink_open_frames: int,
+    blink_strength: float,
 ) -> None:
     validate_ditto_render_settings(settings)
+    if source_smoothing_kernel <= 0 or source_smoothing_kernel % 2 == 0:
+        raise DittoRunnerError(
+            "Ditto source smoothing kernel must be a positive odd integer."
+        )
+    if blink_open_frames < 0:
+        raise DittoRunnerError(
+            "Ditto blink open frames must be zero or a positive integer."
+        )
+    if not 0 < blink_strength <= 1:
+        raise DittoRunnerError(
+            "Ditto blink strength must be greater than zero and at most one."
+        )
     if config.timeout_seconds <= 0:
         raise DittoRunnerError("Ditto timeout must be positive.")
     if output_path.suffix.lower() != ".mp4":
