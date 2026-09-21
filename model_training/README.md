@@ -72,7 +72,11 @@ python -m model_training.face_training.ditto_preview \
 
 S3에서 내려받은 `face-profile.json`의 회원별 설정을 사용하려면 `--profile`을
 추가한다. 명령줄의 `--crop-scale`, `--smo-k-d`, `--sampling-timesteps`는 프로필
-값보다 우선한다.
+값보다 우선한다. 영상 소스 움직임은 `--smo-k-s`로 평활화하고, 정지 이미지의
+눈 깜빡임 간격은 `--blink-open-frames`로 제어할 수 있다. 영상 소스에도 생성된
+눈 깜빡임을 적용하려면 `--drive-eye`를 함께 사용한다. `--blink-strength`는 눈을
+감는 깊이를 `0`보다 크고 `1` 이하의 배율로 조절한다. 생략하면 Ditto 기본 동작과
+같은 `smo_k_s=13`, 무작위 눈 깜빡임 간격, 강도 `1.0`을 사용한다.
 
 ```bash
 python -m model_training.face_training.ditto_preview \
@@ -243,6 +247,26 @@ FACE_TRAINING_DITTO_SAMPLING_TIMESTEPS=50
 GPU IAM에는 요청 큐의 receive/delete/change-visibility 권한, 결과 큐의
 `sqs:SendMessage`, 입력 및 결과 prefix의 S3 get/put 권한이 필요하다. 백엔드는
 결과 큐의 receive/delete 권한과 DB 작업 상태 갱신 로직이 필요하다.
+
+회원 프로필 RAG 저장 요청인 `POST /api/v1/training/profiles`에는 백엔드의
+`cloneId`를 반드시 포함한다. 저장이 끝나면 AI 서버가 전체 성격·개인정보 학습 완료를
+다음 콜백으로 알린다.
+
+```text
+POST {CLONE_TRAINING_CALLBACK_BASE_URL}/internal/clone-training/{cloneId}/personality/complete
+X-Clone-Training-Callback-Secret: {CLONE_TRAINING_CALLBACK_SECRET}
+```
+
+운영 AI 서버에는 다음 값을 설정한다.
+
+```env
+CLONE_TRAINING_CALLBACK_BASE_URL=http://10.0.1.49:8080
+CLONE_TRAINING_CALLBACK_SECRET=
+```
+
+비밀값은 `.env`에만 저장하고 로그, 문서, Git에는 기록하지 않는다. 콜백 실패 시
+프로필 API도 실패로 응답한다. RAG 프로필은 동일 문서 ID로 upsert되므로 요청을
+재시도해도 중복 문서가 생성되지 않는다.
 
 GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
 

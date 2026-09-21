@@ -73,6 +73,7 @@ Request:
 ```json
 {
   "userId": "user_123",
+  "cloneId": 123,
   "aiProfileId": "profile_user_123",
   "age": 24,
   "gender": "female",
@@ -91,6 +92,16 @@ Request:
   "keywordLimit": 12
 }
 ```
+
+RAG 프로필 저장이 완료되면 AI 서버는 다음 내부 콜백을 호출한다.
+
+```text
+POST {CLONE_TRAINING_CALLBACK_BASE_URL}/internal/clone-training/{cloneId}/personality/complete
+X-Clone-Training-Callback-Secret: {CLONE_TRAINING_CALLBACK_SECRET}
+```
+
+요청 본문은 없다. 콜백이 실패하면 프로필 학습 요청도 실패로 응답하며, 동일한
+`userId + aiProfileId`의 RAG 문서는 upsert되므로 재시도해도 중복 문서가 생기지 않는다.
 
 AI 서버가 실제 RAG 문서에 저장하는 내용은 나이, 성별, MBTI, 핵심 키워드 목록입니다. `description`, `questionText`, `transcript`는 키워드 추출 재료로만 사용하고 원문 전체를 그대로 저장하지 않습니다.
 
