@@ -550,3 +550,86 @@ git diff --check: 오류 없음, Windows CRLF 경고만 존재
 8. 이후 React Native 원격 비디오 표시와 실제 영상통화 E2E 테스트로 진행한다.
 
 사용자가 제공한 콜백 비밀값은 대화에 노출됐으므로 통합 테스트 완료 후 교체한다.
+
+## 15. 2026-09-22 신규 회원 파이프라인 배포 상태
+
+PR #26을 병합해 `main` 커밋 `5b289fe`에 Ditto 눈 움직임 제어와 성격 학습 완료
+콜백을 반영했다. 로컬과 AWS AI 서버, 학교 GPU에서 콜백·Ditto·얼굴 결과 메시지
+관련 테스트 26개가 통과했다.
+
+### AWS AI 서버
+
+- 저장소: `/home/ec2-user/Mirror_Soul_AI`
+- 배포 커밋: `5b289fe`
+- `mirrorsoul-ai.service`: 재시작 및 OpenAPI 응답 확인 완료
+- `MemberProfileRequest.cloneId`: 필수 필드로 노출 확인
+- 콜백 주소와 비밀값: 비공개 `.env`에 적용 완료
+
+현재 배포된 백엔드 JAR에는 성격 학습 완료 콜백 수신 코드는 있지만 AI의
+`POST /api/v1/training/profiles` 호출 코드는 확인되지 않았다. 신규 회원 E2E에서는
+백엔드가 이 요청을 연결하거나, 테스트 과정에서 해당 API를 명시적으로 호출해야 한다.
+
+### 백엔드 API 서버
+
+- 얼굴 요청 큐 URL의 잘못된 AWS 계정 번호를 실제 큐 URL로 교정 완료
+- 실제 요청 큐: `mirrorsoul-face-training-queue`
+- 결과 큐: `mirrorsoul-face-training-result-queue`
+- `mirrorsoul-api.service`: 정상 실행 중
+- `FACE_RESULT_CONSUMER_ENABLED=false`
+
+결과 소비자를 활성화해 실제 폴링했을 때 EC2 역할
+`mirrorsoul-api-server-role`에 결과 큐 `sqs:ReceiveMessage` 권한이 없어 403이
+발생했다. 반복 오류를 막기 위해 소비자는 다시 비활성화했다. 다음 권한을 결과 큐에
+추가한 뒤에만 다시 활성화한다.
+
+```text
+sqs:ReceiveMessage
+sqs:DeleteMessage
+sqs:ChangeMessageVisibility
+sqs:GetQueueAttributes
+sqs:GetQueueUrl
+```
+
+### 학교 GPU 서버
+
+- AI 저장소: `/shareHost/C084003-ai/Mirror_Soul_AI`
+- 배포 커밋: `5b289fe`
+- Python: `/shareHost/C084003-ditto/conda-env/bin/python`
+- Ditto 환경: `/shareHost/C084003-ai/.env.ditto-service` (권한 600)
+- 얼굴 워커 환경: `/shareHost/C084003-ai/.env.face-worker` (권한 600)
+- Ditto 실행 스크립트: `/shareHost/C084003-ai/run-ditto-service.sh`
+- 얼굴 워커 실행 스크립트: `/shareHost/C084003-ai/run-face-worker.sh`
+- Ditto tmux 세션: `ditto-service`
+
+Ditto API는 `127.0.0.1:8080`에만 바인딩했다. 모델은 RTX 4090에 정상 로드됐고
+`/health`, `/ready`가 모두 200을 반환했다. 실제 v12 김동빈 얼굴·음성을 AWS 통화
+서버에서 SSH 터널을 통해 전송한 렌더 결과는 HTTP 200, 1080x1920, 25fps,
+13.68초, 약 1.76MB였으며 엔진 오류는 없었다.
+
+얼굴 워커는 아직 시작하지 않았다. 학교 GPU에는 AWS 자격증명이 없으므로 전용
+최소 권한 IAM 사용자 또는 동등한 자격증명을 발급해 `.env.face-worker`의 빈
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`에 직접 입력해야 한다. 필요한 권한은
+요청 큐 receive/delete/change-visibility, 결과 큐 send, 입력 S3 get, 결과 prefix
+S3 put이다. 비밀키를 채팅이나 Git에 기록하지 않는다.
+
+### AWS 통화 서버
+
+- `mirror-soul-call.service`: 활성
+- `mirror-soul-ditto-tunnel.service`: 활성 및 부팅 시 자동 시작
+- 터널: `127.0.0.1:18080` -> GPU `127.0.0.1:8080`
+- Ditto URL과 API 키: 통화 서버 비공개 `.env`에 적용
+- Ditto/WebRTC 계약 테스트: 16개 통과
+- 신호 서버 재연결 및 `JOIN` 확인 완료
+
+GPU 렌더 API를 공개 HTTP 포트로 노출하지 않고, 통화 서버 전용 ED25519 키와 SSH
+터널로 암호화했다. GPU 예약 또는 컨테이너가 종료되면 Ditto tmux 프로세스도
+종료되므로 다음 예약에서 컨테이너 시작 후 Ditto 세션을 다시 시작해야 한다.
+
+### 정확한 다음 작업
+
+1. AWS 관리자에게 GPU 얼굴 워커 전용 최소 권한 access key를 발급받아 GPU 환경에 입력한다.
+2. `mirrorsoul-api-server-role`에 결과 큐 수신·삭제·visibility 권한을 추가한다.
+3. 백엔드의 `FACE_RESULT_CONSUMER_ENABLED=true` 적용 후 서비스를 재시작한다.
+4. GPU에서 `run-face-worker.sh`를 `face-worker` tmux 세션으로 시작한다.
+5. 신규 회원 한 명으로 얼굴·음성·성격 완료와 전체 클론 READY를 검증한다.
+6. 같은 회원의 VIDEO 통화를 시작해 S3 얼굴 프로필 로드와 실제 원격 비디오를 확인한다.
