@@ -272,7 +272,10 @@ class FaceTrainingWorkerTests(unittest.TestCase):
             manifest_path = Path(directory) / "preprocess-manifest.json"
             manifest_path.write_text(
                 '{"videos": [{"frameSelection": '
-                '{"qualityGatePassed": true}}], "faceSimilarity": null}',
+                '{"qualityGatePassed": true, "qualityTier": "LOW", '
+                '"selectionMode": "BEST_EFFORT", '
+                '"qualityWarnings": ["low_sharpness"]}}], '
+                '"faceSimilarity": null}',
                 encoding="utf-8",
             )
             artifacts = FaceProfileArtifacts(
@@ -323,6 +326,15 @@ class FaceTrainingWorkerTests(unittest.TestCase):
         self.assertEqual(
             published[-1][1].result["profileStatus"],
             "READY_FOR_RENDERING",
+        )
+        self.assertEqual(published[-1][1].result["qualityTier"], "LOW")
+        self.assertEqual(
+            published[-1][1].result["selectionMode"],
+            "BEST_EFFORT",
+        )
+        self.assertEqual(
+            published[-1][1].result["qualityWarnings"],
+            ["low_sharpness"],
         )
 
     def test_failed_message_is_retained_for_retry(self) -> None:

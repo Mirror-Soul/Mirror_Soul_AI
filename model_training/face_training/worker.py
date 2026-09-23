@@ -344,12 +344,41 @@ def _completion_result(
         video.get("frameSelection") or {}
         for video in manifest.get("videos", [])
     ]
+    passing_selections = [
+        selection
+        for selection in selections
+        if bool(selection.get("qualityGatePassed"))
+    ]
+    quality_tiers = {
+        str(selection.get("qualityTier") or "NORMAL")
+        for selection in passing_selections
+    }
+    selection_modes = {
+        str(selection.get("selectionMode") or "STRICT")
+        for selection in passing_selections
+    }
+    quality_warnings = sorted(
+        {
+            str(warning)
+            for selection in passing_selections
+            for warning in selection.get("qualityWarnings", [])
+        }
+    )
     return {
         "profileStatus": "READY_FOR_RENDERING",
         "artifacts": artifacts.to_dict(),
-        "qualityGatePassed": any(
-            bool(selection.get("qualityGatePassed")) for selection in selections
+        "qualityGatePassed": bool(passing_selections),
+        "qualityTier": (
+            "NORMAL" if "NORMAL" in quality_tiers else "LOW"
+            if "LOW" in quality_tiers
+            else "FAILED"
         ),
+        "selectionMode": (
+            "STRICT" if "STRICT" in selection_modes else "BEST_EFFORT"
+            if "BEST_EFFORT" in selection_modes
+            else "NONE"
+        ),
+        "qualityWarnings": quality_warnings,
         "faceSimilarity": manifest.get("faceSimilarity"),
     }
 
@@ -842,6 +871,14 @@ def _natural_motion_config() -> NaturalMotionConfig:
 def _frame_quality_config() -> FrameQualityConfig:
     return FrameQualityConfig(
         min_sharpness=_env_float("FACE_TRAINING_MIN_SHARPNESS", 40.0),
+        best_effort_enabled=_env_bool(
+            "FACE_TRAINING_BEST_EFFORT_ENABLE",
+            True,
+        ),
+        best_effort_min_sharpness=_env_float(
+            "FACE_TRAINING_BEST_EFFORT_MIN_SHARPNESS",
+            30.0,
+        ),
         min_brightness=_env_float("FACE_TRAINING_MIN_BRIGHTNESS", 40.0),
         max_brightness=_env_float("FACE_TRAINING_MAX_BRIGHTNESS", 215.0),
         min_contrast=_env_float("FACE_TRAINING_MIN_CONTRAST", 18.0),

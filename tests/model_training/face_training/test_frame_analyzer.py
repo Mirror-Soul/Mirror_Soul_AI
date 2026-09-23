@@ -68,6 +68,42 @@ class FrameAnalyzerTests(unittest.TestCase):
         self.assertIsNone(result.selected_source_path)
         self.assertFalse(result.quality_gate_passed)
 
+    def test_uses_single_blurry_front_frame_as_best_effort(self) -> None:
+        fallback = _analysis(
+            "fallback.jpg",
+            "front",
+            61.0,
+            sharpness=38.0,
+            accepted=False,
+            rejection_reasons=("too_blurry",),
+        )
+
+        result = select_representative_frames([fallback])
+
+        self.assertTrue(result.quality_gate_passed)
+        self.assertEqual(result.selected_source_path, Path("fallback.jpg"))
+        self.assertEqual(result.quality_tier, "LOW")
+        self.assertEqual(result.selection_mode, "BEST_EFFORT")
+        self.assertIn("low_sharpness", result.quality_warnings)
+        self.assertIn("single_front_frame", result.quality_warnings)
+
+    def test_best_effort_keeps_hard_rejections_blocked(self) -> None:
+        missing_face = _analysis(
+            "missing.jpg",
+            "unknown",
+            70.0,
+            sharpness=80.0,
+            accepted=False,
+            rejection_reasons=("face_not_detected",),
+            face_count=0,
+        )
+
+        result = select_representative_frames([missing_face])
+
+        self.assertFalse(result.quality_gate_passed)
+        self.assertIsNone(result.selected_source_path)
+        self.assertEqual(result.quality_tier, "FAILED")
+
     def test_analyzes_frames_with_injected_image_and_face_adapters(self) -> None:
         paths = [Path("front.jpg"), Path("side.jpg")]
         images = {path: _checkerboard() for path in paths}
@@ -108,22 +144,33 @@ def _lenient_config() -> FrameQualityConfig:
     )
 
 
-def _analysis(path: str, view: str, score: float) -> FrameAnalysis:
+def _analysis(
+    path: str,
+    view: str,
+    score: float,
+    *,
+    sharpness: float = 100.0,
+    accepted: bool = True,
+    rejection_reasons: tuple[str, ...] = (),
+    face_count: int = 1,
+) -> FrameAnalysis:
     return FrameAnalysis(
         path=Path(path),
         width=100,
         height=100,
-        sharpness=100.0,
+        sharpness=sharpness,
         brightness=128.0,
         contrast=40.0,
-        face_count=1,
-        primary_face=DetectedFace(25, 20, 50, 60, view),
+        face_count=face_count,
+        primary_face=(
+            DetectedFace(25, 20, 50, 60, view) if face_count else None
+        ),
         face_coverage=0.30,
         center_offset=0.0,
         view=view,
         quality_score=score,
-        accepted=True,
-        rejection_reasons=(),
+        accepted=accepted,
+        rejection_reasons=rejection_reasons,
     )
 
 
