@@ -242,7 +242,13 @@ FACE_TRAINING_ENGINE_VERSION=v0.4-hubert-pytorch
 FACE_TRAINING_DITTO_CROP_SCALE=2.3
 FACE_TRAINING_DITTO_SMO_K_D=5
 FACE_TRAINING_DITTO_SAMPLING_TIMESTEPS=50
+FACE_TRAINING_BEST_EFFORT_ENABLE=true
+FACE_TRAINING_BEST_EFFORT_MIN_SHARPNESS=30
 ```
+
+엄격한 품질 게이트가 실패하더라도 정면의 단일 얼굴이 검출되고 다른 거부 사유 없이
+선명도만 최선 생성 기준을 넘으면 `LOW/BEST_EFFORT` 프로필을 생성한다. 얼굴 미검출,
+다중 얼굴, 비정상적인 얼굴 크기나 위치, 밝기 및 대비 문제는 계속 실패 처리한다.
 
 GPU IAM에는 요청 큐의 receive/delete/change-visibility 권한, 결과 큐의
 `sqs:SendMessage`, 입력 및 결과 prefix의 S3 get/put 권한이 필요하다. 백엔드는

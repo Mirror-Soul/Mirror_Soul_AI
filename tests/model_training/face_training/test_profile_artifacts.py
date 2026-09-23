@@ -49,6 +49,9 @@ class FaceProfileArtifactTests(unittest.TestCase):
                             {
                                 "frameSelection": {
                                     "qualityGatePassed": True,
+                                    "qualityTier": "LOW",
+                                    "selectionMode": "BEST_EFFORT",
+                                    "qualityWarnings": ["low_sharpness"],
                                     "selectedSourcePath": str(portrait),
                                     "frames": [
                                         {
@@ -90,6 +93,15 @@ class FaceProfileArtifactTests(unittest.TestCase):
             )
             self.assertEqual(profile["portrait"]["objectKey"], result.portrait_key)
             self.assertEqual(profile["quality"]["qualityScore"], 88.0)
+            self.assertEqual(profile["quality"]["qualityTier"], "LOW")
+            self.assertEqual(
+                profile["quality"]["selectionMode"],
+                "BEST_EFFORT",
+            )
+            self.assertEqual(
+                profile["quality"]["qualityWarnings"],
+                ["low_sharpness"],
+            )
 
     def test_uploads_existing_preview(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

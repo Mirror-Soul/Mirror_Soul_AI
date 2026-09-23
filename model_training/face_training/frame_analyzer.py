@@ -26,6 +26,8 @@ class DetectedFace:
 @dataclass(frozen=True)
 class FrameQualityConfig:
     min_sharpness: float = 40.0
+    best_effort_enabled: bool = True
+    best_effort_min_sharpness: float = 30.0
     min_brightness: float = 40.0
     max_brightness: float = 215.0
     min_contrast: float = 18.0
@@ -77,6 +79,8 @@ class FrameSelectionResult:
     frames: tuple[FrameAnalysis, ...]
     selected_source_path: Path | None
     representatives: dict[str, Path]
+    best_effort: bool = False
+    quality_warnings: tuple[str, ...] = ()
 
     @property
     def accepted_count(self) -> int:
@@ -88,7 +92,21 @@ class FrameSelectionResult:
 
     @property
     def quality_gate_passed(self) -> bool:
-        return self.selected_source_path is not None and self.accepted_count >= 3
+        return self.selected_source_path is not None and (
+            self.accepted_count >= 3 or self.best_effort
+        )
+
+    @property
+    def quality_tier(self) -> str:
+        if not self.quality_gate_passed:
+            return "FAILED"
+        return "LOW" if self.best_effort else "NORMAL"
+
+    @property
+    def selection_mode(self) -> str:
+        if not self.quality_gate_passed:
+            return "NONE"
+        return "BEST_EFFORT" if self.best_effort else "STRICT"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +121,9 @@ class FrameSelectionResult:
             "acceptedCount": self.accepted_count,
             "rejectedCount": self.rejected_count,
             "qualityGatePassed": self.quality_gate_passed,
+            "qualityTier": self.quality_tier,
+            "selectionMode": self.selection_mode,
+            "qualityWarnings": list(self.quality_warnings),
             "frames": [frame.to_dict() for frame in self.frames],
         }
 
@@ -137,7 +158,11 @@ def analyze_face_frames(
                 config=quality_config,
             )
         )
-    return select_representative_frames(analyses)
+    return select_representative_frames(
+        analyses,
+        best_effort_enabled=quality_config.best_effort_enabled,
+        best_effort_min_sharpness=quality_config.best_effort_min_sharpness,
+    )
 
 
 def calculate_frame_quality(
@@ -216,6 +241,9 @@ def calculate_frame_quality(
 
 def select_representative_frames(
     analyses: Iterable[FrameAnalysis],
+    *,
+    best_effort_enabled: bool = True,
+    best_effort_min_sharpness: float = 30.0,
 ) -> FrameSelectionResult:
     frames = tuple(analyses)
     accepted = [frame for frame in frames if frame.accepted]
@@ -228,15 +256,53 @@ def select_representative_frames(
     }
 
     source_candidates = [frame for frame in accepted if frame.view == "front"]
-    selected_source = max(
+    strict_source = max(
         source_candidates,
         key=lambda frame: frame.quality_score,
         default=None,
     )
+    if strict_source is not None and len(accepted) >= 3:
+        return FrameSelectionResult(
+            frames=frames,
+            selected_source_path=strict_source.path,
+            representatives=representatives,
+        )
+
+    fallback_candidates = []
+    if best_effort_enabled:
+        fallback_candidates = [
+            frame
+            for frame in frames
+            if frame.view == "front"
+            and frame.face_count == 1
+            and frame.primary_face is not None
+            and frame.sharpness >= best_effort_min_sharpness
+            and set(frame.rejection_reasons).issubset({"too_blurry"})
+        ]
+    fallback_source = max(
+        fallback_candidates,
+        key=lambda frame: (frame.sharpness, frame.quality_score),
+        default=None,
+    )
+    warnings = []
+    if fallback_source is not None:
+        representatives["front"] = fallback_source.path
+        if "too_blurry" in fallback_source.rejection_reasons:
+            warnings.append("low_sharpness")
+        if len(fallback_candidates) == 1:
+            warnings.append("single_front_frame")
+        if len(accepted) < 3:
+            warnings.append("limited_approved_frames")
+        warnings.append("reregister_recommended")
+
     return FrameSelectionResult(
         frames=frames,
-        selected_source_path=selected_source.path if selected_source else None,
+        selected_source_path=(
+            fallback_source.path if fallback_source is not None else None
+        ),
         representatives=representatives,
+        best_effort=fallback_source is not None,
+        quality_warnings=tuple(warnings),
     )
 
 

@@ -231,5 +231,8 @@ def _selected_quality(
                 "faceCoverage": frame.get("faceCoverage"),
                 "centerOffset": frame.get("centerOffset"),
                 "view": frame.get("view"),
+                "qualityTier": selection.get("qualityTier", "NORMAL"),
+                "selectionMode": selection.get("selectionMode", "STRICT"),
+                "qualityWarnings": selection.get("qualityWarnings", []),
             }
     return None
