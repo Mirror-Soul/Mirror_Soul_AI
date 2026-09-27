@@ -64,6 +64,23 @@ def create_member_profile_document_id(user_id: str, ai_profile_id: str | None = 
     return f"member_profile_{safe_user_id}_{safe_profile_key}"
 
 
+def create_member_profile_interview_document_id(
+    user_id: str,
+    ai_profile_id: str | None,
+    interview_index: int,
+    question_id: int | None,
+) -> str:
+    """Create a stable id for an interview memory included in a profile update."""
+    profile_key = ai_profile_id or "default"
+    safe_user_id = re.sub(r"[^0-9A-Za-z_.-]", "_", user_id)
+    safe_profile_key = re.sub(r"[^0-9A-Za-z_.-]", "_", profile_key)
+    question_key = str(question_id) if question_id is not None else "unknown"
+    return (
+        f"member_profile_interview_{safe_user_id}_{safe_profile_key}_"
+        f"{interview_index:03d}_{question_key}"
+    )
+
+
 def normalize_keyword(keyword: str) -> str:
     normalized = re.sub(r"\s+", " ", keyword.strip())
     normalized = normalized.strip(".,!?;:()[]{}\"'")
