@@ -22,6 +22,12 @@ from model_training.face_training.face_similarity import (
     FaceSimilarityUnavailable,
     evaluate_face_similarity,
 )
+from model_training.face_training.ditto_runner import (
+    DittoConfig,
+    DittoRenderSettings,
+    DittoResult,
+    run_ditto_preview,
+)
 from model_training.face_training.message import (
     FaceTrainingMessage,
     FaceTrainingMessageError,
@@ -52,6 +58,7 @@ from model_training.face_training.video_processor import (
     FaceVideoPreprocessResult,
     preprocess_face_video,
 )
+from shared.clone_similarity import face_similarity_component_contract
 
 load_dotenv()
 
@@ -364,7 +371,8 @@ def _completion_result(
             for warning in selection.get("qualityWarnings", [])
         }
     )
-    return {
+    face_similarity = manifest.get("faceSimilarity")
+    result = {
         "profileStatus": "READY_FOR_RENDERING",
         "artifacts": artifacts.to_dict(),
         "qualityGatePassed": bool(passing_selections),
@@ -379,8 +387,12 @@ def _completion_result(
             else "NONE"
         ),
         "qualityWarnings": quality_warnings,
-        "faceSimilarity": manifest.get("faceSimilarity"),
+        "faceSimilarity": face_similarity,
     }
+    clone_similarity = face_similarity_component_contract(face_similarity)
+    if clone_similarity is not None:
+        result["cloneSimilarity"] = clone_similarity
+    return result
 
 
 def _receive_count(sqs_message: dict[str, Any]) -> int:
@@ -526,6 +538,7 @@ def _preprocess_face_training_message(
         )
 
     liveportrait_result = None
+    ditto_similarity_result = None
     face_similarity_result = None
     if _env_bool("FACE_TRAINING_RUN_LIVEPORTRAIT", False):
         source_path, driving_path = _select_liveportrait_inputs(
@@ -549,10 +562,34 @@ def _preprocess_face_training_message(
             f"duration={liveportrait_result.duration_seconds:.2f}s",
             flush=True,
         )
-        face_similarity_result = _evaluate_liveportrait_similarity(
-            frame_selection_results,
-            liveportrait_result,
-        )
+
+    if _env_bool("FACE_SIMILARITY_ENABLE", False):
+        similarity_engine = os.getenv(
+            "FACE_SIMILARITY_RENDER_ENGINE",
+            "ditto",
+        ).strip().lower()
+        if similarity_engine == "ditto":
+            ditto_similarity_result, face_similarity_result = (
+                _run_ditto_similarity_preview(
+                    downloaded_videos,
+                    frame_selection_results,
+                    workspace,
+                )
+            )
+        elif similarity_engine == "liveportrait":
+            if liveportrait_result is None:
+                raise FaceTrainingWorkerError(
+                    "FACE_TRAINING_RUN_LIVEPORTRAIT=true is required when "
+                    "FACE_SIMILARITY_RENDER_ENGINE=liveportrait."
+                )
+            face_similarity_result = _evaluate_liveportrait_similarity(
+                frame_selection_results,
+                liveportrait_result,
+            )
+        else:
+            raise FaceTrainingWorkerError(
+                "FACE_SIMILARITY_RENDER_ENGINE must be ditto or liveportrait."
+            )
 
     manifest_path = workspace / "preprocess-manifest.json"
     manifest_path.write_text(
@@ -563,6 +600,7 @@ def _preprocess_face_training_message(
                 preprocess_results,
                 frame_selection_results,
                 liveportrait_result,
+                ditto_similarity_result,
                 face_similarity_result,
             ),
             ensure_ascii=False,
@@ -682,6 +720,7 @@ def _build_manifest(
     preprocess_results: list[FaceVideoPreprocessResult],
     frame_selection_results: list[FrameSelectionResult],
     liveportrait_result: LivePortraitResult | None = None,
+    ditto_similarity_result: DittoResult | None = None,
     face_similarity_result: FaceSimilarityResult | None = None,
 ) -> dict[str, Any]:
     return {
@@ -710,6 +749,11 @@ def _build_manifest(
             if liveportrait_result is not None
             else None
         ),
+        "dittoSimilarityPreview": (
+            ditto_similarity_result.to_dict()
+            if ditto_similarity_result is not None
+            else None
+        ),
         "faceSimilarity": (
             face_similarity_result.to_dict()
             if face_similarity_result is not None
@@ -725,6 +769,85 @@ def _evaluate_liveportrait_similarity(
     if not _env_bool("FACE_SIMILARITY_ENABLE", False):
         return None
 
+    return _evaluate_generated_face_similarity(
+        frame_selection_results,
+        generated_video=liveportrait_result.output_path,
+        driving_video=liveportrait_result.driving_path,
+    )
+
+
+def _run_ditto_similarity_preview(
+    downloaded_videos: list[DownloadedFaceVideo],
+    frame_selection_results: list[FrameSelectionResult],
+    workspace: Path,
+) -> tuple[DittoResult | None, FaceSimilarityResult | None]:
+    required = _env_bool("FACE_SIMILARITY_REQUIRED", False)
+    try:
+        source_path, _ = _select_liveportrait_inputs(
+            downloaded_videos,
+            frame_selection_results,
+        )
+        audio_path = Path(
+            os.getenv(
+                "FACE_SIMILARITY_DITTO_AUDIO_PATH",
+                "/shareHost/C084003-ditto/ditto-talkinghead/example/audio.wav",
+            )
+        )
+        print(
+            "[FACE_SIMILARITY] Ditto preview started: "
+            f"source={source_path} audio={audio_path}",
+            flush=True,
+        )
+        ditto_result = run_ditto_preview(
+            source_path,
+            audio_path,
+            workspace / "outputs" / "ditto-similarity" / "preview.mp4",
+            config=_ditto_similarity_config(),
+            settings=_ditto_similarity_settings(),
+            source_smoothing_kernel=_env_int(
+                "FACE_TRAINING_DITTO_SMO_K_S",
+                13,
+            ),
+            blink_open_frames=_env_int(
+                "FACE_TRAINING_DITTO_BLINK_OPEN_FRAMES",
+                0,
+            ),
+            drive_eye=_env_optional_bool("FACE_TRAINING_DITTO_DRIVE_EYE"),
+            blink_strength=_env_float(
+                "FACE_TRAINING_DITTO_BLINK_STRENGTH",
+                1.0,
+            ),
+        )
+    except Exception as exc:
+        if required:
+            raise FaceTrainingWorkerError(
+                f"Required Ditto face similarity preview failed: {exc}"
+            ) from exc
+        print(
+            f"[FACE_SIMILARITY] Ditto preview skipped: reason={exc}",
+            flush=True,
+        )
+        return None, None
+
+    print(
+        "[FACE_SIMILARITY] Ditto preview completed: "
+        f"output={ditto_result.output_path}",
+        flush=True,
+    )
+    return ditto_result, _evaluate_generated_face_similarity(
+        frame_selection_results,
+        generated_video=ditto_result.output_path,
+        driving_video=None,
+    )
+
+
+def _evaluate_generated_face_similarity(
+    frame_selection_results: list[FrameSelectionResult],
+    *,
+    generated_video: Path,
+    driving_video: Path | None,
+) -> FaceSimilarityResult | None:
+
     reference_paths = [
         frame.path
         for selection in frame_selection_results
@@ -735,8 +858,8 @@ def _evaluate_liveportrait_similarity(
     try:
         result = evaluate_face_similarity(
             reference_images=reference_paths,
-            generated_video=liveportrait_result.output_path,
-            driving_video=liveportrait_result.driving_path,
+            generated_video=generated_video,
+            driving_video=driving_video,
         )
     except FaceSimilarityUnavailable as exc:
         if required:
@@ -761,7 +884,8 @@ def _evaluate_liveportrait_similarity(
 
     print(
         "[FACE_SIMILARITY] completed: "
-        f"score={result.score:.2f} identity={result.identity_score:.2f} "
+        f"score={result.score:.2f} "
+        f"source_preservation={result.source_preservation_score:.2f} "
         f"render={result.render_quality_score:.2f} "
         f"confidence={result.confidence} calibrated={result.calibrated}",
         flush=True,
@@ -829,6 +953,42 @@ def _liveportrait_config() -> LivePortraitConfig:
             _env_float("FACE_TRAINING_LIVEPORTRAIT_CROP_SCALE", 2.3)
             if os.getenv("FACE_TRAINING_LIVEPORTRAIT_CROP_SCALE")
             else None
+        ),
+    )
+
+
+def _ditto_similarity_config() -> DittoConfig:
+    repository_dir = Path(
+        os.getenv(
+            "FACE_TRAINING_DITTO_REPO_DIR",
+            "/shareHost/C084003-ditto/ditto-talkinghead",
+        )
+    )
+    return DittoConfig(
+        repository_dir=repository_dir,
+        python_binary=Path(
+            os.getenv(
+                "FACE_TRAINING_DITTO_PYTHON",
+                "/shareHost/C084003-ditto/conda-env/bin/python",
+            )
+        ),
+        data_root=_env_path("FACE_TRAINING_DITTO_DATA_ROOT"),
+        config_path=_env_path("FACE_TRAINING_DITTO_CONFIG_PATH"),
+        timeout_seconds=_env_int("FACE_TRAINING_DITTO_TIMEOUT_SECONDS", 1800),
+        seed=_env_int("FACE_TRAINING_DITTO_SEED", 1024),
+        ffmpeg_dir=Path(
+            os.getenv("FACE_TRAINING_DITTO_FFMPEG_DIR", "/opt/conda/bin")
+        ),
+    )
+
+
+def _ditto_similarity_settings() -> DittoRenderSettings:
+    return DittoRenderSettings(
+        crop_scale=_env_float("FACE_TRAINING_DITTO_CROP_SCALE", 2.3),
+        smoothing_kernel=_env_int("FACE_TRAINING_DITTO_SMO_K_D", 5),
+        sampling_timesteps=_env_int(
+            "FACE_TRAINING_DITTO_SAMPLING_TIMESTEPS",
+            50,
         ),
     )
 
@@ -913,6 +1073,17 @@ def _env_int(name: str, default: int) -> int:
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     return float(value) if value else default
+
+
+def _env_path(name: str) -> Path | None:
+    value = os.getenv(name)
+    return Path(value) if value else None
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    if os.getenv(name) is None:
+        return None
+    return _env_bool(name, False)
 
 
 def _env_bool(name: str, default: bool) -> bool:

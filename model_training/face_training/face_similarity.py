@@ -9,6 +9,8 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from model_training.face_training.frame_analyzer import OpenCvHaarFaceDetector
+
 
 class FaceSimilarityUnavailable(RuntimeError):
     pass
@@ -16,27 +18,23 @@ class FaceSimilarityUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class FaceObservation:
-    embedding: np.ndarray
+    descriptor: np.ndarray
     sharpness: float
+    geometry: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
 class FaceSimilarityConfig:
     sample_count: int = 16
-    cosine_low: float = 0.30
-    cosine_high: float = 0.70
-    max_score: float = 95.0
+    appearance_low: float = 0.35
+    appearance_high: float = 0.92
+    max_score: float = 100.0
     min_detection_rate: float = 0.75
-    identity_weight: float = 0.65
-    render_quality_weight: float = 0.35
+    source_preservation_weight: float = 0.40
+    render_quality_weight: float = 0.60
     min_temporal_consistency: float = 0.60
     stability_floor: float = 0.70
-    model_name: str = "buffalo_l"
-    model_root: Path = Path("/workspace/mirror-soul-face/insightface")
-    providers: tuple[str, ...] = (
-        "CUDAExecutionProvider",
-        "CPUExecutionProvider",
-    )
+    evaluator_name: str = "opencv-appearance-v1"
     calibration_version: str = "provisional-v1"
     calibrated: bool = False
 
@@ -44,13 +42,14 @@ class FaceSimilarityConfig:
 @dataclass(frozen=True)
 class FaceSimilarityResult:
     score: float
-    identity_score: float
+    source_preservation_score: float
     render_quality_score: float
-    cosine_similarity: float
-    aligned_cosine_similarity: float | None
-    gallery_cosine_similarity: float
+    appearance_similarity: float
+    aligned_appearance_similarity: float | None
+    gallery_appearance_similarity: float
     detection_rate: float
     temporal_consistency: float
+    geometry_consistency: float
     sharpness_retention: float
     stability_factor: float
     evaluated_frame_count: int
@@ -58,7 +57,7 @@ class FaceSimilarityResult:
     aligned_frame_count: int
     reference_count: int
     confidence: str
-    model_name: str
+    evaluator_name: str
     provider: str
     calibration_version: str
     calibrated: bool
@@ -66,13 +65,14 @@ class FaceSimilarityResult:
     def to_dict(self) -> dict[str, object]:
         return {
             "score": self.score,
-            "identityScore": self.identity_score,
+            "sourcePreservationScore": self.source_preservation_score,
             "renderQualityScore": self.render_quality_score,
-            "cosineSimilarity": self.cosine_similarity,
-            "alignedCosineSimilarity": self.aligned_cosine_similarity,
-            "galleryCosineSimilarity": self.gallery_cosine_similarity,
+            "appearanceSimilarity": self.appearance_similarity,
+            "alignedAppearanceSimilarity": self.aligned_appearance_similarity,
+            "galleryAppearanceSimilarity": self.gallery_appearance_similarity,
             "detectionRate": self.detection_rate,
             "temporalConsistency": self.temporal_consistency,
+            "geometryConsistency": self.geometry_consistency,
             "sharpnessRetention": self.sharpness_retention,
             "stabilityFactor": self.stability_factor,
             "evaluatedFrameCount": self.evaluated_frame_count,
@@ -80,7 +80,7 @@ class FaceSimilarityResult:
             "alignedFrameCount": self.aligned_frame_count,
             "referenceCount": self.reference_count,
             "confidence": self.confidence,
-            "modelName": self.model_name,
+            "evaluatorName": self.evaluator_name,
             "provider": self.provider,
             "calibrationVersion": self.calibration_version,
             "calibrated": self.calibrated,
@@ -107,13 +107,8 @@ def evaluate_face_similarity(
     if not reference_images:
         raise FaceSimilarityUnavailable("no reference face images provided")
 
-    encoder = face_encoder
-    provider = "injected"
-    if encoder is None:
-        insightface_encoder = InsightFaceEncoder(scoring_config)
-        encoder = insightface_encoder
-        provider = insightface_encoder.provider
-
+    encoder = face_encoder or OpenCvAppearanceEncoder()
+    provider = "injected" if face_encoder is not None else "opencv-cpu"
     load_image = image_loader or _load_image
     sample_video = video_sampler or _sample_video_frames
 
@@ -160,7 +155,7 @@ def score_face_observations(
     if not generated_observations:
         raise FaceSimilarityUnavailable("no generated face observations")
 
-    references = [_normalized(item.embedding) for item in reference_observations]
+    references = [_normalized(item.descriptor) for item in reference_observations]
     detected_generated = [
         (index, item)
         for index, item in enumerate(generated_observations)
@@ -170,10 +165,10 @@ def score_face_observations(
         raise FaceSimilarityUnavailable("no face detected in generated video")
 
     gallery_similarities = [
-        max(_cosine(item.embedding, reference) for reference in references)
+        max(_cosine(item.descriptor, reference) for reference in references)
         for _, item in detected_generated
     ]
-    gallery_cosine = _robust_similarity(gallery_similarities)
+    gallery_similarity = _robust_similarity(gallery_similarities)
 
     aligned_similarities = []
     sharpness_ratios = []
@@ -185,41 +180,58 @@ def score_face_observations(
             if driving is None:
                 continue
             aligned_similarities.append(
-                _cosine(generated.embedding, driving.embedding)
+                _cosine(generated.descriptor, driving.descriptor)
             )
             if driving.sharpness > 1e-6:
                 sharpness_ratios.append(
-                    min(max(generated.sharpness / driving.sharpness, 0.0), 1.0)
+                    _clamp(generated.sharpness / driving.sharpness)
                 )
+    else:
+        reference_sharpness = float(
+            np.median([item.sharpness for item in reference_observations])
+        )
+        if reference_sharpness > 1e-6:
+            sharpness_ratios = [
+                _clamp(item.sharpness / reference_sharpness)
+                for _, item in detected_generated
+            ]
 
-    aligned_cosine = (
+    aligned_similarity = (
         _robust_similarity(aligned_similarities)
         if aligned_similarities
         else None
     )
-    cosine_similarity = (
-        0.65 * aligned_cosine + 0.35 * gallery_cosine
-        if aligned_cosine is not None
-        else gallery_cosine
+    appearance_similarity = (
+        0.65 * aligned_similarity + 0.35 * gallery_similarity
+        if aligned_similarity is not None
+        else gallery_similarity
     )
-    identity_score = _cosine_to_score(cosine_similarity, scoring_config)
+    source_preservation_score = _appearance_to_score(
+        appearance_similarity,
+        scoring_config,
+    )
 
     detection_rate = len(detected_generated) / len(generated_observations)
     temporal_consistency = _temporal_consistency(gallery_similarities)
+    geometry_consistency = _geometry_consistency(
+        [item.geometry for _, item in detected_generated if item.geometry is not None]
+    )
     sharpness_retention = (
         float(np.median(sharpness_ratios)) if sharpness_ratios else 0.0
     )
     render_quality_score = 100.0 * (
-        0.50 * detection_rate
-        + 0.30 * temporal_consistency
-        + 0.20 * sharpness_retention
+        0.35 * detection_rate
+        + 0.25 * temporal_consistency
+        + 0.25 * sharpness_retention
+        + 0.15 * geometry_consistency
     )
 
     weight_sum = (
-        scoring_config.identity_weight + scoring_config.render_quality_weight
+        scoring_config.source_preservation_weight
+        + scoring_config.render_quality_weight
     )
     blended_score = (
-        identity_score * scoring_config.identity_weight
+        source_preservation_score * scoring_config.source_preservation_weight
         + render_quality_score * scoring_config.render_quality_weight
     ) / weight_sum
 
@@ -239,23 +251,23 @@ def score_face_observations(
     if coverage_ratio < 1.0:
         blended_score *= 0.50 + 0.50 * coverage_ratio
 
-    # Rendering quality may refine a matching identity, but it must not make a
-    # different person look similar on its own.
-    blended_score = min(blended_score, identity_score + 15.0)
+    # Generic image quality must not hide large source-preservation changes.
+    blended_score = min(blended_score, source_preservation_score + 20.0)
 
     return FaceSimilarityResult(
         score=_round_score(min(blended_score, scoring_config.max_score)),
-        identity_score=_round_score(identity_score),
+        source_preservation_score=_round_score(source_preservation_score),
         render_quality_score=_round_score(render_quality_score),
-        cosine_similarity=round(float(cosine_similarity), 4),
-        aligned_cosine_similarity=(
-            round(float(aligned_cosine), 4)
-            if aligned_cosine is not None
+        appearance_similarity=round(float(appearance_similarity), 4),
+        aligned_appearance_similarity=(
+            round(float(aligned_similarity), 4)
+            if aligned_similarity is not None
             else None
         ),
-        gallery_cosine_similarity=round(float(gallery_cosine), 4),
+        gallery_appearance_similarity=round(float(gallery_similarity), 4),
         detection_rate=round(detection_rate, 4),
         temporal_consistency=round(temporal_consistency, 4),
+        geometry_consistency=round(geometry_consistency, 4),
         sharpness_retention=round(sharpness_retention, 4),
         stability_factor=round(stability_factor, 4),
         evaluated_frame_count=len(generated_observations),
@@ -267,122 +279,100 @@ def score_face_observations(
             detected_frame_count=len(detected_generated),
             reference_count=len(reference_observations),
         ),
-        model_name=scoring_config.model_name,
+        evaluator_name=scoring_config.evaluator_name,
         provider=provider,
         calibration_version=scoring_config.calibration_version,
         calibrated=scoring_config.calibrated,
     )
 
 
-class InsightFaceEncoder:
-    def __init__(self, config: FaceSimilarityConfig) -> None:
-        if not _env_bool(
-            "FACE_SIMILARITY_ACCEPT_INSIGHTFACE_NON_COMMERCIAL_LICENSE",
-            False,
-        ):
-            raise FaceSimilarityUnavailable(
-                "InsightFace public model weights require explicit acceptance for "
-                "non-commercial research use. Set "
-                "FACE_SIMILARITY_ACCEPT_INSIGHTFACE_NON_COMMERCIAL_LICENSE=true "
-                "only when that use is appropriate."
-            )
+class OpenCvAppearanceEncoder:
+    """Builds a non-biometric descriptor from stable upper-face pixels."""
+
+    def __init__(self) -> None:
         try:
             import cv2
-            import insightface
-            import onnxruntime as ort
         except ImportError as exc:
             raise FaceSimilarityUnavailable(
-                "InsightFace dependencies are missing. Install "
-                "requirements-face-similarity.txt."
+                "OpenCV is required for face rendering evaluation"
             ) from exc
-
-        available = set(ort.get_available_providers())
-        providers = [name for name in config.providers if name in available]
-        if not providers:
-            raise FaceSimilarityUnavailable(
-                "none of the configured ONNX Runtime providers are available"
-            )
-
         self._cv2 = cv2
-        try:
-            self._app = insightface.app.FaceAnalysis(
-                name=config.model_name,
-                root=str(config.model_root),
-                providers=providers,
-                allowed_modules=["detection", "recognition"],
-            )
-            self._app.prepare(
-                ctx_id=0 if "CUDAExecutionProvider" in providers else -1,
-                det_size=(640, 640),
-            )
-        except Exception as exc:
-            raise FaceSimilarityUnavailable(
-                f"unable to initialize InsightFace model {config.model_name}: {exc}"
-            ) from exc
-        self.provider = _active_provider(self._app, providers)
+        self._detector = OpenCvHaarFaceDetector()
 
     def __call__(self, image: np.ndarray) -> FaceObservation | None:
-        faces = self._app.get(image)
+        gray = (
+            self._cv2.cvtColor(image, self._cv2.COLOR_BGR2GRAY)
+            if image.ndim == 3
+            else image
+        )
+        faces = self._detector(gray)
         if not faces:
             return None
-        face = max(
-            faces,
-            key=lambda item: (
-                float(item.bbox[2] - item.bbox[0])
-                * float(item.bbox[3] - item.bbox[1])
-            ),
-        )
-        embedding = getattr(face, "normed_embedding", None)
-        if embedding is None:
-            return None
-        x1, y1, x2, y2 = _bounded_box(face.bbox, image.shape)
-        crop = image[y1:y2, x1:x2]
+        face = max(faces, key=lambda item: item.width * item.height)
+        height, width = gray.shape[:2]
+        x1 = max(0, face.x)
+        y1 = max(0, face.y)
+        x2 = min(width, face.x + face.width)
+        y2 = min(height, face.y + face.height)
+        crop = gray[y1:y2, x1:x2]
         if crop.size == 0:
             return None
-        gray = self._cv2.cvtColor(crop, self._cv2.COLOR_BGR2GRAY)
-        sharpness = float(self._cv2.Laplacian(gray, self._cv2.CV_64F).var())
+
+        # The mouth is excluded so speaking does not look like identity drift.
+        stable_height = max(1, int(crop.shape[0] * 0.68))
+        stable_region = crop[:stable_height, :]
+        normalized_region = self._cv2.equalizeHist(stable_region)
+        resized = self._cv2.resize(
+            normalized_region,
+            (32, 24),
+            interpolation=self._cv2.INTER_AREA,
+        ).astype(np.float32)
+        resized -= float(np.mean(resized))
+        descriptor = _normalized(resized.reshape(-1))
+
+        sharpness = float(
+            self._cv2.Laplacian(crop, self._cv2.CV_64F).var()
+        )
+        geometry = (
+            (x1 + x2) / (2.0 * width),
+            (y1 + y2) / (2.0 * height),
+            (x2 - x1) / float(width),
+            (y2 - y1) / float(height),
+        )
         return FaceObservation(
-            embedding=_normalized(np.asarray(embedding, dtype=np.float32)),
+            descriptor=descriptor,
             sharpness=sharpness,
+            geometry=geometry,
         )
 
 
 def face_similarity_config_from_env() -> FaceSimilarityConfig:
-    providers = tuple(
-        item.strip()
-        for item in os.getenv(
-            "FACE_SIMILARITY_PROVIDERS",
-            "CUDAExecutionProvider,CPUExecutionProvider",
-        ).split(",")
-        if item.strip()
-    )
     return FaceSimilarityConfig(
         sample_count=_env_int("FACE_SIMILARITY_SAMPLE_COUNT", 16),
-        cosine_low=_env_float("FACE_SIMILARITY_COSINE_LOW", 0.30),
-        cosine_high=_env_float("FACE_SIMILARITY_COSINE_HIGH", 0.70),
-        max_score=_env_float("FACE_SIMILARITY_MAX_SCORE", 95.0),
+        appearance_low=_env_float("FACE_SIMILARITY_APPEARANCE_LOW", 0.35),
+        appearance_high=_env_float("FACE_SIMILARITY_APPEARANCE_HIGH", 0.92),
+        max_score=_env_float("FACE_SIMILARITY_COMPONENT_MAX", 100.0),
         min_detection_rate=_env_float(
             "FACE_SIMILARITY_MIN_DETECTION_RATE",
             0.75,
         ),
-        identity_weight=_env_float("FACE_SIMILARITY_IDENTITY_WEIGHT", 0.65),
+        source_preservation_weight=_env_float(
+            "FACE_SIMILARITY_SOURCE_PRESERVATION_WEIGHT",
+            0.40,
+        ),
         render_quality_weight=_env_float(
             "FACE_SIMILARITY_RENDER_QUALITY_WEIGHT",
-            0.35,
+            0.60,
         ),
         min_temporal_consistency=_env_float(
             "FACE_SIMILARITY_MIN_TEMPORAL_CONSISTENCY",
             0.60,
         ),
         stability_floor=_env_float("FACE_SIMILARITY_STABILITY_FLOOR", 0.70),
-        model_name=os.getenv("FACE_SIMILARITY_MODEL", "buffalo_l"),
-        model_root=Path(
-            os.getenv(
-                "FACE_SIMILARITY_MODEL_ROOT",
-                "/workspace/mirror-soul-face/insightface",
-            )
+        evaluator_name=os.getenv(
+            "FACE_SIMILARITY_EVALUATOR",
+            "opencv-appearance-v1",
         ),
-        providers=providers,
         calibration_version=os.getenv(
             "FACE_SIMILARITY_CALIBRATION_VERSION",
             "provisional-v1",
@@ -435,27 +425,6 @@ def _sample_video_frames(path: Path, sample_count: int) -> list[np.ndarray]:
         capture.release()
 
 
-def _active_provider(app: object, configured: Sequence[str]) -> str:
-    models = getattr(app, "models", {})
-    recognition = models.get("recognition") if isinstance(models, dict) else None
-    session = getattr(recognition, "session", None)
-    get_providers = getattr(session, "get_providers", None)
-    if callable(get_providers):
-        active = get_providers()
-        if active:
-            return str(active[0])
-    return configured[0]
-
-
-def _bounded_box(bbox: Sequence[float], shape: Sequence[int]) -> tuple[int, int, int, int]:
-    height, width = int(shape[0]), int(shape[1])
-    x1 = max(0, min(int(bbox[0]), width - 1))
-    y1 = max(0, min(int(bbox[1]), height - 1))
-    x2 = max(x1 + 1, min(int(bbox[2]), width))
-    y2 = max(y1 + 1, min(int(bbox[3]), height))
-    return x1, y1, x2, y2
-
-
 def _robust_similarity(values: Sequence[float]) -> float:
     if not values:
         raise FaceSimilarityUnavailable("no face similarities available")
@@ -471,24 +440,35 @@ def _temporal_consistency(similarities: Sequence[float]) -> float:
     return _clamp(1.0 - spread / 0.35)
 
 
+def _geometry_consistency(
+    geometries: Sequence[tuple[float, float, float, float]],
+) -> float:
+    if len(geometries) < 2:
+        return 0.0
+    array = np.asarray(geometries, dtype=np.float32)
+    center_jitter = float(np.mean(np.std(array[:, :2], axis=0)))
+    size_jitter = float(np.mean(np.std(array[:, 2:], axis=0)))
+    return _clamp(1.0 - center_jitter / 0.08 - size_jitter / 0.10)
+
+
 def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.dot(_normalized(left), _normalized(right)))
 
 
-def _normalized(embedding: np.ndarray) -> np.ndarray:
-    array = np.asarray(embedding, dtype=np.float32).reshape(-1)
+def _normalized(descriptor: np.ndarray) -> np.ndarray:
+    array = np.asarray(descriptor, dtype=np.float32).reshape(-1)
     norm = float(np.linalg.norm(array))
     if norm <= 1e-12:
-        raise FaceSimilarityUnavailable("face embedding has zero norm")
+        raise FaceSimilarityUnavailable("face appearance descriptor has zero norm")
     return array / norm
 
 
-def _cosine_to_score(
-    cosine_similarity: float,
+def _appearance_to_score(
+    appearance_similarity: float,
     config: FaceSimilarityConfig,
 ) -> float:
-    normalized = (cosine_similarity - config.cosine_low) / (
-        config.cosine_high - config.cosine_low
+    normalized = (appearance_similarity - config.appearance_low) / (
+        config.appearance_high - config.appearance_low
     )
     return _clamp(normalized) * config.max_score
 
@@ -509,18 +489,21 @@ def _confidence(
 def _validate_config(config: FaceSimilarityConfig) -> None:
     if config.sample_count <= 0:
         raise ValueError("sample_count must be positive")
-    if config.cosine_high <= config.cosine_low:
-        raise ValueError("cosine_high must be greater than cosine_low")
-    if not -1.0 <= config.cosine_low < config.cosine_high <= 1.0:
-        raise ValueError("cosine thresholds must be between -1 and 1")
+    if config.appearance_high <= config.appearance_low:
+        raise ValueError("appearance_high must be greater than appearance_low")
+    if not -1.0 <= config.appearance_low < config.appearance_high <= 1.0:
+        raise ValueError("appearance thresholds must be between -1 and 1")
     if not 0.0 < config.max_score <= 100.0:
         raise ValueError("max_score must be between 0 and 100")
     if not 0.0 < config.min_detection_rate <= 1.0:
         raise ValueError("min_detection_rate must be between 0 and 1")
-    if config.identity_weight < 0 or config.render_quality_weight < 0:
-        raise ValueError("similarity weights cannot be negative")
-    if config.identity_weight + config.render_quality_weight <= 0:
-        raise ValueError("at least one similarity weight must be positive")
+    if (
+        config.source_preservation_weight < 0
+        or config.render_quality_weight < 0
+    ):
+        raise ValueError("face quality weights cannot be negative")
+    if config.source_preservation_weight + config.render_quality_weight <= 0:
+        raise ValueError("at least one face quality weight must be positive")
     if not 0.0 < config.min_temporal_consistency <= 1.0:
         raise ValueError("min_temporal_consistency must be between 0 and 1")
     if not 0.0 <= config.stability_floor <= 1.0:
@@ -562,7 +545,7 @@ def main() -> None:
 
     load_dotenv()
     parser = argparse.ArgumentParser(
-        description="Measure generated face identity and rendering similarity.",
+        description="Measure source preservation and face rendering quality.",
     )
     parser.add_argument("--reference", action="append", required=True)
     parser.add_argument("--generated", required=True)

@@ -141,6 +141,49 @@ class FaceProfileArtifactTests(unittest.TestCase):
             self.assertEqual(uploaded["body"], b"preview")
             self.assertEqual(uploaded["content_type"], "video/mp4")
 
+    def test_prefers_ditto_similarity_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            portrait = root / "front.jpg"
+            portrait.write_bytes(b"portrait")
+            ditto_preview = root / "ditto-preview.mp4"
+            ditto_preview.write_bytes(b"ditto-preview")
+            liveportrait_preview = root / "liveportrait.mp4"
+            liveportrait_preview.write_bytes(b"liveportrait-preview")
+            manifest_path = root / "preprocess-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "videos": [
+                            {
+                                "frameSelection": {
+                                    "qualityGatePassed": True,
+                                    "selectedSourcePath": str(portrait),
+                                    "frames": [{"path": str(portrait)}],
+                                }
+                            }
+                        ],
+                        "dittoSimilarityPreview": {
+                            "outputPath": str(ditto_preview)
+                        },
+                        "livePortrait": {
+                            "outputPath": str(liveportrait_preview)
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            client = _FakeS3Client()
+
+            result = upload_face_profile_artifacts(
+                client,
+                message=self.message,
+                manifest_path=manifest_path,
+            )
+
+            uploaded = client.objects[(self.message.bucket, result.preview_key)]
+            self.assertEqual(uploaded["body"], b"ditto-preview")
+
     def test_rejects_unsafe_result_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest_path = Path(directory) / "preprocess-manifest.json"

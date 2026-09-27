@@ -316,7 +316,7 @@ def _cosine_similarity(left, right) -> float:
 def _cosine_to_score(cosine_similarity: float) -> float:
     low = _env_float("CLONE_SIMILARITY_COSINE_LOW", 0.20)
     high = _env_float("CLONE_SIMILARITY_COSINE_HIGH", 0.70)
-    max_score = _env_float("CLONE_SIMILARITY_MAX_ACTUAL_VOICE_SCORE", 95.0)
+    max_score = _env_float("CLONE_SIMILARITY_MAX_ACTUAL_VOICE_SCORE", 100.0)
     if high <= low:
         low, high = 0.20, 0.70
 

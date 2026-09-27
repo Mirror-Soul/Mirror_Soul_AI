@@ -1,7 +1,31 @@
+import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import httpx
+try:
+    import httpx
+except ImportError:
+    class _HttpError(Exception):
+        pass
+
+    class _ConnectError(_HttpError):
+        def __init__(self, message, *, request=None):
+            super().__init__(message)
+            self.request = request
+
+    class _Request:
+        def __init__(self, method, url):
+            self.method = method
+            self.url = url
+
+    httpx = SimpleNamespace(
+        HTTPError=_HttpError,
+        ConnectError=_ConnectError,
+        Request=_Request,
+        Client=object,
+    )
+    sys.modules["httpx"] = httpx
 
 from model_training.clone_training_callback import (
     CloneTrainingCallbackError,
@@ -33,6 +57,37 @@ class CloneTrainingCallbackTest(unittest.TestCase):
             "http://backend.internal:8080/internal/clone-training/12/personality/complete",
             headers={
                 "X-Clone-Training-Callback-Secret": "callback-secret"
+            },
+        )
+
+    def test_posts_profile_score_components_when_available(self):
+        response = Mock(status_code=204)
+        client = Mock()
+        client.post.return_value = response
+
+        notify_personality_training_complete(
+            12,
+            score_components={
+                "profileScore": 64.25,
+                "dataReliabilityScore": 91.5,
+                "penaltyScore": 1.5,
+                "meaningfulAnswerCount": 5,
+            },
+            base_url="http://backend.internal:8080",
+            secret="callback-secret",
+            http_client=client,
+        )
+
+        client.post.assert_called_once_with(
+            "http://backend.internal:8080/internal/clone-training/12/personality/complete",
+            headers={
+                "X-Clone-Training-Callback-Secret": "callback-secret"
+            },
+            json={
+                "calculationVersion": "clone-similarity-v1",
+                "profileScore": 64.25,
+                "dataReliabilityScore": 91.5,
+                "penaltyScore": 1.5,
             },
         )
 

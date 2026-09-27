@@ -233,13 +233,21 @@ def _update_clone_similarity_score(
         snapshot,
         actual_voice_score=actual_voice_score,
     )
-    detail_saved = save_clone_similarity_score(score)
+    save_result = save_clone_similarity_score(score)
     print(
         "[CLONE_SIMILARITY] updated: "
         f"user_uuid={user_uuid} clone_id={score.clone_id} "
-        f"total={score.total_score} voice={score.voice_score} "
-        f"interview={score.interview_score} profile={score.profile_score} "
-        f"detail_saved={detail_saved}",
+        f"overall={save_result.aggregate.total_score} "
+        f"face={save_result.aggregate.face_score} "
+        f"voice={save_result.aggregate.voice_score} "
+        f"personality={save_result.aggregate.profile_score} "
+        f"data_reliability={save_result.aggregate.data_reliability_score} "
+        f"penalty={save_result.aggregate.penalty_score} "
+        f"interview_coverage={score.interview_score} "
+        f"basic_profile={score.profile_score} "
+        f"complete={save_result.aggregate.complete} "
+        f"component_columns={save_result.component_columns_available} "
+        f"detail_saved={save_result.detail_saved}",
         flush=True,
     )
 

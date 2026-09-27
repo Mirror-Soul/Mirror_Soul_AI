@@ -63,7 +63,10 @@ def add_member_profile(request: MemberProfileRequest):
         interview_samples=interview_samples,
         keyword_limit=request.keywordLimit,
     )
-    notify_personality_training_complete(request.cloneId)
+    notify_personality_training_complete(
+        request.cloneId,
+        score_components=result["profileQuality"],
+    )
 
     return MemberProfileResponse(
         success=True,
