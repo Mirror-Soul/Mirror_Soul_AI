@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from model_training.face_training.face_similarity import (
     FaceSimilarityResult,
-    InsightFaceEncoder,
+    OpenCvAppearanceEncoder,
     evaluate_face_similarity,
     face_similarity_config_from_env,
 )
@@ -113,7 +113,7 @@ def run_variant_sweep(
         print(
             "[FACE_VARIANT] completed: "
             f"name={variant.name} score={similarity.score:.2f} "
-            f"identity={similarity.identity_score:.2f} "
+            f"source_preservation={similarity.source_preservation_score:.2f} "
             f"render={similarity.render_quality_score:.2f} "
             f"stability={similarity.temporal_consistency:.4f}",
             flush=True,
@@ -124,7 +124,7 @@ def run_variant_sweep(
         key=lambda item: (
             item.similarity.score,
             item.similarity.render_quality_score,
-            item.similarity.identity_score,
+            item.similarity.source_preservation_score,
         ),
         reverse=True,
     )
@@ -236,7 +236,7 @@ def main() -> None:
         else manifest_path.parent / "outputs" / "variant-sweep"
     )
     similarity_config = face_similarity_config_from_env()
-    shared_face_encoder = InsightFaceEncoder(similarity_config)
+    shared_face_encoder = OpenCvAppearanceEncoder()
 
     def evaluate_variant(**kwargs: Any) -> FaceSimilarityResult:
         return evaluate_face_similarity(

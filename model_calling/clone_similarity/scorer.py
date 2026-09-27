@@ -35,6 +35,9 @@ class CloneSimilarityScore:
     voice_score: float
     interview_score: float
     profile_score: float
+    personality_score: float
+    data_reliability_score: float
+    penalty_score: float
     explanation: str
 
 
@@ -50,6 +53,12 @@ def calculate_clone_similarity(
     )
     interview_score = _calculate_interview_score(snapshot)
     profile_score = _calculate_profile_score(snapshot)
+    personality_score = _calculate_personality_score(
+        snapshot,
+        interview_score=interview_score,
+        profile_score=profile_score,
+    )
+    data_reliability_score = _calculate_data_reliability_score(snapshot)
 
     voice_weight = _env_float("CLONE_SIMILARITY_VOICE_WEIGHT", 0.60)
     interview_weight = _env_float("CLONE_SIMILARITY_INTERVIEW_WEIGHT", 0.25)
@@ -76,6 +85,9 @@ def calculate_clone_similarity(
         voice_score=_round_score(voice_score),
         interview_score=_round_score(interview_score),
         profile_score=_round_score(profile_score),
+        personality_score=_round_score(personality_score),
+        data_reliability_score=_round_score(data_reliability_score),
+        penalty_score=0.0,
         explanation=_build_explanation(
             voice_score=voice_score,
             interview_score=interview_score,
@@ -123,7 +135,7 @@ def _calculate_interview_score(snapshot: CloneSimilaritySnapshot) -> float:
         excellent_interviews - expected_interviews,
         1,
     )
-    return base_score + 33.0 * min(extra_ratio, 1.0)
+    return base_score + 38.0 * min(extra_ratio, 1.0)
 
 
 def _calculate_profile_score(snapshot: CloneSimilaritySnapshot) -> float:
@@ -136,9 +148,56 @@ def _calculate_profile_score(snapshot: CloneSimilaritySnapshot) -> float:
         snapshot.mbti,
     ]
     completed = sum(1 for value in fields if _has_value(value))
-    core_score = 20.0 + 45.0 * completed / len(fields)
-    detail_bonus = 5.0 if _has_value(snapshot.job_description) else 0.0
-    return core_score + detail_bonus
+    core_score = 60.0 * completed / len(fields)
+    detail_bonus = 10.0 if _has_value(snapshot.job_description) else 0.0
+    onboarding_bonus = 30.0 if completed == len(fields) else 0.0
+    return core_score + detail_bonus + onboarding_bonus
+
+
+def _calculate_personality_score(
+    snapshot: CloneSimilaritySnapshot,
+    *,
+    interview_score: float,
+    profile_score: float,
+) -> float:
+    call_ratio = min(
+        snapshot.completed_call_count
+        / max(_env_int("CLONE_SIMILARITY_EXCELLENT_CALLS", 12), 1),
+        1.0,
+    )
+    talk_log_ratio = min(
+        snapshot.user_talk_log_count
+        / max(_env_int("CLONE_SIMILARITY_EXCELLENT_TALK_LOGS", 40), 1),
+        1.0,
+    )
+    conversational_memory_score = 100.0 * (
+        0.40 * call_ratio + 0.60 * talk_log_ratio
+    )
+    return (
+        interview_score * 0.50
+        + profile_score * 0.20
+        + conversational_memory_score * 0.30
+    )
+
+
+def _calculate_data_reliability_score(
+    snapshot: CloneSimilaritySnapshot,
+) -> float:
+    if not snapshot.elevenlabs_voice_id or snapshot.voice_training_status != "COMPLETED":
+        return 0.0
+
+    answer_count = max(snapshot.interview_answer_count, 1)
+    text_coverage = min(snapshot.interview_text_count / answer_count, 1.0)
+    audio_coverage = min(snapshot.interview_audio_count / answer_count, 1.0)
+    maturity = _calculate_data_maturity(snapshot)
+    profile_coverage = min(_calculate_profile_score(snapshot) / 100.0, 1.0)
+    return 100.0 * (
+        0.40
+        + 0.20 * text_coverage
+        + 0.15 * audio_coverage
+        + 0.15 * profile_coverage
+        + 0.10 * maturity
+    )
 
 
 def _calibrate_total_score(
@@ -187,7 +246,7 @@ def _calculate_data_maturity(snapshot: CloneSimilaritySnapshot) -> float:
         expected_weight=0.08,
         extra_weight=0.15,
     )
-    profile_maturity = 0.07 * min(_calculate_profile_score(snapshot) / 70.0, 1.0)
+    profile_maturity = 0.07 * min(_calculate_profile_score(snapshot) / 100.0, 1.0)
     call_maturity = _piecewise_ratio(
         snapshot.completed_call_count,
         expected_calls,

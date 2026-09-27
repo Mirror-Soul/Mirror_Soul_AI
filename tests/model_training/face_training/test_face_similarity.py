@@ -10,10 +10,15 @@ from model_training.face_training.face_similarity import (
 )
 
 
-def _observation(values, sharpness=100.0):
+def _observation(
+    values,
+    sharpness=100.0,
+    geometry=(0.5, 0.5, 0.4, 0.5),
+):
     return FaceObservation(
-        embedding=np.asarray(values, dtype=np.float32),
+        descriptor=np.asarray(values, dtype=np.float32),
         sharpness=sharpness,
+        geometry=geometry,
     )
 
 
@@ -21,9 +26,9 @@ class FaceSimilarityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = FaceSimilarityConfig(
             sample_count=16,
-            cosine_low=0.30,
-            cosine_high=0.70,
-            max_score=95.0,
+            appearance_low=0.30,
+            appearance_high=0.70,
+            max_score=100.0,
         )
         self.references = [
             _observation([1.0, 0.0]),
@@ -31,7 +36,7 @@ class FaceSimilarityTests(unittest.TestCase):
             _observation([0.98, -0.02]),
         ]
 
-    def test_matching_identity_receives_high_bounded_score(self) -> None:
+    def test_preserved_source_receives_high_bounded_score(self) -> None:
         generated = [_observation([1.0, 0.0], 90.0) for _ in range(16)]
         driving = [_observation([1.0, 0.0], 100.0) for _ in range(16)]
 
@@ -43,7 +48,7 @@ class FaceSimilarityTests(unittest.TestCase):
             provider="CUDAExecutionProvider",
         )
 
-        self.assertEqual(result.score, 95.0)
+        self.assertGreaterEqual(result.score, 98.0)
         self.assertEqual(result.confidence, "high")
         self.assertEqual(result.provider, "CUDAExecutionProvider")
         self.assertFalse(result.calibrated)
@@ -51,7 +56,7 @@ class FaceSimilarityTests(unittest.TestCase):
         self.assertEqual(result.aligned_frame_count, 16)
         self.assertEqual(result.stability_factor, 1.0)
 
-    def test_different_identity_receives_low_score(self) -> None:
+    def test_different_appearance_receives_low_score(self) -> None:
         generated = [_observation([0.0, 1.0]) for _ in range(16)]
         driving = [_observation([1.0, 0.0]) for _ in range(16)]
 
@@ -62,10 +67,10 @@ class FaceSimilarityTests(unittest.TestCase):
             config=self.config,
         )
 
-        self.assertLess(result.score, 20.0)
-        self.assertEqual(result.identity_score, 0.0)
+        self.assertLessEqual(result.score, 20.0)
+        self.assertEqual(result.source_preservation_score, 0.0)
 
-    def test_unstable_identity_is_penalized(self) -> None:
+    def test_unstable_appearance_is_penalized(self) -> None:
         stable = [_observation([1.0, 0.0]) for _ in range(16)]
         unstable = [
             _observation([1.0, 0.0]) if index % 2 == 0
@@ -89,6 +94,21 @@ class FaceSimilarityTests(unittest.TestCase):
             stable_result.stability_factor,
         )
         self.assertLess(unstable_result.score, stable_result.score)
+
+    def test_static_reference_supplies_sharpness_baseline(self) -> None:
+        generated = [
+            _observation([1.0, 0.0], sharpness=50.0)
+            for _ in range(16)
+        ]
+
+        result = score_face_observations(
+            reference_observations=self.references,
+            generated_observations=generated,
+            config=self.config,
+        )
+
+        self.assertEqual(result.sharpness_retention, 0.5)
+        self.assertEqual(result.render_quality_score, 87.5)
 
     def test_low_detection_rate_reduces_score_and_confidence(self) -> None:
         generated = [

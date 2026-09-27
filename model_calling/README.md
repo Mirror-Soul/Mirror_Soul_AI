@@ -164,9 +164,17 @@ Optional speaker similarity dependencies:
 pip install -r requirements-voice-similarity.txt
 ```
 
-The total score is always written to `clones.sync_rate` so existing backend
-responses can use it. If the optional detail table exists, the worker also
-stores score history and explanation there:
+The voice score is written to `clones.voice_similarity_score` when the component
+columns exist. The worker also supplies an initial personality/memory score and
+data-reliability score when those values have not yet been written by the RAG
+profile flow. It then combines face 30%, voice 30%, personality/memory 30%, and
+data reliability 10%, subtracts the explicit data penalty, multiplies by 0.95,
+and writes the one-decimal result to `clones.sync_rate`. The value is capped at
+95.0 and is a clone completeness indicator, not a biometric probability.
+
+Before the backend migration adds the component columns, the worker safely
+falls back to the existing onboarding score. If the optional detail table
+exists, the worker also stores voice score history and explanation there:
 
 ```sql
 CREATE TABLE ai_clone_similarity_scores (
@@ -207,16 +215,21 @@ CLONE_SIMILARITY_SCORING_CEILING=96
 CLONE_SIMILARITY_SPEAKER_MODEL=speechbrain/spkrec-ecapa-voxceleb
 CLONE_SIMILARITY_COSINE_LOW=0.20
 CLONE_SIMILARITY_COSINE_HIGH=0.70
-CLONE_SIMILARITY_MAX_ACTUAL_VOICE_SCORE=95
+CLONE_SIMILARITY_MAX_ACTUAL_VOICE_SCORE=100
 CLONE_SIMILARITY_REFERENCE_TEXT=안녕하세요! 처음뵙겠습니다.
 CLONE_SIMILARITY_REFERENCE_AUDIO_DIR=model_calling/assets/clone_similarity
 FFMPEG_BIN=ffmpeg
 ```
 
-The first complete onboarding clone is intentionally capped near 64, even when
-speaker embedding similarity is high. More interviews, voice samples, completed
-calls, and user-side talk logs raise the score over time. Scores above 90 should
-feel exceptional rather than automatic, and the default maximum score is 92.
+Overall score calculation and the backend migration contract are documented in
+`docs/clone-similarity-score-contract.md`.
+
+A normal complete onboarding clone is expected to start around the low 60s.
+More distinct interviews, voice samples, completed calls, and user-side talk
+logs raise the personality and reliability components over time. Repeated or
+verified irrelevant data does not add credit and may add an explicit penalty.
+Scores above 90 should feel exceptional, and the displayed score can never
+exceed 95.0.
 
 Optional voice activity detection settings:
 

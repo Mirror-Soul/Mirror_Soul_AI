@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 from model_calling.clone_similarity.scorer import (
@@ -9,6 +10,17 @@ from model_calling.repository.clone_repository import (
     CloneRepositoryNotConfigured,
     _get_db_config,
 )
+from shared.clone_similarity import (
+    OverallCloneSimilarity,
+    calculate_overall_clone_similarity,
+)
+
+
+@dataclass(frozen=True)
+class CloneSimilaritySaveResult:
+    detail_saved: bool
+    component_columns_available: bool
+    aggregate: OverallCloneSimilarity
 
 
 def load_clone_similarity_snapshot(
@@ -139,7 +151,9 @@ def load_clone_similarity_snapshot(
     )
 
 
-def save_clone_similarity_score(score: CloneSimilarityScore) -> bool:
+def save_clone_similarity_score(
+    score: CloneSimilarityScore,
+) -> CloneSimilaritySaveResult:
     try:
         import pymysql
     except ImportError as exc:
@@ -154,13 +168,9 @@ def save_clone_similarity_score(score: CloneSimilarityScore) -> bool:
     try:
         connection = pymysql.connect(**config)
         with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE clones
-                SET sync_rate = %s
-                WHERE id = %s
-                """,
-                (round(score.total_score), score.clone_id),
+            aggregate, component_columns_available = _save_component_scores(
+                cursor,
+                score,
             )
             try:
                 _insert_similarity_detail(cursor, score)
@@ -174,7 +184,11 @@ def save_clone_similarity_score(score: CloneSimilarityScore) -> bool:
                     flush=True,
                 )
         connection.commit()
-        return detail_saved
+        return CloneSimilaritySaveResult(
+            detail_saved=detail_saved,
+            component_columns_available=component_columns_available,
+            aggregate=aggregate,
+        )
     except Exception as exc:
         if connection:
             connection.rollback()
@@ -213,6 +227,100 @@ def _insert_similarity_detail(cursor: Any, score: CloneSimilarityScore) -> None:
     )
 
 
+def _save_component_scores(
+    cursor: Any,
+    score: CloneSimilarityScore,
+) -> tuple[OverallCloneSimilarity, bool]:
+    try:
+        cursor.execute(
+            """
+            SELECT
+                face_similarity_score,
+                profile_similarity_score,
+                data_reliability_score,
+                similarity_penalty
+            FROM clones
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (score.clone_id,),
+        )
+        row = cursor.fetchone()
+        face_score = row[0] if row else None
+        profile_score = (
+            row[1]
+            if row and row[1] is not None
+            else score.personality_score
+        )
+        data_reliability_score = (
+            row[2]
+            if row and row[2] is not None
+            else score.data_reliability_score
+        )
+        penalty_score = (
+            row[3]
+            if row and row[3] is not None
+            else score.penalty_score
+        )
+        aggregate = calculate_overall_clone_similarity(
+            face_score=face_score,
+            voice_score=score.voice_score,
+            profile_score=profile_score,
+            data_reliability_score=data_reliability_score,
+            penalty_score=penalty_score,
+        )
+        cursor.execute(
+            """
+            UPDATE clones
+            SET voice_similarity_score = %s,
+                profile_similarity_score = COALESCE(profile_similarity_score, %s),
+                data_reliability_score = COALESCE(data_reliability_score, %s),
+                similarity_penalty = COALESCE(similarity_penalty, %s),
+                sync_rate = %s
+            WHERE id = %s
+            """,
+            (
+                aggregate.voice_score,
+                aggregate.profile_score,
+                aggregate.data_reliability_score,
+                aggregate.penalty_score,
+                aggregate.total_score,
+                score.clone_id,
+            ),
+        )
+        return aggregate, True
+    except Exception as exc:
+        if not _is_missing_component_column_error(exc):
+            raise
+
+    aggregate = calculate_overall_clone_similarity(
+        face_score=None,
+        voice_score=score.voice_score,
+        profile_score=score.personality_score,
+        data_reliability_score=score.data_reliability_score,
+        penalty_score=score.penalty_score,
+    )
+    cursor.execute(
+        """
+        UPDATE clones
+        SET sync_rate = %s
+        WHERE id = %s
+        """,
+        (round(score.total_score, 1), score.clone_id),
+    )
+    print(
+        "[CLONE_SIMILARITY] component columns missing; "
+        "stored legacy onboarding score in clones.sync_rate",
+        flush=True,
+    )
+    return aggregate, False
+
+
 def _is_missing_optional_table_error(exc: Exception) -> bool:
     args = getattr(exc, "args", ())
     return bool(args and args[0] == 1146)
+
+
+def _is_missing_component_column_error(exc: Exception) -> bool:
+    args = getattr(exc, "args", ())
+    return bool(args and args[0] == 1054)

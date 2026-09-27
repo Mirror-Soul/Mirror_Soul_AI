@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
+
+from shared.clone_similarity import CLONE_SIMILARITY_CALCULATION_VERSION
 
 
 class CloneTrainingCallbackError(RuntimeError):
@@ -13,6 +15,7 @@ class CloneTrainingCallbackError(RuntimeError):
 def notify_personality_training_complete(
     clone_id: int,
     *,
+    score_components: Mapping[str, object] | None = None,
     base_url: str | None = None,
     secret: str | None = None,
     timeout_seconds: float = 10.0,
@@ -40,13 +43,31 @@ def notify_personality_training_complete(
         f"/internal/clone-training/{clone_id}/personality/complete"
     )
     headers = {"X-Clone-Training-Callback-Secret": resolved_secret}
+    payload = None
+    if score_components is not None:
+        payload = {
+            "calculationVersion": CLONE_SIMILARITY_CALCULATION_VERSION,
+            "profileScore": score_components.get("profileScore"),
+            "dataReliabilityScore": score_components.get(
+                "dataReliabilityScore"
+            ),
+            "penaltyScore": score_components.get("penaltyScore", 0.0),
+        }
 
     try:
         if http_client is not None:
-            response = http_client.post(url, headers=headers)
+            response = (
+                http_client.post(url, headers=headers, json=payload)
+                if payload is not None
+                else http_client.post(url, headers=headers)
+            )
         else:
             with httpx.Client(timeout=timeout_seconds) as client:
-                response = client.post(url, headers=headers)
+                response = (
+                    client.post(url, headers=headers, json=payload)
+                    if payload is not None
+                    else client.post(url, headers=headers)
+                )
     except httpx.HTTPError as exc:
         raise CloneTrainingCallbackError(
             "Personality completion callback request failed"

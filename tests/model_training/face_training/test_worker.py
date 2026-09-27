@@ -19,6 +19,7 @@ from model_training.face_training.worker import (
     _download_face_video,
     _evaluate_liveportrait_similarity,
     _handle_sqs_message,
+    _run_ditto_similarity_preview,
     _select_liveportrait_inputs,
     run_worker,
 )
@@ -27,6 +28,10 @@ from model_training.face_training.face_similarity import (
     FaceSimilarityUnavailable,
 )
 from model_training.face_training.liveportrait_runner import LivePortraitResult
+from model_training.face_training.ditto_runner import (
+    DittoRenderSettings,
+    DittoResult,
+)
 from model_training.face_training.profile_artifacts import FaceProfileArtifacts
 
 
@@ -195,13 +200,14 @@ class FaceTrainingWorkerTests(unittest.TestCase):
         )
         expected = FaceSimilarityResult(
             score=88.0,
-            identity_score=90.0,
+            source_preservation_score=90.0,
             render_quality_score=80.0,
-            cosine_similarity=0.68,
-            aligned_cosine_similarity=0.69,
-            gallery_cosine_similarity=0.66,
+            appearance_similarity=0.68,
+            aligned_appearance_similarity=0.69,
+            gallery_appearance_similarity=0.66,
             detection_rate=1.0,
             temporal_consistency=0.9,
+            geometry_consistency=0.9,
             sharpness_retention=0.8,
             stability_factor=1.0,
             evaluated_frame_count=16,
@@ -209,8 +215,8 @@ class FaceTrainingWorkerTests(unittest.TestCase):
             aligned_frame_count=16,
             reference_count=1,
             confidence="low",
-            model_name="buffalo_l",
-            provider="CPUExecutionProvider",
+            evaluator_name="opencv-appearance-v1",
+            provider="opencv-cpu",
             calibration_version="provisional-v1",
             calibrated=False,
         )
@@ -266,6 +272,106 @@ class FaceTrainingWorkerTests(unittest.TestCase):
                 )
 
         self.assertIsNone(result)
+
+    def test_ditto_preview_is_scored_against_member_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "front.jpg"
+            source.write_bytes(b"image")
+            input_video = root / "input.mp4"
+            input_video.write_bytes(b"video")
+            audio = root / "reference.wav"
+            audio.write_bytes(b"audio")
+            output = root / "outputs" / "ditto-similarity" / "preview.mp4"
+            ditto_result = DittoResult(
+                source_path=source,
+                audio_path=audio,
+                output_path=output,
+                log_path=output.with_suffix(".ditto.log"),
+                settings=DittoRenderSettings(),
+                seed=1024,
+            )
+            downloaded = DownloadedFaceVideo(
+                bucket="bucket",
+                object_key="input.mp4",
+                content_type="video/mp4",
+                local_path=input_video,
+                size_bytes=1,
+            )
+            selection = SimpleNamespace(
+                quality_gate_passed=True,
+                selected_source_path=source,
+                frames=[
+                    SimpleNamespace(
+                        path=source,
+                        accepted=True,
+                        quality_score=88.0,
+                    )
+                ],
+            )
+            expected_similarity = object()
+
+            with patch.dict(
+                os.environ,
+                {"FACE_SIMILARITY_DITTO_AUDIO_PATH": str(audio)},
+            ), patch(
+                "model_training.face_training.worker.run_ditto_preview",
+                return_value=ditto_result,
+            ) as render, patch(
+                "model_training.face_training.worker."
+                "_evaluate_generated_face_similarity",
+                return_value=expected_similarity,
+            ) as evaluate:
+                actual_render, actual_similarity = _run_ditto_similarity_preview(
+                    [downloaded],
+                    [selection],
+                    root,
+                )
+
+        self.assertIs(actual_render, ditto_result)
+        self.assertIs(actual_similarity, expected_similarity)
+        self.assertEqual(render.call_args.args[0], source)
+        self.assertEqual(render.call_args.args[1], audio)
+        self.assertEqual(render.call_args.args[2], output)
+        self.assertEqual(evaluate.call_args.kwargs["generated_video"], output)
+        self.assertIsNone(evaluate.call_args.kwargs["driving_video"])
+
+    def test_optional_ditto_preview_failure_keeps_face_profile(self) -> None:
+        video = DownloadedFaceVideo(
+            bucket="bucket",
+            object_key="input.mp4",
+            content_type="video/mp4",
+            local_path=Path("input.mp4"),
+            size_bytes=1,
+        )
+        source = Path("front.jpg")
+        selection = SimpleNamespace(
+            quality_gate_passed=True,
+            selected_source_path=source,
+            frames=[
+                SimpleNamespace(
+                    path=source,
+                    accepted=True,
+                    quality_score=88.0,
+                )
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"FACE_SIMILARITY_REQUIRED": "false"},
+        ), patch(
+            "model_training.face_training.worker.run_ditto_preview",
+            side_effect=RuntimeError("render unavailable"),
+        ):
+            render, similarity = _run_ditto_similarity_preview(
+                [video],
+                [selection],
+                Path("workspace"),
+            )
+
+        self.assertIsNone(render)
+        self.assertIsNone(similarity)
 
     def test_production_message_publishes_completion_before_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -336,6 +442,80 @@ class FaceTrainingWorkerTests(unittest.TestCase):
             published[-1][1].result["qualityWarnings"],
             ["low_sharpness"],
         )
+
+    def test_completion_includes_face_clone_similarity_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "preprocess-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "videos": [
+                            {
+                                "frameSelection": {
+                                    "qualityGatePassed": True,
+                                    "qualityTier": "NORMAL",
+                                    "selectionMode": "STRICT",
+                                }
+                            }
+                        ],
+                        "faceSimilarity": {
+                            "score": 86.5,
+                            "confidence": "high",
+                            "calibrationVersion": "member-v1",
+                            "calibrated": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifacts = FaceProfileArtifacts(
+                bucket="mirror-soul-test",
+                prefix="face-results/member/job-12",
+                profile_key="face-results/member/job-12/face-profile.json",
+                portrait_key="face-results/member/job-12/portrait.jpg",
+                manifest_key="face-results/member/job-12/preprocess-manifest.json",
+                preview_key=None,
+            )
+            published = []
+
+            with patch(
+                "model_training.face_training.worker."
+                "_preprocess_face_training_message",
+                return_value=manifest_path,
+            ), patch(
+                "model_training.face_training.worker."
+                "upload_face_profile_artifacts",
+                return_value=artifacts,
+            ), patch(
+                "model_training.face_training.worker."
+                "publish_face_training_result",
+                side_effect=lambda _client, *, queue_url, message: (
+                    published.append(message) or "message-id"
+                ),
+            ):
+                _handle_sqs_message(
+                    object(),
+                    object(),
+                    {"Body": self.message_body},
+                    result_queue_url="https://sqs.example/results",
+                )
+
+        result = published[-1].result
+        self.assertEqual(result["cloneSimilarity"]["faceScore"], 86.5)
+        self.assertEqual(
+            result["cloneSimilarity"]["calculationVersion"],
+            "clone-similarity-v1",
+        )
+        self.assertEqual(
+            result["cloneSimilarity"]["weights"],
+            {
+                "face": 0.3,
+                "voice": 0.3,
+                "profile": 0.3,
+                "dataReliability": 0.1,
+            },
+        )
+        self.assertTrue(result["cloneSimilarity"]["calibrated"])
 
     def test_failed_message_is_retained_for_retry(self) -> None:
         published = []

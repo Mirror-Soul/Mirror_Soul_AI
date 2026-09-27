@@ -8,6 +8,7 @@ from model_training.profile_memories import (
     build_member_profile_documents,
     find_stale_profile_interview_ids,
 )
+from model_training.profile_quality import evaluate_profile_quality
 from model_training.utils import (
     build_training_text,
     create_document_id,
@@ -108,6 +109,15 @@ def add_member_profile_to_rag(
     interview_samples: list[dict[str, Any]] | None = None,
     keyword_limit: int = 12,
 ) -> dict[str, Any]:
+    profile_quality = evaluate_profile_quality(
+        age=age,
+        gender=gender,
+        mbti=mbti,
+        description=description,
+        interests=interests or [],
+        interview_topics=interview_topics or [],
+        interview_samples=interview_samples or [],
+    )
     seed_keywords = [
         *(interests or []),
         *(interview_topics or []),
@@ -178,6 +188,7 @@ def add_member_profile_to_rag(
         "status": "stored",
         "keywords": keywords,
         "profileSummary": documents[0].text,
+        "profileQuality": profile_quality.to_dict(),
     }
 
 

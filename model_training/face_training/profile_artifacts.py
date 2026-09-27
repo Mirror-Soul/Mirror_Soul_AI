@@ -196,6 +196,7 @@ def _put_file(
 
 def _find_preview_path(manifest: dict[str, Any]) -> Path | None:
     candidates = [
+        (manifest.get("dittoSimilarityPreview") or {}).get("outputPath"),
         ((manifest.get("memberVoicePreview") or {}).get("museTalk") or {}).get(
             "outputPath"
         ),
