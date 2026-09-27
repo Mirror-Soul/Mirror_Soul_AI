@@ -3,10 +3,13 @@ from typing import Any
 import chromadb
 from openai import OpenAI
 
+from model_training.profile_memories import (
+    PROFILE_INTERVIEW_SOURCE_TYPE,
+    build_member_profile_documents,
+    find_stale_profile_interview_ids,
+)
 from model_training.utils import (
-    build_member_profile_summary_text,
     build_training_text,
-    create_member_profile_document_id,
     create_document_id,
     create_sample_id,
     extract_keywords_from_texts,
@@ -25,12 +28,21 @@ collection = chroma_client.get_or_create_collection(
 
 
 def create_embedding(text: str) -> list[float]:
+    return create_embeddings([text])[0]
+
+
+def create_embeddings(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
     response = openai_client.embeddings.create(
         model=settings.EMBEDDING_MODEL,
-        input=text,
+        input=texts,
         encoding_format="float",
     )
-    return response.data[0].embedding
+    ordered = sorted(response.data, key=lambda item: item.index)
+    if len(ordered) != len(texts):
+        raise RuntimeError("Embedding response count does not match input count")
+    return [item.embedding for item in ordered]
 
 
 def add_training_sample_to_rag(
@@ -123,43 +135,49 @@ def add_member_profile_to_rag(
         limit=keyword_limit,
     )
 
-    document_id = create_member_profile_document_id(user_id, ai_profile_id)
-    text = build_member_profile_summary_text(
+    documents = build_member_profile_documents(
+        user_id=user_id,
+        ai_profile_id=ai_profile_id,
         age=age,
         gender=gender,
         mbti=mbti,
+        description=description,
         keywords=keywords,
+        interview_samples=interview_samples or [],
     )
-    embedding = create_embedding(text)
-
-    metadata: dict[str, Any] = {
-        "userId": user_id,
-        "sourceType": "member_profile_summary",
-        "keywordCount": len(keywords),
-        "keywords": ", ".join(keywords),
-    }
-
-    if ai_profile_id:
-        metadata["aiProfileId"] = ai_profile_id
-    if age is not None:
-        metadata["age"] = age
-    if gender:
-        metadata["gender"] = gender
-    if mbti:
-        metadata["mbti"] = mbti.upper()
+    embeddings = create_embeddings([document.text for document in documents])
 
     collection.upsert(
-        ids=[document_id],
-        documents=[text],
-        embeddings=[embedding],
-        metadatas=[metadata],
+        ids=[document.document_id for document in documents],
+        documents=[document.text for document in documents],
+        embeddings=embeddings,
+        metadatas=[document.metadata for document in documents],
     )
 
+    current_interview_ids = {
+        document.document_id
+        for document in documents
+        if document.metadata.get("sourceType") == PROFILE_INTERVIEW_SOURCE_TYPE
+    }
+    existing = collection.get(
+        where={"userId": user_id},
+        include=["metadatas"],
+    )
+    stale_ids = find_stale_profile_interview_ids(
+        existing_ids=existing.get("ids") or [],
+        existing_metadatas=existing.get("metadatas") or [],
+        user_id=user_id,
+        ai_profile_id=ai_profile_id,
+        current_ids=current_interview_ids,
+    )
+    if stale_ids:
+        collection.delete(ids=stale_ids)
+
     return {
-        "documentId": document_id,
+        "documentId": documents[0].document_id,
         "status": "stored",
         "keywords": keywords,
-        "profileSummary": text,
+        "profileSummary": documents[0].text,
     }
 
 
