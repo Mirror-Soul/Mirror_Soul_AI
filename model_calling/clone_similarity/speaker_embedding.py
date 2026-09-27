@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +53,7 @@ def evaluate_speaker_similarity(
 
     with tempfile.TemporaryDirectory(prefix="mirror-soul-speaker-") as temp_dir:
         temp_path = Path(temp_dir)
-        original_paths = [
+        source_paths = [
             _write_audio_file(temp_path, index, audio)
             for index, audio in enumerate(original_audios, start=1)
         ]
@@ -70,8 +71,22 @@ def evaluate_speaker_similarity(
             )
 
         classifier = _get_classifier(model_name)
+        target_sample_rate = int(getattr(classifier.hparams, "sample_rate", 16000))
+        original_paths = [
+            _normalize_audio_file(
+                source_path,
+                temp_path / f"normalized-original-{index}.wav",
+                target_sample_rate=target_sample_rate,
+            )
+            for index, source_path in enumerate(source_paths, start=1)
+        ]
+        normalized_clone_path = _normalize_audio_file(
+            clone_path,
+            temp_path / "normalized-clone-reference.wav",
+            target_sample_rate=target_sample_rate,
+        )
         original_embedding = _average_embeddings(classifier, original_paths)
-        clone_embedding = _encode_file(classifier, clone_path)
+        clone_embedding = _encode_file(classifier, normalized_clone_path)
         cosine_similarity = _cosine_similarity(original_embedding, clone_embedding)
 
     return SpeakerSimilarityResult(
@@ -177,6 +192,58 @@ def _suffix_from_content_type(content_type: str) -> str:
     if "webm" in normalized:
         return ".webm"
     return ".wav"
+
+
+def _normalize_audio_file(
+    source_path: Path,
+    output_path: Path,
+    *,
+    target_sample_rate: int,
+) -> Path:
+    ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
+    command = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(target_sample_rate),
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+    except FileNotFoundError as exc:
+        raise SpeakerSimilarityUnavailable(
+            "ffmpeg is required for speaker similarity audio normalization"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SpeakerSimilarityUnavailable(
+            "speaker similarity audio normalization timed out"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise SpeakerSimilarityUnavailable(
+            "speaker similarity audio normalization failed"
+        ) from exc
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise SpeakerSimilarityUnavailable(
+            "speaker similarity audio normalization produced no audio"
+        )
+    return output_path
 
 
 def _average_embeddings(classifier, paths: Sequence[Path]):
