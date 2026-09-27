@@ -152,9 +152,11 @@ reference sentence with the newly created ElevenLabs voice:
 
 When speaker embedding evaluation is enabled, the worker extracts speaker
 embeddings from the original member recordings and this saved clone reference
-audio, then converts their cosine similarity into the voice score. If the
-optional model dependencies are not installed or evaluation fails, the worker
-keeps the voice clone result and falls back to the conservative readiness score.
+audio, then converts their cosine similarity into the voice score. Before
+evaluation, FFmpeg normalizes m4a, mp3, webm, and wav inputs to 16 kHz mono PCM
+WAV so the speaker model does not depend on container codec support. If FFmpeg,
+the optional model dependencies, or evaluation fails, the worker keeps the
+voice clone result and falls back to the conservative readiness score.
 
 Optional speaker similarity dependencies:
 
@@ -208,6 +210,7 @@ CLONE_SIMILARITY_COSINE_HIGH=0.70
 CLONE_SIMILARITY_MAX_ACTUAL_VOICE_SCORE=95
 CLONE_SIMILARITY_REFERENCE_TEXT=안녕하세요! 처음뵙겠습니다.
 CLONE_SIMILARITY_REFERENCE_AUDIO_DIR=model_calling/assets/clone_similarity
+FFMPEG_BIN=ffmpeg
 ```
 
 The first complete onboarding clone is intentionally capped near 64, even when
