@@ -1,6 +1,15 @@
 import unittest
 
-from tools.ai_pipeline_monitor import parse_pipeline_logs
+from tools.ai_pipeline_monitor import (
+    ANSI_GREEN,
+    ANSI_RED,
+    ANSI_RESET,
+    PipelineSnapshot,
+    RemoteResult,
+    Stage,
+    parse_pipeline_logs,
+    render,
+)
 
 
 class AiPipelineMonitorTest(unittest.TestCase):
@@ -73,6 +82,49 @@ class AiPipelineMonitorTest(unittest.TestCase):
         self.assertEqual(snapshot.face.status, "COMPLETED")
         self.assertEqual(snapshot.face.job_id, "4")
         self.assertEqual(snapshot.face.score, "81.0")
+
+    def test_render_colorizes_health_and_pipeline_statuses(self) -> None:
+        snapshot = PipelineSnapshot(
+            user_uuid="target",
+            face=Stage(status="FAILED", detail="render_failed"),
+        )
+
+        output = render(
+            snapshot,
+            RemoteResult(True, ""),
+            {"AI_API": "active", "VOICE_WORKER": "active"},
+            RemoteResult(True, ""),
+            {"FACE_WORKER": "active", "GPU": "100, 1000, 0"},
+            color=True,
+        )
+
+        self.assertIn(f"{ANSI_GREEN}OK{ANSI_RESET}", output)
+        self.assertIn(ANSI_RED, output)
+        self.assertIn("FAILED", output)
+
+    def test_render_remains_plain_when_color_is_disabled(self) -> None:
+        output = render(
+            PipelineSnapshot(user_uuid="target"),
+            RemoteResult(True, ""),
+            {"AI_API": "active", "VOICE_WORKER": "active"},
+            RemoteResult(True, ""),
+            {"FACE_WORKER": "active", "GPU": "100, 1000, 0"},
+        )
+
+        self.assertNotIn("\033[", output)
+
+    def test_render_marks_cached_server_data_as_stale(self) -> None:
+        output = render(
+            PipelineSnapshot(user_uuid="target"),
+            RemoteResult(False, "", "SSH query timed out"),
+            {"AI_API": "active", "VOICE_WORKER": "active"},
+            RemoteResult(True, ""),
+            {"FACE_WORKER": "active", "GPU": "100, 1000, 0"},
+            ai_cached=True,
+        )
+
+        self.assertIn("WARNING (SSH query timed out; showing last data)", output)
+        self.assertIn("STALE (OK)", output)
 
 
 if __name__ == "__main__":
