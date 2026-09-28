@@ -51,21 +51,47 @@ def add_member_profile(request: MemberProfileRequest):
         for sample in request.interviewSamples
     ]
 
-    result = add_member_profile_to_rag(
-        user_id=request.userId,
-        ai_profile_id=request.aiProfileId,
-        age=request.age,
-        gender=request.gender,
-        mbti=request.mbti,
-        description=request.description,
-        interests=request.interests,
-        interview_topics=request.interviewTopics,
-        interview_samples=interview_samples,
-        keyword_limit=request.keywordLimit,
+    print(
+        "[RAG_PROFILE] processing: "
+        f"user_uuid={request.userId} clone_id={request.cloneId} "
+        f"samples={len(interview_samples)}",
+        flush=True,
     )
-    notify_personality_training_complete(
-        request.cloneId,
-        score_components=result["profileQuality"],
+    try:
+        result = add_member_profile_to_rag(
+            user_id=request.userId,
+            ai_profile_id=request.aiProfileId,
+            age=request.age,
+            gender=request.gender,
+            mbti=request.mbti,
+            description=request.description,
+            interests=request.interests,
+            interview_topics=request.interviewTopics,
+            interview_samples=interview_samples,
+            keyword_limit=request.keywordLimit,
+        )
+        callback_sent = notify_personality_training_complete(
+            request.cloneId,
+            score_components=result["profileQuality"],
+        )
+    except Exception as exc:
+        print(
+            "[RAG_PROFILE] failed: "
+            f"user_uuid={request.userId} clone_id={request.cloneId} "
+            f"error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+
+    profile_quality = result["profileQuality"]
+    print(
+        "[RAG_PROFILE] completed: "
+        f"user_uuid={request.userId} clone_id={request.cloneId} "
+        f"profile_score={profile_quality.get('profileScore')} "
+        f"data_reliability={profile_quality.get('dataReliabilityScore')} "
+        f"penalty={profile_quality.get('penaltyScore', 0.0)} "
+        f"callback_sent={callback_sent}",
+        flush=True,
     )
 
     return MemberProfileResponse(
