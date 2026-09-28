@@ -23,6 +23,35 @@ AI_EVENT_MARKERS = (
 )
 GPU_EVENT_MARKERS = ("[FACE_TRAINING]", "[FACE_SIMILARITY]")
 
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_BLUE = "\033[34m"
+ANSI_MAGENTA = "\033[35m"
+ANSI_CYAN = "\033[36m"
+ANSI_BRIGHT_CYAN = "\033[96m"
+
+STAGE_COLORS = {
+    "RAG": ANSI_MAGENTA,
+    "VOICE": ANSI_CYAN,
+    "FACE": ANSI_BLUE,
+}
+STATUS_COLORS = {
+    "OK": ANSI_GREEN,
+    "COMPLETED": ANSI_GREEN,
+    "PROCESSING": ANSI_CYAN,
+    "WAITING": ANSI_DIM,
+    "WARNING": ANSI_YELLOW,
+    "STALE": ANSI_YELLOW,
+    "FAILED": ANSI_RED + ANSI_BOLD,
+    "ERROR": ANSI_RED + ANSI_BOLD,
+    "INACTIVE": ANSI_RED + ANSI_BOLD,
+    "UNKNOWN": ANSI_YELLOW,
+}
+
 
 @dataclass
 class Stage:
@@ -274,7 +303,9 @@ def _run_ssh(
             timeout=20,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired:
+        return RemoteResult(False, "", "SSH query timed out")
+    except OSError as exc:
         return RemoteResult(False, "", str(exc))
     if result.returncode != 0:
         error = (result.stderr or result.stdout or "SSH failed").strip()
@@ -343,11 +374,50 @@ def _service(value: str | None) -> str:
     return "OK" if value == "active" else (value or "UNKNOWN").upper()
 
 
-def _stage_line(name: str, stage: Stage) -> str:
-    return (
-        f"{name:<8} [{stage.status:<10}] job={stage.job_id:<5} "
-        f"clone={stage.clone_id:<5} score={stage.score}"
+def _paint(text: str, style: str, enabled: bool) -> str:
+    return f"{style}{text}{ANSI_RESET}" if enabled and style else text
+
+
+def _status_color(value: str) -> str:
+    upper = value.upper()
+    if upper.startswith("ERROR"):
+        return STATUS_COLORS["ERROR"]
+    if upper.startswith("WARNING") or upper.startswith("STALE"):
+        return ANSI_YELLOW
+    return STATUS_COLORS.get(upper, "")
+
+
+def _colored_status(value: str, enabled: bool) -> str:
+    return _paint(value, _status_color(value), enabled)
+
+
+def _stage_line(name: str, stage: Stage, color: bool = False) -> str:
+    name_text = _paint(f"{name:<8}", STAGE_COLORS.get(name, ""), color)
+    status_text = _paint(
+        f"{stage.status:<10}", _status_color(stage.status), color
     )
+    score = stage.score
+    if score != "-":
+        score = _paint(score, ANSI_BOLD + ANSI_BRIGHT_CYAN, color)
+    return (
+        f"{name_text} [{status_text}] job={stage.job_id:<5} "
+        f"clone={stage.clone_id:<5} score={score}"
+    )
+
+
+def _event_line(line: str, color: bool) -> str:
+    lowered = line.lower()
+    if " failed" in lowered or "error=" in lowered:
+        style = STATUS_COLORS["FAILED"]
+    elif " completed" in lowered or "status=completed" in lowered:
+        style = STATUS_COLORS["COMPLETED"]
+    elif " processing" in lowered or "preprocessing" in lowered:
+        style = STATUS_COLORS["PROCESSING"]
+    elif "worker started" in lowered:
+        style = ANSI_GREEN
+    else:
+        style = ANSI_DIM
+    return _paint(line, style, color)
 
 
 def render(
@@ -356,39 +426,75 @@ def render(
     ai_meta: dict[str, str],
     gpu_result: RemoteResult,
     gpu_meta: dict[str, str],
+    color: bool = False,
+    ai_cached: bool = False,
+    gpu_cached: bool = False,
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ai_connection = "OK" if ai_result.ok else f"ERROR ({ai_result.error})"
-    gpu_connection = "OK" if gpu_result.ok else f"ERROR ({gpu_result.error})"
+    ai_connection = (
+        "OK"
+        if ai_result.ok
+        else f"WARNING ({ai_result.error}; showing last data)"
+        if ai_cached
+        else f"ERROR ({ai_result.error})"
+    )
+    gpu_connection = (
+        "OK"
+        if gpu_result.ok
+        else f"WARNING ({gpu_result.error}; showing last data)"
+        if gpu_cached
+        else f"ERROR ({gpu_result.error})"
+    )
     gpu_value = gpu_meta.get("GPU", "unknown")
+    ai_api = _service(ai_meta.get("AI_API"))
+    voice_worker = _service(ai_meta.get("VOICE_WORKER"))
+    face_worker = _service(gpu_meta.get("FACE_WORKER"))
+    if ai_cached:
+        ai_api = f"STALE ({ai_api})"
+        voice_worker = f"STALE ({voice_worker})"
+    if gpu_cached:
+        face_worker = f"STALE ({face_worker})"
+    overall_score = snapshot.overall_score
+    if overall_score != "-":
+        overall_score = _paint(
+            overall_score, ANSI_BOLD + ANSI_BRIGHT_CYAN, color
+        )
     lines = [
-        "MIRROR SOUL - AI PIPELINE MONITOR",
+        _paint(
+            "MIRROR SOUL - AI PIPELINE MONITOR",
+            ANSI_BOLD + ANSI_BRIGHT_CYAN,
+            color,
+        ),
         f"Updated: {now}",
         "=" * 78,
         f"Target user : {snapshot.user_uuid or 'Waiting for a new AI job...'}",
         "",
-        "CONNECTIONS / PROCESSES",
-        f"AI server   : {ai_connection}",
-        f"AI API      : {_service(ai_meta.get('AI_API'))}",
-        f"Voice worker: {_service(ai_meta.get('VOICE_WORKER'))}",
-        f"GPU server  : {gpu_connection}",
-        f"Face worker : {_service(gpu_meta.get('FACE_WORKER'))}",
+        _paint("CONNECTIONS / PROCESSES", ANSI_BOLD, color),
+        f"AI server   : {_colored_status(ai_connection, color)}",
+        f"AI API      : {_colored_status(ai_api, color)}",
+        f"Voice worker: {_colored_status(voice_worker, color)}",
+        f"GPU server  : {_colored_status(gpu_connection, color)}",
+        f"Face worker : {_colored_status(face_worker, color)}",
         f"GPU         : {gpu_value}  (used MiB, total MiB, utilization %)",
         "",
-        "PIPELINE",
-        _stage_line("RAG", snapshot.rag),
+        _paint("PIPELINE", ANSI_BOLD, color),
+        _stage_line("RAG", snapshot.rag, color),
         f"         {snapshot.rag.detail}",
-        _stage_line("VOICE", snapshot.voice),
+        _stage_line("VOICE", snapshot.voice, color),
         f"         {snapshot.voice.detail}",
-        _stage_line("FACE", snapshot.face),
+        _stage_line("FACE", snapshot.face, color),
         f"         {snapshot.face.detail}",
         "",
-        f"OVERALL  : {snapshot.overall_score}  ({snapshot.overall_note})",
+        f"{_paint('OVERALL', ANSI_BOLD, color)}  : {overall_score}  "
+        f"({snapshot.overall_note})",
         f"COMPONENTS: {snapshot.score_components}",
         "",
-        "RECENT AI EVENTS",
+        _paint("RECENT AI EVENTS", ANSI_BOLD, color),
     ]
-    lines.extend(snapshot.events or ["No matching events yet."])
+    lines.extend(
+        [_event_line(line, color) for line in snapshot.events]
+        or [_paint("No matching events yet.", ANSI_DIM, color)]
+    )
     lines.extend(["", "Ctrl+C to stop. Logs refresh automatically."])
     return "\n".join(lines)
 
@@ -400,9 +506,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--user-uuid", help="Track one member. Defaults to latest AI job.")
     parser.add_argument("--once", action="store_true", help="Print one snapshot and exit.")
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Colorize output. Defaults to auto-detecting an interactive terminal.",
+    )
     parser.add_argument("--refresh", type=float, default=5.0)
     parser.add_argument("--since-minutes", type=int, default=180)
-    parser.add_argument("--lines", type=int, default=1500)
+    parser.add_argument("--lines", type=int, default=800)
     parser.add_argument("--ai-host", default="13.209.220.154")
     parser.add_argument("--ai-user", default="ec2-user")
     parser.add_argument("--ai-key", type=Path, default=repo_root / "mirrorsoul-ai-key.pem")
@@ -428,16 +540,55 @@ def main() -> int:
         return 2
 
     try:
+        color = args.color == "always" or (
+            args.color == "auto"
+            and sys.stdout.isatty()
+            and "NO_COLOR" not in os.environ
+        )
+        last_ai_meta: dict[str, str] = {}
+        last_ai_logs = ""
+        last_gpu_meta: dict[str, str] = {}
+        last_gpu_logs = ""
         while True:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 ai_future = executor.submit(fetch_ai, args)
                 gpu_future = executor.submit(fetch_gpu, args)
                 ai_result, ai_meta, ai_logs = ai_future.result()
                 gpu_result, gpu_meta, gpu_logs = gpu_future.result()
+            ai_cached = False
+            gpu_cached = False
+            if ai_result.ok:
+                last_ai_meta = ai_meta.copy()
+                last_ai_logs = ai_logs
+            elif last_ai_meta or last_ai_logs:
+                ai_meta = last_ai_meta.copy()
+                ai_logs = last_ai_logs
+                ai_cached = True
+            if gpu_result.ok:
+                last_gpu_meta = gpu_meta.copy()
+                last_gpu_logs = gpu_logs
+            elif last_gpu_meta or last_gpu_logs:
+                gpu_meta = last_gpu_meta.copy()
+                gpu_logs = last_gpu_logs
+                gpu_cached = True
             snapshot = parse_pipeline_logs(ai_logs, gpu_logs, args.user_uuid)
             if not args.once:
-                os.system("cls" if os.name == "nt" else "clear")
-            print(render(snapshot, ai_result, ai_meta, gpu_result, gpu_meta))
+                if color:
+                    print("\033[H\033[J", end="", flush=True)
+                else:
+                    os.system("cls" if os.name == "nt" else "clear")
+            print(
+                render(
+                    snapshot,
+                    ai_result,
+                    ai_meta,
+                    gpu_result,
+                    gpu_meta,
+                    color=color,
+                    ai_cached=ai_cached,
+                    gpu_cached=gpu_cached,
+                )
+            )
             if args.once:
                 return 0 if ai_result.ok and gpu_result.ok else 1
             time.sleep(max(1.0, args.refresh))

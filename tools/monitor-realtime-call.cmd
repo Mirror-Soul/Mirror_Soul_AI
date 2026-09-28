@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "SCRIPT=%~dp0ai_pipeline_monitor.py"
+set "SCRIPT=%~dp0realtime_call_monitor.py"
 
 py -3 -c "import sys" >nul 2>nul
 if not errorlevel 1 (
