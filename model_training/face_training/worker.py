@@ -261,13 +261,14 @@ def _handle_sqs_message(
         return _env_bool("FACE_TRAINING_DELETE_FAILED_MESSAGES", False)
 
     try:
+        completion_result = _completion_result(manifest_path, artifacts)
         _publish_status(
             sqs_client,
             result_queue_url=result_queue_url,
             message=message,
             status="COMPLETED",
             attempt_number=attempt_number,
-            result=_completion_result(manifest_path, artifacts),
+            result=completion_result,
         )
     except Exception as exc:
         print(
@@ -277,9 +278,14 @@ def _handle_sqs_message(
         )
         return False
 
+    face_similarity = completion_result.get("faceSimilarity") or {}
     print(
         "[FACE_TRAINING] completed: "
-        f"job_id={message.job_id} profile=s3://{artifacts.bucket}/"
+        f"job_id={message.job_id} user_uuid={message.user_uuid} "
+        f"clone_id={message.clone_id} "
+        f"face_score={face_similarity.get('score')} "
+        f"quality_tier={completion_result['qualityTier']} "
+        f"profile=s3://{artifacts.bucket}/"
         f"{artifacts.profile_key}",
         flush=True,
     )
