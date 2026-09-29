@@ -9,6 +9,7 @@ import httpx
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from model_calling.schemas import PersonalityProfile, SpeechProfile
+from shared.config import settings
 from shared.elevenlabs_tts import (
     ElevenLabsVoiceSettings,
     synthesize_member_speech,
@@ -32,9 +33,9 @@ async def process_stt(audio_bytes: bytes, filename: str = "audio.m4a") -> str:
     audio_file.name = filename
     
     response = await client.audio.transcriptions.create(
-        model="whisper-1",
+        model=settings.STT_MODEL,
         file=audio_file,
-        language="ko"
+        language=settings.STT_LANGUAGE,
     )
     return response.text.strip()
 
@@ -137,6 +138,13 @@ def build_dynamic_persona_prompt(
 3. RAG 정보가 부족한 부분만 MBTI 기반 기본 성향으로 보완한다.
 4. MBTI는 고정관념이 아니라 초기 기본값이다. RAG 기억과 MBTI 설명이 충돌하면 RAG 기억을 우선한다.
 
+[대화 원칙]
+- 최근 대화 문맥을 이어서 답하고, 대명사나 후속 질문은 앞선 대화를 기준으로 해석한다.
+- 질문과 직접 관련된 RAG 기억만 사용한다.
+- 저장되지 않은 개인 경험, 취향, 관계, 사실을 새로 만들어내지 않는다.
+- 개인 정보가 부족하면 사실인 것처럼 단정하지 말고 자연스럽게 모른다고 표현한다.
+- 전화 통화에 어울리도록 핵심만 자연스러운 한국어 1~3문장으로 답한다.
+
 [기본 정보]
 - 나이: {user_persona.get('age', '알 수 없음')}
 - 직업: {user_persona.get('occupation', '알 수 없음')}
@@ -179,6 +187,7 @@ async def process_llm(
     speech: SpeechProfile,
     mbti_base_profile: dict[str, Any] | None = None,
     retrieved_memories: list[dict[str, Any]] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
 ) -> str:
     # 동적 프롬프트 생성 함수 호출
     system_prompt = build_dynamic_persona_prompt(
@@ -189,20 +198,48 @@ async def process_llm(
         retrieved_memories=retrieved_memories,
     )
 
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
+    history_message_limit = max(1, settings.REALTIME_HISTORY_MAX_TURNS) * 2
+    history_messages = [
+        {"role": message["role"], "content": message["content"]}
+        for message in (conversation_history or [])[-history_message_limit:]
+        if message.get("role") in {"user", "assistant"}
+        and str(message.get("content") or "").strip()
+    ]
+
+    request: dict[str, Any] = {
+        "model": settings.LLM_MODEL,
+        "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text}
+            *history_messages,
+            {"role": "user", "content": user_text},
         ],
-        temperature=0.7,
-        max_tokens=200
-    )
+    }
+    if _uses_reasoning_parameters(settings.LLM_MODEL):
+        request.update(
+            {
+                "reasoning_effort": settings.LLM_REASONING_EFFORT,
+                "max_completion_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
+            }
+        )
+    else:
+        request.update(
+            {
+                "temperature": settings.LLM_TEMPERATURE,
+                "max_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
+            }
+        )
+
+    response = await client.chat.completions.create(**request)
     
     raw_text = response.choices[0].message.content.strip()
     clean_text = raw_text.replace('\n', ' ')
     
     return clean_text
+
+
+def _uses_reasoning_parameters(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
 
 # 3. Big5 성격 수치를 기반으로 ElevenLabs 파라미터 동적 계산 함수
 def calculate_voice_settings(personality: PersonalityProfile):

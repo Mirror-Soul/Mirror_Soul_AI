@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -38,16 +39,26 @@ class QueuedVideoTrack(MediaStreamTrack):
         width: int = 540,
         height: int = 960,
         fps: int = 25,
+        idle_motion_enabled: bool = True,
+        idle_motion_scale: float = 0.012,
+        idle_motion_period_seconds: float = 6.0,
     ) -> None:
         super().__init__()
         if width <= 0 or height <= 0 or width % 2 or height % 2:
             raise ValueError("Video dimensions must be positive even numbers.")
         if fps <= 0:
             raise ValueError("Video FPS must be positive.")
+        if idle_motion_scale < 0 or idle_motion_scale > 0.05:
+            raise ValueError("Idle motion scale must be between 0 and 0.05.")
+        if idle_motion_period_seconds <= 0:
+            raise ValueError("Idle motion period must be positive.")
 
         self.width = width
         self.height = height
         self.fps = fps
+        self.idle_motion_enabled = idle_motion_enabled
+        self.idle_motion_scale = idle_motion_scale
+        self.idle_motion_period_seconds = idle_motion_period_seconds
         self._segments: deque[_VideoSegment] = deque()
         self._active_segment: _VideoSegment | None = None
         self._idle_rgb = np.zeros((height, width, 3), dtype=np.uint8)
@@ -114,10 +125,7 @@ class QueuedVideoTrack(MediaStreamTrack):
 
         frame = self._next_rendered_frame()
         if frame is None:
-            frame = av.VideoFrame.from_ndarray(
-                self._idle_rgb,
-                format="rgb24",
-            )
+            frame = self._idle_frame()
         frame = frame.reformat(
             width=self.width,
             height=self.height,
@@ -152,6 +160,43 @@ class QueuedVideoTrack(MediaStreamTrack):
             except StopIteration:
                 self._close_active_segment()
                 print("[VIDEO_OUT] Ditto video segment completed", flush=True)
+
+    def _idle_frame(self) -> av.VideoFrame:
+        if not self.idle_motion_enabled or self.idle_motion_scale == 0:
+            idle_rgb = self._idle_rgb
+        else:
+            elapsed = self._frame_number / self.fps
+            phase = 2 * math.pi * elapsed / self.idle_motion_period_seconds
+            motion = (1 - math.cos(phase)) / 2
+            scale = 1 + self.idle_motion_scale * motion
+            crop_width = max(2, min(self.width, round(self.width / scale)))
+            crop_height = max(2, min(self.height, round(self.height / scale)))
+            horizontal_shift = round(
+                self.width * self.idle_motion_scale * 0.15 * math.sin(phase * 0.7)
+            )
+            vertical_shift = round(
+                self.height * self.idle_motion_scale * 0.2 * math.sin(phase)
+            )
+            left = max(
+                0,
+                min(
+                    self.width - crop_width,
+                    (self.width - crop_width) // 2 + horizontal_shift,
+                ),
+            )
+            top = max(
+                0,
+                min(
+                    self.height - crop_height,
+                    (self.height - crop_height) // 2 + vertical_shift,
+                ),
+            )
+            idle_rgb = self._idle_rgb[
+                top : top + crop_height,
+                left : left + crop_width,
+            ]
+
+        return av.VideoFrame.from_ndarray(idle_rgb, format="rgb24")
 
     def _close_active_segment(self) -> None:
         if self._active_segment is not None:

@@ -202,6 +202,48 @@ class DittoRealtimeTests(unittest.TestCase):
         self.assertEqual(asyncio.run(run()), b"rendered-mp4")
         self.assertEqual(attempts, 3)
 
+    def test_render_client_serializes_concurrent_callers(self) -> None:
+        active_requests = 0
+        max_active_requests = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active_requests, max_active_requests
+            active_requests += 1
+            max_active_requests = max(max_active_requests, active_requests)
+            await asyncio.sleep(0.01)
+            active_requests -= 1
+            return httpx.Response(
+                200,
+                content=b"rendered-mp4",
+                headers={"Content-Type": "video/mp4"},
+            )
+
+        async def run() -> list[bytes]:
+            transport = httpx.MockTransport(handler)
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                config = DittoCallConfig(
+                    service_url="http://127.0.0.1:8080",
+                    api_key="secret",
+                )
+                clients = [
+                    DittoRenderClient(config, http_client=http_client),
+                    DittoRenderClient(config, http_client=http_client),
+                ]
+                profile = FaceRenderProfile(
+                    portrait_bytes=b"portrait",
+                    portrait_filename="portrait.jpg",
+                    portrait_content_type="image/jpeg",
+                )
+                return await asyncio.gather(
+                    *(client.render(profile, b"audio") for client in clients)
+                )
+
+        self.assertEqual(
+            asyncio.run(run()),
+            [b"rendered-mp4", b"rendered-mp4"],
+        )
+        self.assertEqual(max_active_requests, 1)
+
     def test_local_profile_must_match_call_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

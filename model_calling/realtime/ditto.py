@@ -4,6 +4,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
 
 PROFILE_MAX_BYTES = 128 * 1024
 PORTRAIT_MAX_BYTES = 10 * 1024 * 1024
+RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+
+_render_gate: asyncio.Lock | None = None
+_render_gate_loop: asyncio.AbstractEventLoop | None = None
 
 
 class DittoRealtimeError(RuntimeError):
@@ -30,8 +35,8 @@ class DittoCallConfig:
     api_key: str
     timeout_seconds: float = 300.0
     max_response_bytes: int = 100 * 1024 * 1024
-    retry_attempts: int = 3
-    retry_base_seconds: float = 0.5
+    retry_attempts: int = 6
+    retry_base_seconds: float = 1.0
 
     @classmethod
     def from_env(cls) -> "DittoCallConfig | None":
@@ -65,10 +70,10 @@ class DittoCallConfig:
             "DITTO_CALL_MAX_RESPONSE_BYTES",
             100 * 1024 * 1024,
         )
-        retry_attempts = _env_int("DITTO_CALL_RETRY_ATTEMPTS", 3)
+        retry_attempts = _env_int("DITTO_CALL_RETRY_ATTEMPTS", 6)
         retry_base_seconds = _env_float(
             "DITTO_CALL_RETRY_BASE_SECONDS",
-            0.5,
+            1.0,
         )
         if (
             timeout_seconds <= 0
@@ -139,29 +144,50 @@ class DittoRenderClient:
                         files=files,
                     )
                 except httpx.HTTPError as exc:
-                    raise DittoRealtimeError(
-                        f"Ditto render request failed: {exc}"
-                    ) from exc
-                if response.status_code != 429:
+                    if attempt >= self.config.retry_attempts:
+                        raise DittoRealtimeError(
+                            f"Ditto render request failed: {exc}"
+                        ) from exc
+                    delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
+                    print(
+                        "[DITTO_CALL] transport error; retrying render: "
+                        f"attempt={attempt} delay={delay:.2f}s error={exc!r}",
+                        flush=True,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if response.status_code not in RETRYABLE_STATUS_CODES:
                     return response
                 if attempt < self.config.retry_attempts:
                     delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
                     print(
-                        "[DITTO_CALL] GPU busy; retrying render: "
-                        f"attempt={attempt} delay={delay:.2f}s",
+                        "[DITTO_CALL] renderer unavailable; retrying render: "
+                        f"status={response.status_code} attempt={attempt} "
+                        f"delay={delay:.2f}s",
                         flush=True,
                     )
                     await asyncio.sleep(delay)
             assert response is not None
             return response
 
-        if self._http_client is not None:
-            response = await send(self._http_client)
-        else:
-            async with httpx.AsyncClient(
-                timeout=self.config.timeout_seconds
-            ) as client:
-                response = await send(client)
+        render_gate = _get_render_gate()
+        queued_at = time.monotonic()
+        if render_gate.locked():
+            print("[DITTO_CALL] render queued behind another call", flush=True)
+        async with render_gate:
+            queue_wait_seconds = time.monotonic() - queued_at
+            print(
+                "[DITTO_CALL] render slot acquired: "
+                f"queue_wait={queue_wait_seconds:.3f}s",
+                flush=True,
+            )
+            if self._http_client is not None:
+                response = await send(self._http_client)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=self.config.timeout_seconds
+                ) as client:
+                    response = await send(client)
 
         if response.status_code != 200:
             detail = response.text.strip().replace("\n", " ")[:500]
@@ -473,3 +499,12 @@ def _env_int(name: str, default: int) -> int:
         return int(value) if value else default
     except ValueError as exc:
         raise DittoRealtimeError(f"{name} must be an integer.") from exc
+
+
+def _get_render_gate() -> asyncio.Lock:
+    global _render_gate, _render_gate_loop
+    loop = asyncio.get_running_loop()
+    if _render_gate is None or _render_gate_loop is not loop:
+        _render_gate = asyncio.Lock()
+        _render_gate_loop = loop
+    return _render_gate

@@ -224,7 +224,7 @@ def _run_ssh(*, host: str, user: str, key: Path, command: str) -> RemoteResult:
         "-o",
         "BatchMode=yes",
         "-o",
-        "ConnectTimeout=8",
+        "ConnectTimeout=15",
         f"{user}@{host}",
         command,
     ]
@@ -235,7 +235,7 @@ def _run_ssh(*, host: str, user: str, key: Path, command: str) -> RemoteResult:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=20,
+            timeout=90,
             check=False,
         )
     except subprocess.TimeoutExpired:

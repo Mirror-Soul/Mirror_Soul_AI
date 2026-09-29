@@ -4,6 +4,7 @@ import os
 import time
 import wave
 from collections import deque
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Awaitable, Callable
 
@@ -16,6 +17,47 @@ from aiortc.mediastreams import MediaStreamError
 OUTPUT_SAMPLE_RATE = 48000
 OUTPUT_SAMPLES_PER_FRAME = 960
 INPUT_SAMPLE_RATE = 16000
+
+
+@dataclass(frozen=True)
+class AudioQuality:
+    duration_seconds: float
+    rms: float
+    peak: float
+    silence_ratio: float
+    clipping_ratio: float
+    warnings: tuple[str, ...]
+
+
+def analyze_pcm_quality(
+    pcm: bytes,
+    *,
+    sample_rate: int = INPUT_SAMPLE_RATE,
+) -> AudioQuality:
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    if samples.size == 0:
+        return AudioQuality(0.0, 0.0, 0.0, 1.0, 0.0, ("EMPTY",))
+
+    absolute = np.abs(samples)
+    rms = float(np.sqrt(np.mean(np.square(samples))))
+    peak = float(np.max(absolute))
+    silence_ratio = float(np.mean(absolute < 500))
+    clipping_ratio = float(np.mean(absolute >= 32700))
+    warnings: list[str] = []
+    if rms < 700:
+        warnings.append("LOW_VOLUME")
+    if silence_ratio > 0.75:
+        warnings.append("TOO_MUCH_SILENCE")
+    if clipping_ratio > 0.01:
+        warnings.append("CLIPPING")
+    return AudioQuality(
+        duration_seconds=samples.size / sample_rate,
+        rms=rms,
+        peak=peak,
+        silence_ratio=silence_ratio,
+        clipping_ratio=clipping_ratio,
+        warnings=tuple(warnings),
+    )
 
 
 class QueuedAudioTrack(MediaStreamTrack):
@@ -250,12 +292,19 @@ async def receive_utterances(
             )
             reached_limit = speech_seconds >= max_speech_seconds
             if reached_silence or reached_limit:
-                wav_bytes = pcm_to_wav_bytes(bytes(utterance))
+                utterance_pcm = bytes(utterance)
+                quality = analyze_pcm_quality(utterance_pcm)
+                wav_bytes = pcm_to_wav_bytes(utterance_pcm)
                 reason = "max_speech" if reached_limit else "silence"
                 print(
                     "[AUDIO_IN] utterance queued: "
                     f"reason={reason} speech={speech_seconds:.2f}s "
-                    f"silence={silence_accumulated:.2f}s wav_bytes={len(wav_bytes)}",
+                    f"silence={silence_accumulated:.2f}s wav_bytes={len(wav_bytes)} "
+                    f"quality_duration={quality.duration_seconds:.2f}s "
+                    f"rms={quality.rms:.1f} peak={quality.peak:.0f} "
+                    f"silence_ratio={quality.silence_ratio:.3f} "
+                    f"clipping_ratio={quality.clipping_ratio:.4f} "
+                    f"warnings={','.join(quality.warnings) or 'none'}",
                     flush=True,
                 )
                 await on_utterance(wav_bytes)

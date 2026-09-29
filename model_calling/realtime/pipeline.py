@@ -1,4 +1,6 @@
 import asyncio
+import os
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,15 @@ from model_calling.realtime.audio import QueuedAudioTrack, receive_utterances
 from model_calling.realtime.ditto import DittoVideoSession
 from model_training.base_profiles import get_mbti_base_profile
 from model_training.services import search_user_memories
+from shared.config import settings
 from shared.clone_voice import find_active_clone_voice
+
+
+@dataclass(frozen=True)
+class GeneratedReply:
+    audio_bytes: bytes
+    user_text: str
+    assistant_text: str
 
 
 def _model_data(model: Any) -> dict[str, Any]:
@@ -127,7 +137,8 @@ async def generate_reply_audio(
     user_id: str,
     clone_id: int,
     wav_bytes: bytes,
-) -> bytes | None:
+    conversation_history: list[dict[str, str]] | None = None,
+) -> GeneratedReply | None:
     print(
         f"[REALTIME] STT start: user={user_id} wav_bytes={len(wav_bytes)}",
         flush=True,
@@ -156,8 +167,15 @@ async def generate_reply_audio(
             transcript,
             5,
         )
+        distances = [
+            memory.get("distance")
+            for memory in memories
+            if memory.get("distance") is not None
+        ]
         print(
-            f"[REALTIME] RAG lookup complete: user={user_id} count={len(memories)}",
+            "[REALTIME] RAG lookup complete: "
+            f"user={user_id} count={len(memories)} "
+            f"best_distance={min(distances) if distances else 'none'}",
             flush=True,
         )
     except Exception as exc:
@@ -172,6 +190,7 @@ async def generate_reply_audio(
         speech=speech,
         mbti_base_profile=get_mbti_base_profile(mbti),
         retrieved_memories=memories,
+        conversation_history=conversation_history,
     )
     print(f"[REALTIME] LLM user={user_id}: {response_text}", flush=True)
 
@@ -185,7 +204,36 @@ async def generate_reply_audio(
         f"[REALTIME] TTS complete: user={user_id} audio_bytes={len(tts_bytes)}",
         flush=True,
     )
-    return tts_bytes
+
+    return GeneratedReply(
+        audio_bytes=tts_bytes,
+        user_text=transcript,
+        assistant_text=response_text,
+    )
+
+
+def _append_conversation_turn(
+    conversation_history: list[dict[str, str]] | None,
+    *,
+    user_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    if conversation_history is None:
+        return
+    conversation_history.extend(
+        [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ]
+    )
+    history_message_limit = max(1, settings.REALTIME_HISTORY_MAX_TURNS) * 2
+    del conversation_history[:-history_message_limit]
+    print(
+        "[REALTIME] conversation context updated: "
+        f"user={user_id} turns={len(conversation_history) // 2}",
+        flush=True,
+    )
 
 
 async def start_realtime_audio(
@@ -196,6 +244,8 @@ async def start_realtime_audio(
     output_track: QueuedAudioTrack,
     utterance_queue: asyncio.Queue[bytes],
     video_renderer: DittoVideoSession | None = None,
+    video_required: bool = False,
+    conversation_history: list[dict[str, str]] | None = None,
 ) -> tuple[asyncio.Task, asyncio.Task]:
     async def enqueue_utterance(wav_bytes: bytes) -> None:
         if utterance_queue.full():
@@ -219,13 +269,19 @@ async def start_realtime_audio(
                 flush=True,
             )
             try:
-                reply_audio = await generate_reply_audio(user_id, clone_id, wav_bytes)
-                if reply_audio:
+                reply = await generate_reply_audio(
+                    user_id,
+                    clone_id,
+                    wav_bytes,
+                    conversation_history=conversation_history,
+                )
+                if reply:
                     print(
                         "[REALTIME] queueing reply audio: "
-                        f"user={user_id} audio_bytes={len(reply_audio)}",
+                        f"user={user_id} audio_bytes={len(reply.audio_bytes)}",
                         flush=True,
                     )
+                    video_ready = not video_required
                     if video_renderer is not None:
                         try:
                             print(
@@ -233,7 +289,8 @@ async def start_realtime_audio(
                                 f"user={user_id}",
                                 flush=True,
                             )
-                            await video_renderer.enqueue_reply(reply_audio)
+                            await video_renderer.enqueue_reply(reply.audio_bytes)
+                            video_ready = True
                             print(
                                 "[REALTIME] Ditto reply video queued: "
                                 f"user={user_id}",
@@ -241,11 +298,35 @@ async def start_realtime_audio(
                             )
                         except Exception as exc:
                             print(
-                                "[REALTIME] Ditto reply render failed; "
-                                f"continuing audio only: {exc!r}",
+                                "[REALTIME] Ditto reply render failed: "
+                                f"user={user_id} error={exc!r}",
                                 flush=True,
                             )
-                    output_track.enqueue_encoded_audio(reply_audio)
+                    elif video_required:
+                        print(
+                            "[REALTIME] video reply unavailable: "
+                            f"user={user_id} renderer=missing",
+                            flush=True,
+                        )
+
+                    allow_audio_only = os.getenv(
+                        "DITTO_CALL_AUDIO_ONLY_FALLBACK",
+                        "false",
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    if not video_ready and not allow_audio_only:
+                        print(
+                            "[REALTIME] reply audio suppressed because video "
+                            f"was not ready: user={user_id}",
+                            flush=True,
+                        )
+                        continue
+                    output_track.enqueue_encoded_audio(reply.audio_bytes)
+                    _append_conversation_turn(
+                        conversation_history,
+                        user_id=user_id,
+                        user_text=reply.user_text,
+                        assistant_text=reply.assistant_text,
+                    )
                     print("[REALTIME] reply audio queued", flush=True)
                 else:
                     print(f"[REALTIME] no reply audio generated: user={user_id}", flush=True)
