@@ -14,6 +14,16 @@ class Settings:
         "RAG_COLLECTION_NAME",
         "mirror_soul_memories",
     )
+    RAG_MAX_DISTANCE: float = float(os.getenv("RAG_MAX_DISTANCE", "0.75"))
+    REALTIME_HISTORY_MAX_TURNS: int = int(
+        os.getenv("REALTIME_HISTORY_MAX_TURNS", "8")
+    )
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.4"))
+    LLM_MAX_OUTPUT_TOKENS: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "200"))
+    LLM_REASONING_EFFORT: str = os.getenv("LLM_REASONING_EFFORT", "none")
+    STT_MODEL: str = os.getenv("STT_MODEL", "whisper-1")
+    STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ko")
 
     AI_SERVER_HOST: str = os.getenv("AI_SERVER_HOST", "0.0.0.0")
     AI_SERVER_PORT: int = int(os.getenv("AI_SERVER_PORT", "8000"))

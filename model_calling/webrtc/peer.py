@@ -108,6 +108,8 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
                 output_track=session.output_track,
                 utterance_queue=session.utterance_queue,
                 video_renderer=session.video_renderer,
+                video_required=session.media_type == "VIDEO",
+                conversation_history=session.conversation_history,
             )
             session.receiver_task = receiver_task
             session.pipeline_task = pipeline_task
@@ -152,6 +154,16 @@ async def create_answer_from_offer(
                 width=int(os.getenv("REALTIME_VIDEO_WIDTH", "540")),
                 height=int(os.getenv("REALTIME_VIDEO_HEIGHT", "960")),
                 fps=int(os.getenv("REALTIME_VIDEO_FPS", "25")),
+                idle_motion_enabled=os.getenv(
+                    "REALTIME_IDLE_MOTION_ENABLED",
+                    "true",
+                ).strip().lower() in {"1", "true", "yes", "on"},
+                idle_motion_scale=float(
+                    os.getenv("REALTIME_IDLE_MOTION_SCALE", "0.012")
+                ),
+                idle_motion_period_seconds=float(
+                    os.getenv("REALTIME_IDLE_MOTION_PERIOD_SECONDS", "6.0")
+                ),
             )
             pc.addTrack(output_video_track)
             try:

@@ -238,6 +238,12 @@ def parse_pipeline_logs(
     if estimated is not None:
         snapshot.overall_score = estimated
         snapshot.overall_note = "estimated from complete AI component logs"
+        snapshot.score_components = (
+            f"face={snapshot.face.score} voice={snapshot.voice.score} "
+            f"profile={snapshot.rag.score} "
+            f"reliability={snapshot.data_reliability_score} "
+            f"penalty={snapshot.penalty_score}"
+        )
 
     events = [
         line.strip()
@@ -289,7 +295,7 @@ def _run_ssh(
         "-o",
         "BatchMode=yes",
         "-o",
-        "ConnectTimeout=8",
+        "ConnectTimeout=15",
         f"{user}@{host}",
         command,
     ]
@@ -300,7 +306,7 @@ def _run_ssh(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=20,
+            timeout=90,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -336,7 +342,9 @@ def fetch_ai(args: argparse.Namespace) -> tuple[RemoteResult, dict[str, str], st
         "printf '__VOICE_WORKER__='; systemctl is-active mirrorsoul-voice-worker.service 2>/dev/null || true; "
         "echo __LOGS__; "
         f"journalctl -u mirrorsoul-ai.service -u mirrorsoul-voice-worker.service "
-        f"--since '-{since} minutes' -n {args.lines} --no-pager -o cat 2>/dev/null"
+        f"--since '-{since} minutes' --no-pager -o cat 2>/dev/null "
+        "| grep -E '\\[(RAG_PROFILE|VOICE_TRAINING|CLONE_SIMILARITY)\\]' "
+        f"| tail -n {args.lines}"
     )
     result = _run_ssh(
         host=args.ai_host,
@@ -357,7 +365,8 @@ def fetch_gpu(args: argparse.Namespace) -> tuple[RemoteResult, dict[str, str], s
         "nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu "
         "--format=csv,noheader,nounits 2>/dev/null || echo unavailable; "
         "echo __LOGS__; "
-        f"tail -n {args.lines} {args.face_log} 2>/dev/null"
+        f"grep -E '\\[FACE_(TRAINING|SIMILARITY)\\]' {args.face_log} 2>/dev/null "
+        f"| tail -n {args.lines}"
     )
     result = _run_ssh(
         host=args.gpu_host,

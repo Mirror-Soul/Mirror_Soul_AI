@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from aiortc import RTCPeerConnection
@@ -22,6 +22,7 @@ class WebRTCSession:
     video_prepare_task: asyncio.Task | None = None
     receiver_task: asyncio.Task | None = None
     pipeline_task: asyncio.Task | None = None
+    conversation_history: list[dict[str, str]] = field(default_factory=list)
 
 
 _sessions: dict[int, WebRTCSession] = {}

@@ -16,8 +16,9 @@ def _encoded_video() -> bytes:
     stream.width = 32
     stream.height = 32
     stream.pix_fmt = "yuv420p"
+    gradient = np.arange(32 * 32, dtype=np.uint8).reshape(32, 32)
     frame = av.VideoFrame.from_ndarray(
-        np.full((32, 32, 3), 180, dtype=np.uint8),
+        np.stack([gradient, np.flipud(gradient), gradient], axis=2),
         format="rgb24",
     )
     for packet in stream.encode(frame):
@@ -61,6 +62,30 @@ class QueuedVideoTrackTests(unittest.TestCase):
         self.assertEqual((first.width, first.height), (32, 32))
         self.assertEqual((second.width, second.height), (32, 32))
         self.assertFalse(playing)
+
+    def test_idle_motion_changes_static_portrait_without_changing_dimensions(self) -> None:
+        async def run():
+            track = QueuedVideoTrack(
+                width=32,
+                height=32,
+                fps=1000,
+                idle_motion_scale=0.05,
+                idle_motion_period_seconds=0.004,
+            )
+            track.set_idle_image(_encoded_video())
+            first = await track.recv()
+            second = await track.recv()
+            track.stop()
+            return (
+                first.to_ndarray(format="rgb24"),
+                second.to_ndarray(format="rgb24"),
+            )
+
+        first, second = asyncio.run(run())
+
+        self.assertEqual(first.shape, (32, 32, 3))
+        self.assertEqual(second.shape, (32, 32, 3))
+        self.assertFalse(np.array_equal(first, second))
 
 
 if __name__ == "__main__":

@@ -196,7 +196,11 @@ def search_user_memories(
     user_id: str,
     query: str,
     top_k: int = 5,
+    max_distance: float | None = None,
 ) -> list[dict[str, Any]]:
+    distance_limit = (
+        settings.RAG_MAX_DISTANCE if max_distance is None else max_distance
+    )
     query_embedding = create_embedding(query)
 
     results = collection.query(
@@ -213,16 +217,60 @@ def search_user_memories(
     distances = results.get("distances", [[]])[0]
 
     for index, document_id in enumerate(ids):
+        distance = distances[index] if index < len(distances) else None
+        metadata = metadatas[index] or {}
+        is_profile_summary = (
+            metadata.get("sourceType") == "member_profile_summary"
+        )
+        if (
+            not is_profile_summary
+            and distance is not None
+            and distance > distance_limit
+        ):
+            continue
         memories.append(
             {
                 "documentId": document_id,
                 "text": documents[index],
-                "metadata": metadatas[index],
-                "distance": distances[index] if index < len(distances) else None,
+                "metadata": metadata,
+                "distance": distance,
             }
         )
 
-    return memories
+    profile_summary = next(
+        (
+            memory
+            for memory in memories
+            if memory["metadata"].get("sourceType") == "member_profile_summary"
+        ),
+        None,
+    )
+    if profile_summary is None:
+        stored = collection.get(
+            where={"userId": user_id},
+            include=["documents", "metadatas"],
+        )
+        for document_id, document, metadata in zip(
+            stored.get("ids") or [],
+            stored.get("documents") or [],
+            stored.get("metadatas") or [],
+        ):
+            metadata = metadata or {}
+            if metadata.get("sourceType") == "member_profile_summary":
+                profile_summary = {
+                    "documentId": document_id,
+                    "text": document,
+                    "metadata": metadata,
+                    "distance": None,
+                }
+                break
+
+    relevant_memories = [
+        memory for memory in memories if memory is not profile_summary
+    ]
+    if profile_summary is not None:
+        return [profile_summary, *relevant_memories][:top_k]
+    return relevant_memories[:top_k]
 
 
 def delete_user_rag_data(user_id: str) -> dict[str, Any]:

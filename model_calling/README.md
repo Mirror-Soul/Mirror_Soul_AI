@@ -35,6 +35,12 @@ DITTO_CALL_SERVICE_URL=https://ditto.internal:8080
 DITTO_CALL_SERVICE_API_KEY=
 DITTO_CALL_S3_BUCKET=mirrorsoul-storage-64
 DITTO_CALL_FACE_RESULT_PREFIX=face-results
+DITTO_CALL_RETRY_ATTEMPTS=6
+DITTO_CALL_RETRY_BASE_SECONDS=1.0
+DITTO_CALL_AUDIO_ONLY_FALLBACK=false
+REALTIME_IDLE_MOTION_ENABLED=true
+REALTIME_IDLE_MOTION_SCALE=0.012
+REALTIME_IDLE_MOTION_PERIOD_SECONDS=6.0
 REALTIME_VIDEO_WIDTH=540
 REALTIME_VIDEO_HEIGHT=960
 REALTIME_VIDEO_FPS=25
@@ -231,15 +237,33 @@ verified irrelevant data does not add credit and may add an explicit penalty.
 Scores above 90 should feel exceptional, and the displayed score can never
 exceed 95.0.
 
-Optional voice activity detection settings:
+Optional realtime response and voice activity detection settings:
 
 ```env
+RAG_MAX_DISTANCE=0.75
+REALTIME_HISTORY_MAX_TURNS=8
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0.4
+LLM_MAX_OUTPUT_TOKENS=200
+LLM_REASONING_EFFORT=none
+STT_MODEL=whisper-1
+STT_LANGUAGE=ko
 REALTIME_VAD_ENERGY_THRESHOLD=900
 REALTIME_VAD_SILENCE_SECONDS=0.8
 REALTIME_VAD_MIN_SPEECH_SECONDS=0.7
 REALTIME_VAD_MAX_SPEECH_SECONDS=15
 REALTIME_VAD_STARTUP_GRACE_SECONDS=1.5
 ```
+
+`RAG_MAX_DISTANCE` filters semantically distant member memories before they
+reach the LLM. Realtime calls keep only the latest
+`REALTIME_HISTORY_MAX_TURNS` user/assistant pairs, scoped to one call and
+discarded when that WebRTC session closes. The member profile summary is always
+included before the filtered interview memories. `LLM_MODEL` and
+`LLM_TEMPERATURE` make controlled model comparisons possible without code
+changes. GPT-5/6 and o-series models automatically use
+`LLM_REASONING_EFFORT` and the completion-token parameter expected by those
+models.
 
 Successful conversation logs:
 
