@@ -30,6 +30,15 @@ def _encoded_video() -> bytes:
 
 
 class QueuedVideoTrackTests(unittest.TestCase):
+    def test_rejects_encoded_segment_without_decodable_frame(self) -> None:
+        track = QueuedVideoTrack(width=32, height=32, fps=25)
+
+        with self.assertRaises(Exception):
+            track.enqueue_encoded_video(b"not-an-mp4")
+
+        self.assertFalse(track.is_playing)
+        track.stop()
+
     def test_sends_idle_frames_with_monotonic_rtp_timestamps(self) -> None:
         async def run():
             track = QueuedVideoTrack(width=32, height=32, fps=25)

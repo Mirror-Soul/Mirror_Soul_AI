@@ -21,6 +21,7 @@ class AiPipelineStreamTest(unittest.TestCase):
         self.assertIn("journalctl", ai_command)
         self.assertIn("--line-buffered", ai_command)
         self.assertIn("RAG_PROFILE", ai_command)
+        self.assertIn("VOICE_TRAINING(_QUALITY)?", ai_command)
         self.assertIn("tail -n 0 -F /tmp/face.log", gpu_command)
         self.assertIn("FACE_(TRAINING|SIMILARITY)", gpu_command)
 

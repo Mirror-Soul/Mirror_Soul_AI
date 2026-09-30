@@ -19,6 +19,7 @@ FIELD_PATTERN = re.compile(r"([a-zA-Z_]+)=([^\s]+)")
 AI_EVENT_MARKERS = (
     "[RAG_PROFILE]",
     "[VOICE_TRAINING]",
+    "[VOICE_TRAINING_QUALITY]",
     "[CLONE_SIMILARITY]",
 )
 GPU_EVENT_MARKERS = ("[FACE_TRAINING]", "[FACE_SIMILARITY]")
@@ -148,7 +149,10 @@ def parse_pipeline_logs(
         for line in ai_lines
         if f"user_uuid={user_uuid}" in line
         or (
-            "[VOICE_TRAINING]" in line
+            (
+                "[VOICE_TRAINING]" in line
+                or "[VOICE_TRAINING_QUALITY]" in line
+            )
             and _fields(line).get("job_id") in voice_job_ids
         )
     ]
@@ -193,6 +197,18 @@ def parse_pipeline_logs(
                 snapshot.voice.detail = line.split("error=", 1)[-1]
             else:
                 snapshot.voice.detail = f"files={values.get('files', '-')}"
+
+        if "[VOICE_TRAINING_QUALITY] batch:" in line:
+            quality_status = values.get("status", "-").upper()
+            if quality_status == "FAILED":
+                snapshot.voice.status = "FAILED"
+            snapshot.voice.job_id = values.get("job_id", snapshot.voice.job_id)
+            snapshot.voice.detail = (
+                f"input_quality={quality_status} "
+                f"accepted={values.get('accepted', '-')} "
+                f"rejected={values.get('rejected', '-')} "
+                f"duration={values.get('duration', '-')}"
+            )
 
         if "[CLONE_SIMILARITY] updated:" in line:
             snapshot.overall_score = values.get("overall", "-")
@@ -416,9 +432,19 @@ def _stage_line(name: str, stage: Stage, color: bool = False) -> str:
 
 def _event_line(line: str, color: bool) -> str:
     lowered = line.lower()
-    if " failed" in lowered or "error=" in lowered:
+    if (
+        " failed" in lowered
+        or "error=" in lowered
+        or "status=failed" in lowered
+        or "status=rejected" in lowered
+    ):
         style = STATUS_COLORS["FAILED"]
-    elif " completed" in lowered or "status=completed" in lowered:
+    elif (
+        " completed" in lowered
+        or "status=completed" in lowered
+        or "status=passed" in lowered
+        or "status=accepted" in lowered
+    ):
         style = STATUS_COLORS["COMPLETED"]
     elif " processing" in lowered or "preprocessing" in lowered:
         style = STATUS_COLORS["PROCESSING"]

@@ -19,6 +19,10 @@ from model_calling.realtime.ditto import (
     FaceRenderProfile,
     _get_render_gate,
 )
+from model_calling.realtime.video_integrity import (
+    VideoIntegrityConfig,
+    VideoIntegrityError,
+)
 
 
 def _profile_bytes(user_id: str = "member-uuid", clone_id: int = 6) -> bytes:
@@ -190,6 +194,7 @@ class DittoRealtimeTests(unittest.TestCase):
                     DittoCallConfig(
                         service_url="http://127.0.0.1:8080",
                         api_key="secret",
+                        video_integrity=VideoIntegrityConfig(enabled=False),
                     ),
                     http_client=http_client,
                 )
@@ -228,6 +233,7 @@ class DittoRealtimeTests(unittest.TestCase):
                         api_key="secret",
                         retry_attempts=3,
                         retry_base_seconds=0,
+                        video_integrity=VideoIntegrityConfig(enabled=False),
                     ),
                     http_client=http_client,
                 )
@@ -242,6 +248,50 @@ class DittoRealtimeTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run()), b"rendered-mp4")
         self.assertEqual(attempts, 3)
+
+    @patch(
+        "model_calling.realtime.ditto.validate_rendered_video",
+        side_effect=VideoIntegrityError(
+            "duration mismatch",
+            code="DITTO_VIDEO_DURATION_MISMATCH",
+        ),
+    )
+    def test_render_client_preserves_video_integrity_error_code(
+        self,
+        _validate,
+    ) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"rendered-mp4",
+                headers={"Content-Type": "video/mp4"},
+            )
+
+        async def run() -> None:
+            transport = httpx.MockTransport(handler)
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                client = DittoRenderClient(
+                    DittoCallConfig(
+                        service_url="http://127.0.0.1:8080",
+                        api_key="secret",
+                    ),
+                    http_client=http_client,
+                )
+                with self.assertRaises(DittoRealtimeError) as raised:
+                    await client.render(
+                        FaceRenderProfile(
+                            portrait_bytes=b"portrait",
+                            portrait_filename="portrait.jpg",
+                            portrait_content_type="image/jpeg",
+                        ),
+                        b"audio",
+                    )
+                self.assertEqual(
+                    raised.exception.code,
+                    "DITTO_VIDEO_DURATION_MISMATCH",
+                )
+
+        asyncio.run(run())
 
     def test_render_client_serializes_concurrent_callers(self) -> None:
         active_requests = 0
@@ -265,6 +315,7 @@ class DittoRealtimeTests(unittest.TestCase):
                 config = DittoCallConfig(
                     service_url="http://127.0.0.1:8080",
                     api_key="secret",
+                    video_integrity=VideoIntegrityConfig(enabled=False),
                 )
                 clients = [
                     DittoRenderClient(config, http_client=http_client),

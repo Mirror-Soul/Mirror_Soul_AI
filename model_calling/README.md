@@ -68,6 +68,13 @@ and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the
 first video-call integration but does not yet provide frame-by-frame streaming
 while the answer is being generated.
 
+Before a rendered reply is queued, the call service decodes the complete MP4
+and verifies its video stream, frame count, duration, frame rate, dimensions,
+and duration agreement with the TTS audio. Invalid output fails the VIDEO stage
+with a stable `DITTO_VIDEO_*` error code, so a successful HTTP response cannot
+silently become static portrait plus audio. Thresholds use the
+`DITTO_CALL_VIDEO_*` settings documented in `.env.example`.
+
 The first implementation is turn based. A user utterance is finalized after a
 short silence, then the answer is generated and played.
 
@@ -115,6 +122,26 @@ AWS_SQS_VOICE_TRAINING_QUEUE_URL=
 VOICE_TRAINING_WAIT_SECONDS=20
 VOICE_TRAINING_VISIBILITY_TIMEOUT=600
 VOICE_TRAINING_DELETE_FAILED_MESSAGES=true
+VOICE_TRAINING_AUDIO_QUALITY_ENABLED=true
+VOICE_TRAINING_FFMPEG_BINARY=ffmpeg
+VOICE_TRAINING_MIN_ACCEPTED_SAMPLES=3
+VOICE_TRAINING_MIN_BATCH_DURATION_SECONDS=8
+```
+
+Before sending audio to ElevenLabs, the worker converts every supported input
+to 16 kHz mono PCM WAV and checks duration, loudness, silence ratio, and
+clipping. Invalid individual samples are excluded. The job fails before voice
+creation when fewer than three valid samples remain or their combined duration
+is below eight seconds. Thresholds can be tuned with the
+`VOICE_TRAINING_*` values documented in `.env.example`; disable the gate only
+as a temporary rollback with `VOICE_TRAINING_AUDIO_QUALITY_ENABLED=false`.
+
+Quality logs use sample numbers instead of S3 keys:
+
+```text
+[VOICE_TRAINING_QUALITY] sample: job_id=17 sample=1 status=ACCEPTED ...
+[VOICE_TRAINING_QUALITY] sample: job_id=17 sample=4 status=REJECTED reasons=too_much_silence
+[VOICE_TRAINING_QUALITY] batch: job_id=17 status=PASSED accepted=4 rejected=1 duration=22.41s
 ```
 
 Run once for a manual smoke test:
@@ -134,6 +161,7 @@ Successful worker flow:
 ```text
 SQS message
 -> S3 audio download
+-> input normalization and quality gate
 -> ElevenLabs /v1/voices/add
 -> ai_voice_profiles active row
 -> clone similarity score update
