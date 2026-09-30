@@ -7,6 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import chain
 from typing import Any, Iterator
 
 import av
@@ -100,9 +101,16 @@ class QueuedVideoTrack(MediaStreamTrack):
                 raise QueuedVideoTrackError(
                     "Rendered response does not contain a video stream."
                 )
+            decoded_frames = iter(container.decode(video=0))
+            try:
+                first_frame = next(decoded_frames)
+            except StopIteration as exc:
+                raise QueuedVideoTrackError(
+                    "Rendered response contains no decodable video frames."
+                ) from exc
             segment = _VideoSegment(
                 container=container,
-                frames=iter(container.decode(video=0)),
+                frames=iter(chain((first_frame,), decoded_frames)),
             )
             self._segments.append(segment)
         except Exception:
@@ -160,6 +168,14 @@ class QueuedVideoTrack(MediaStreamTrack):
             except StopIteration:
                 self._close_active_segment()
                 print("[VIDEO_OUT] Ditto video segment completed", flush=True)
+            except Exception as exc:
+                self._close_active_segment()
+                print(
+                    "[VIDEO_OUT] Ditto video segment decode failed; "
+                    f"returning to idle: error={exc!r}",
+                    flush=True,
+                )
+                return None
 
     def _idle_frame(self) -> av.VideoFrame:
         if not self.idle_motion_enabled or self.idle_motion_scale == 0:

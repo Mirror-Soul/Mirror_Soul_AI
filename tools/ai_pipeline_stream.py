@@ -71,7 +71,7 @@ def _ssh_args(
 
 
 def _ai_command(history: int, scan_lines: int) -> str:
-    marker = r"\[(RAG_PROFILE|VOICE_TRAINING|CLONE_SIMILARITY)\]"
+    marker = r"\[(RAG_PROFILE|VOICE_TRAINING(_QUALITY)?|CLONE_SIMILARITY)\]"
     history_command = ""
     if history:
         history_command = (

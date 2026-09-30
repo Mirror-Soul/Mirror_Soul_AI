@@ -17,6 +17,12 @@ from model_calling.clone_similarity.speaker_embedding import (
     evaluate_speaker_similarity,
     generate_clone_reference_audio_file,
 )
+from model_calling.voice_training.audio_quality import (
+    VoiceTrainingAudioBatch,
+    VoiceTrainingAudioSample,
+    VoiceTrainingInputQualityError,
+    normalize_and_validate_voice_samples,
+)
 from model_calling.repository.clone_repository import (
     CloneRepositoryError,
     complete_voice_training_job,
@@ -174,12 +180,16 @@ def _process_voice_training_message(
         _download_audio(s3_client, bucket=bucket, object_key=object_key)
         for bucket, object_key in audio_sources
     ]
+    training_files = _prepare_voice_training_audio(
+        downloaded_files,
+        job_id=message.job_id,
+    )
     voice_id = asyncio.run(
         clone_user_voice_from_files(
             message.user_uuid,
             [
                 (audio.filename, audio.content, audio.content_type)
-                for audio in downloaded_files
+                for audio in training_files
             ],
             description=(
                 "Mirror Soul voice clone "
@@ -188,12 +198,11 @@ def _process_voice_training_message(
         )
     )
     actual_voice_score = _evaluate_actual_voice_similarity(
-        original_audios=downloaded_files,
+        original_audios=training_files,
         elevenlabs_voice_id=voice_id,
         user_uuid=message.user_uuid,
         job_id=message.job_id,
     )
-
     complete_voice_training_job(
         job_id=message.job_id,
         clone_id=clone.clone_id,
@@ -215,6 +224,86 @@ def _process_voice_training_message(
         "[VOICE_TRAINING] completed: "
         f"job_id={message.job_id} clone_id={clone.clone_id} "
         f"voice_id={_mask_voice_id(voice_id)}",
+        flush=True,
+    )
+
+
+def _prepare_voice_training_audio(
+    downloaded_files: list[DownloadedAudio],
+    *,
+    job_id: int,
+) -> list[DownloadedAudio]:
+    if not _env_bool("VOICE_TRAINING_AUDIO_QUALITY_ENABLED", True):
+        print(
+            "[VOICE_TRAINING_QUALITY] bypassed: "
+            f"job_id={job_id} files={len(downloaded_files)}",
+            flush=True,
+        )
+        return downloaded_files
+
+    try:
+        batch = normalize_and_validate_voice_samples(
+            [
+                VoiceTrainingAudioSample(
+                    filename=audio.filename,
+                    content=audio.content,
+                    content_type=audio.content_type,
+                )
+                for audio in downloaded_files
+            ]
+        )
+    except VoiceTrainingInputQualityError as exc:
+        _log_voice_training_quality(exc.batch, job_id=job_id, passed=False)
+        raise VoiceTrainingWorkerError(str(exc)) from exc
+
+    _log_voice_training_quality(batch, job_id=job_id, passed=True)
+    return [
+        DownloadedAudio(
+            filename=sample.filename,
+            content=sample.content,
+            content_type=sample.content_type,
+        )
+        for sample in batch.accepted
+    ]
+
+
+def _log_voice_training_quality(
+    batch: VoiceTrainingAudioBatch,
+    *,
+    job_id: int,
+    passed: bool,
+) -> None:
+    for sample in batch.accepted:
+        metrics = sample.metrics
+        print(
+            "[VOICE_TRAINING_QUALITY] sample: "
+            f"job_id={job_id} sample={sample.sample_number} status=ACCEPTED "
+            f"duration={metrics.duration_seconds:.2f}s "
+            f"rms_dbfs={metrics.rms_dbfs:.2f} "
+            f"silence_ratio={metrics.silence_ratio:.3f} "
+            f"clipping_ratio={metrics.clipping_ratio:.4f}",
+            flush=True,
+        )
+    for sample in batch.rejected:
+        metrics_text = ""
+        if sample.metrics is not None:
+            metrics_text = (
+                f" duration={sample.metrics.duration_seconds:.2f}s"
+                f" rms_dbfs={sample.metrics.rms_dbfs:.2f}"
+                f" silence_ratio={sample.metrics.silence_ratio:.3f}"
+                f" clipping_ratio={sample.metrics.clipping_ratio:.4f}"
+            )
+        print(
+            "[VOICE_TRAINING_QUALITY] sample: "
+            f"job_id={job_id} sample={sample.sample_number} status=REJECTED "
+            f"reasons={','.join(sample.reason_codes)}{metrics_text}",
+            flush=True,
+        )
+    print(
+        "[VOICE_TRAINING_QUALITY] batch: "
+        f"job_id={job_id} status={'PASSED' if passed else 'FAILED'} "
+        f"accepted={len(batch.accepted)} rejected={len(batch.rejected)} "
+        f"duration={batch.total_duration_seconds:.2f}s",
         flush=True,
     )
 

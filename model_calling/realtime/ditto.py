@@ -14,6 +14,11 @@ from urllib.parse import urlparse
 import httpx
 
 from model_calling.realtime.trace import trace_fields
+from model_calling.realtime.video_integrity import (
+    VideoIntegrityConfig,
+    VideoIntegrityError,
+    validate_rendered_video,
+)
 
 if TYPE_CHECKING:
     from model_calling.realtime.video import QueuedVideoTrack
@@ -42,6 +47,7 @@ class DittoCallConfig:
     retry_attempts: int = 6
     retry_base_seconds: float = 1.0
     queue_timeout_seconds: float = 90.0
+    video_integrity: VideoIntegrityConfig = VideoIntegrityConfig()
 
     @classmethod
     def from_env(cls) -> "DittoCallConfig | None":
@@ -102,6 +108,7 @@ class DittoCallConfig:
             retry_attempts=retry_attempts,
             retry_base_seconds=retry_base_seconds,
             queue_timeout_seconds=queue_timeout_seconds,
+            video_integrity=VideoIntegrityConfig.from_env(),
         )
 
 
@@ -241,6 +248,27 @@ class DittoRenderClient:
             raise DittoRealtimeError(
                 "Ditto response exceeds "
                 f"{self.config.max_response_bytes} bytes."
+            )
+        try:
+            integrity = await asyncio.to_thread(
+                validate_rendered_video,
+                response.content,
+                audio_bytes,
+                config=self.config.video_integrity,
+            )
+        except VideoIntegrityError as exc:
+            raise DittoRealtimeError(str(exc), code=exc.code) from exc
+        if self.config.video_integrity.enabled:
+            print(
+                "[DITTO_CALL] video integrity passed: "
+                f"{trace_fields(call_id, turn_id)} "
+                f"frames={integrity.frame_count} "
+                f"duration={integrity.duration_seconds:.3f}s "
+                f"audio_duration={integrity.expected_audio_duration_seconds:.3f}s "
+                f"delta={integrity.duration_delta_seconds:.3f}s "
+                f"fps={integrity.frame_rate:.3f} "
+                f"resolution={integrity.width}x{integrity.height}",
+                flush=True,
             )
         print(
             "[DITTO_CALL] render completed: "

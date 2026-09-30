@@ -19,6 +19,8 @@ class AiPipelineMonitorTest(unittest.TestCase):
 [RAG_PROFILE] processing: user_uuid={user_uuid} clone_id=13 samples=5
 [RAG_PROFILE] completed: user_uuid={user_uuid} clone_id=13 profile_score=64.25 data_reliability=91.5 penalty=1.5 callback_sent=True
 [VOICE_TRAINING] processing: job_id=13 user_uuid={user_uuid} clone_id=13 files=5
+[VOICE_TRAINING_QUALITY] sample: job_id=13 sample=1 status=ACCEPTED duration=3.20s rms_dbfs=-18.0 silence_ratio=0.12 clipping_ratio=0.0
+[VOICE_TRAINING_QUALITY] batch: job_id=13 status=PASSED accepted=5 rejected=0 duration=18.40s
 [CLONE_SIMILARITY] updated: user_uuid={user_uuid} clone_id=13 overall=72.4 face=86.5 voice=62.0 personality=64.25 data_reliability=91.5 penalty=1.5 complete=True
 [VOICE_TRAINING] completed: job_id=13 clone_id=13 voice_id=Y6tM...YvaS
 """
@@ -34,6 +36,9 @@ class AiPipelineMonitorTest(unittest.TestCase):
         self.assertEqual(snapshot.rag.score, "64.25")
         self.assertEqual(snapshot.voice.status, "COMPLETED")
         self.assertEqual(snapshot.voice.score, "62.0")
+        self.assertTrue(
+            any("[VOICE_TRAINING_QUALITY] batch:" in line for line in snapshot.events)
+        )
         self.assertEqual(snapshot.face.status, "COMPLETED")
         self.assertEqual(snapshot.face.score, "86.5")
         self.assertEqual(snapshot.overall_score, "67.9")
@@ -66,6 +71,22 @@ class AiPipelineMonitorTest(unittest.TestCase):
 
         self.assertEqual(snapshot.rag.status, "WARNING")
         self.assertIn("callback=False", snapshot.rag.detail)
+
+    def test_marks_voice_failed_when_input_quality_batch_fails(self) -> None:
+        ai_logs = "\n".join(
+            [
+                "[VOICE_TRAINING] processing: job_id=21 user_uuid=target clone_id=7 files=5",
+                "[VOICE_TRAINING_QUALITY] sample: job_id=21 sample=2 status=REJECTED reasons=too_much_silence",
+                "[VOICE_TRAINING_QUALITY] batch: job_id=21 status=FAILED accepted=2 rejected=3 duration=5.20s",
+            ]
+        )
+
+        snapshot = parse_pipeline_logs(ai_logs, "", "target")
+
+        self.assertEqual(snapshot.voice.status, "FAILED")
+        self.assertEqual(snapshot.voice.job_id, "21")
+        self.assertIn("accepted=2", snapshot.voice.detail)
+        self.assertIn("rejected=3", snapshot.voice.detail)
 
     def test_scopes_face_events_to_matching_job_block(self) -> None:
         gpu_logs = "\n".join(
