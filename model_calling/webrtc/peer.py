@@ -29,7 +29,7 @@ from model_calling.realtime.video import QueuedVideoTrack
 load_dotenv()
 
 
-def create_rtc_configuration() -> RTCConfiguration:
+def create_rtc_configuration(call_id: int | None = None) -> RTCConfiguration:
     ice_servers = [
         RTCIceServer(
             urls=[
@@ -53,42 +53,65 @@ def create_rtc_configuration() -> RTCConfiguration:
 
     print(
         "[WEBRTC] RTC configuration created: "
-        f"ice_servers={len(ice_servers)} turn={'enabled' if turn_url else 'disabled'}",
+        f"callId={call_id if call_id is not None else 'unknown'} "
+        f"ice_servers={len(ice_servers)} "
+        f"turn={'enabled' if turn_url else 'disabled'}",
         flush=True,
     )
     return RTCConfiguration(iceServers=ice_servers)
 
 
 def create_peer_connection(call_id: int) -> RTCPeerConnection:
-    pc = RTCPeerConnection(configuration=create_rtc_configuration())
+    pc = RTCPeerConnection(configuration=create_rtc_configuration(call_id))
     print(f"[WEBRTC] peer connection created: callId={call_id}", flush=True)
 
     @pc.on("icegatheringstatechange")
     async def on_ice_gathering_state_change():
-        print(f"[WEBRTC] ICE gathering: {pc.iceGatheringState}", flush=True)
+        print(
+            f"[WEBRTC] ICE gathering: callId={call_id} "
+            f"state={pc.iceGatheringState}",
+            flush=True,
+        )
 
     @pc.on("connectionstatechange")
     async def on_connection_state_change():
-        print(f"[WEBRTC] connection: {pc.connectionState}", flush=True)
+        print(
+            f"[WEBRTC] connection: callId={call_id} state={pc.connectionState}",
+            flush=True,
+        )
         if pc.connectionState in {"failed", "closed"}:
-            await close_session(call_id)
+            await close_session(
+                call_id,
+                reason=f"PEER_{pc.connectionState.upper()}",
+            )
 
     @pc.on("iceconnectionstatechange")
     async def on_ice_connection_state_change():
-        print(f"[WEBRTC] ICE connection: {pc.iceConnectionState}", flush=True)
+        print(
+            f"[WEBRTC] ICE connection: callId={call_id} "
+            f"state={pc.iceConnectionState}",
+            flush=True,
+        )
 
     @pc.on("track")
     def on_track(track):
-        print(f"[WEBRTC] track received: kind={track.kind}", flush=True)
+        print(
+            f"[WEBRTC] track received: callId={call_id} kind={track.kind}",
+            flush=True,
+        )
         if track.kind != "audio":
-            print(f"[WEBRTC] non-audio track ignored: kind={track.kind}", flush=True)
+            print(
+                f"[WEBRTC] non-audio track ignored: callId={call_id} "
+                f"kind={track.kind}",
+                flush=True,
+            )
             return
 
         session = get_session(call_id)
         if session is None:
             print(f"[WEBRTC] track ignored because session is missing: callId={call_id}", flush=True)
             return
-        if session.receiver_task is not None:
+        if session.receiver_task is not None or session.pipeline_start_task is not None:
             print(f"[WEBRTC] duplicate audio track ignored: callId={call_id}", flush=True)
             return
 
@@ -101,26 +124,40 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
                 f"clone_id={session.clone_id}",
                 flush=True,
             )
-            receiver_task, pipeline_task = await start_realtime_audio(
-                user_id=session.clone_user_uuid,
-                clone_id=session.clone_id,
-                incoming_track=track,
-                output_track=session.output_track,
-                utterance_queue=session.utterance_queue,
-                video_renderer=session.video_renderer,
-                video_required=session.media_type == "VIDEO",
-                conversation_history=session.conversation_history,
-            )
-            session.receiver_task = receiver_task
-            session.pipeline_task = pipeline_task
-            print(
-                "[WEBRTC] realtime pipeline attached: "
-                f"callId={call_id} receiver_task={id(receiver_task)} "
-                f"pipeline_task={id(pipeline_task)}",
-                flush=True,
-            )
+            try:
+                receiver_task, pipeline_task = await start_realtime_audio(
+                    call_id=call_id,
+                    user_id=session.clone_user_uuid,
+                    clone_id=session.clone_id,
+                    incoming_track=track,
+                    output_track=session.output_track,
+                    utterance_queue=session.utterance_queue,
+                    video_renderer=session.video_renderer,
+                    video_required=session.media_type == "VIDEO",
+                    conversation_history=session.conversation_history,
+                    call_trace=session.trace,
+                )
+                if get_session(call_id) is not session:
+                    receiver_task.cancel()
+                    pipeline_task.cancel()
+                    await asyncio.gather(
+                        receiver_task,
+                        pipeline_task,
+                        return_exceptions=True,
+                    )
+                    return
+                session.receiver_task = receiver_task
+                session.pipeline_task = pipeline_task
+                print(
+                    "[WEBRTC] realtime pipeline attached: "
+                    f"callId={call_id} receiver_task={id(receiver_task)} "
+                    f"pipeline_task={id(pipeline_task)}",
+                    flush=True,
+                )
+            finally:
+                session.pipeline_start_task = None
 
-        asyncio.create_task(start_pipeline())
+        session.pipeline_start_task = asyncio.create_task(start_pipeline())
 
     return pc
 
@@ -168,6 +205,7 @@ async def create_answer_from_offer(
             pc.addTrack(output_video_track)
             try:
                 video_renderer = create_ditto_video_session(
+                    call_id=call_id,
                     user_id=clone_user_uuid,
                     clone_id=clone_id,
                     track=output_video_track,

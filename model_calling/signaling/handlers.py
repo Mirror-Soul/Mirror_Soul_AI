@@ -245,7 +245,7 @@ async def handle_call_end(message: dict[str, Any]) -> None:
         print("[SIGNALING] invalid CALL_END: callId is required.", flush=True)
         return
 
-    await close_session(call_id)
+    await close_session(call_id, reason="CALL_END")
     print(f"[SIGNALING] CALL_END handled: callId={call_id}", flush=True)
 
 

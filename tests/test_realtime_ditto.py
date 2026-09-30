@@ -17,6 +17,7 @@ from model_calling.realtime.ditto import (
     DittoVideoSession,
     FaceProfileLoader,
     FaceRenderProfile,
+    _get_render_gate,
 )
 
 
@@ -102,7 +103,7 @@ class _ProfileLoader:
         self.profile = profile
         self.calls = 0
 
-    async def load(self, user_id, clone_id):
+    async def load(self, user_id, clone_id, **kwargs):
         self.calls += 1
         return self.profile
 
@@ -111,12 +112,52 @@ class _RenderClient:
     def __init__(self):
         self.calls = []
 
-    async def render(self, profile, audio_bytes):
-        self.calls.append((profile, audio_bytes))
+    async def render(self, profile, audio_bytes, **kwargs):
+        self.calls.append((profile, audio_bytes, kwargs))
         return b"mp4"
 
 
 class DittoRealtimeTests(unittest.TestCase):
+    def test_render_queue_timeout_has_stable_error_code(self) -> None:
+        async def run() -> None:
+            gate = _get_render_gate()
+            await gate.acquire()
+            try:
+                client = DittoRenderClient(
+                    DittoCallConfig(
+                        service_url="http://127.0.0.1:8080",
+                        api_key="secret",
+                        queue_timeout_seconds=0.001,
+                    ),
+                    http_client=httpx.AsyncClient(
+                        transport=httpx.MockTransport(
+                            lambda request: httpx.Response(
+                                200,
+                                content=b"mp4",
+                                headers={"content-type": "video/mp4"},
+                            )
+                        )
+                    ),
+                )
+                profile = FaceRenderProfile(
+                    portrait_bytes=b"portrait",
+                    portrait_filename="portrait.jpg",
+                    portrait_content_type="image/jpeg",
+                )
+                try:
+                    with self.assertRaises(DittoRealtimeError) as raised:
+                        await client.render(profile, b"audio", call_id=91)
+                    self.assertEqual(
+                        raised.exception.code,
+                        "DITTO_RENDER_QUEUE_TIMEOUT",
+                    )
+                finally:
+                    await client._http_client.aclose()
+            finally:
+                gate.release()
+
+        asyncio.run(run())
+
     def test_config_rejects_plain_http_to_remote_host(self) -> None:
         with patch.dict(
             os.environ,
@@ -305,6 +346,7 @@ class DittoRealtimeTests(unittest.TestCase):
             track=track,
             client=client,
             profile_loader=loader,
+            call_id=77,
         )
 
         async def run() -> None:
@@ -316,6 +358,7 @@ class DittoRealtimeTests(unittest.TestCase):
         self.assertEqual(loader.calls, 1)
         self.assertEqual(track.idle_images, [b"portrait"])
         self.assertEqual(track.videos, [b"mp4", b"mp4"])
+        self.assertEqual(client.calls[0][2]["call_id"], 77)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 import unittest
+from contextlib import redirect_stdout
+import io
 from unittest.mock import AsyncMock, Mock, patch
 
 from model_calling.realtime.pipeline import (
@@ -35,6 +37,7 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["conversation_history"], history)
             return "저도 그 이야기 기억해요."
 
+        search_memories = Mock(return_value=[])
         with (
             patch(
                 "model_calling.realtime.pipeline.process_stt",
@@ -46,7 +49,7 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "model_calling.realtime.pipeline.search_user_memories",
-                new=Mock(return_value=[]),
+                new=search_memories,
             ),
             patch(
                 "model_calling.realtime.pipeline.process_llm",
@@ -57,16 +60,31 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=b"audio"),
             ),
         ):
-            result = await generate_reply_audio(
-                "member-uuid",
-                14,
-                b"wav",
-                conversation_history=history,
-            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = await generate_reply_audio(
+                    "member-uuid",
+                    14,
+                    b"wav",
+                    conversation_history=history,
+                    call_id=77,
+                    turn_id=2,
+                )
 
         self.assertEqual(result.audio_bytes, b"audio")
         self.assertEqual(result.user_text, "아까 이야기 기억나?")
         self.assertEqual(result.assistant_text, "저도 그 이야기 기억해요.")
+        self.assertEqual(
+            set(result.stage_timings_ms),
+            {"stt", "context", "rag", "llm", "tts"},
+        )
+        self.assertIn("callId=77 turn=2", output.getvalue())
+        self.assertIn("elapsed_ms=", output.getvalue())
+        rag_query = search_memories.call_args.args[1]
+        self.assertIn("현재 질문: 아까 이야기 기억나?", rag_query)
+        self.assertIn("12", rag_query)
+        self.assertIn("14", rag_query)
+        self.assertNotIn("15", rag_query)
         self.assertEqual(len(history), 16)
 
         _append_conversation_turn(

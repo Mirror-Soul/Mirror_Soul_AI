@@ -43,7 +43,13 @@ STATUS_COLORS = {
     "UNKNOWN": ANSI_YELLOW,
 }
 
-CALL_MARKERS = ("[SIGNALING]", "[WEBRTC]", "[REALTIME]", "[DITTO_CALL]")
+CALL_MARKERS = (
+    "[SIGNALING]",
+    "[WEBRTC]",
+    "[REALTIME]",
+    "[DITTO_CALL]",
+    "[CALL_TRACE]",
+)
 CALL_ID_PATTERN = re.compile(r"callId['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
 USER_PATTERN = re.compile(
     r"(?:cloneUserUuid['\"]?\s*[:=]\s*['\"]?|user=)([^,'\"\s}]+)"
@@ -70,6 +76,8 @@ class CallSnapshot:
     llm: Stage = field(default_factory=Stage)
     tts: Stage = field(default_factory=Stage)
     video: Stage = field(default_factory=Stage)
+    trace_summary: str = "No completed turn yet"
+    recent_call_summaries: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
 
@@ -136,11 +144,29 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             snapshot.signaling_connection = "RECONNECTING"
 
     block = _call_block(lines)
+    snapshot.recent_call_summaries = [
+        line for line in lines if "[CALL_TRACE] call closed:" in line
+    ][-5:]
     if not block:
         snapshot.events = [line for line in lines if line.startswith(CALL_MARKERS)][-12:]
         return snapshot
 
-    snapshot.call_id = _last_value(CALL_ID_PATTERN, block)
+    identity_lines = [
+        line
+        for line in block
+        if "'type': 'CALL_INVITE'" in line
+        or '"type": "CALL_INVITE"' in line
+        or "[SIGNALING] CALL_ACCEPT sent:" in line
+        or "[SIGNALING] CALL_REJECT sent:" in line
+    ]
+    snapshot.call_id = _last_value(CALL_ID_PATTERN, identity_lines or block)
+    if snapshot.call_id != "-":
+        block = [
+            line
+            for line in block
+            if (match := CALL_ID_PATTERN.search(line)) is None
+            or match.group(1) == snapshot.call_id
+        ]
     snapshot.user_uuid = _last_value(USER_PATTERN, block)
     snapshot.media_type = _last_value(MEDIA_PATTERN, block).upper()
 
@@ -159,9 +185,13 @@ def parse_call_logs(logs: str) -> CallSnapshot:
 
         if "[webrtc] peer connection created" in lowered:
             snapshot.webrtc = Stage("PROCESSING", "Peer connection created")
-        if "[webrtc] connection: connected" in lowered:
+        if "[webrtc] connection: connected" in lowered or (
+            "[webrtc] connection:" in lowered and "state=connected" in lowered
+        ):
             snapshot.webrtc = Stage("CONNECTED", "WebRTC connected")
-        if "[webrtc] connection: failed" in lowered:
+        if "[webrtc] connection: failed" in lowered or (
+            "[webrtc] connection:" in lowered and "state=failed" in lowered
+        ):
             snapshot.webrtc = Stage("FAILED", line)
         if "[signaling] call_end handled" in lowered:
             snapshot.webrtc = Stage("ENDED", "Call ended normally")
@@ -212,7 +242,14 @@ def parse_call_logs(logs: str) -> CallSnapshot:
                     stage.status = "FAILED"
                     stage.detail = detail
 
-    snapshot.events = [line for line in block if line.startswith(CALL_MARKERS)][-14:]
+        if "[call_trace] turn completed:" in lowered:
+            snapshot.trace_summary = line
+        if "[call_trace] turn failed:" in lowered:
+            snapshot.trace_summary = line
+        if "[call_trace] turn skipped:" in lowered:
+            snapshot.trace_summary = line
+
+    snapshot.events = [line for line in block if line.startswith(CALL_MARKERS)][-20:]
     return snapshot
 
 
@@ -400,8 +437,19 @@ def render(
         _stage_line("TTS", snapshot.tts, color),
         _stage_line("VIDEO", snapshot.video, color),
         "",
-        _paint("RECENT CALL EVENTS", ANSI_BOLD, color),
+        _paint("LATEST TURN SUMMARY", ANSI_BOLD, color),
+        _event_line(snapshot.trace_summary, color),
+        "",
+        _paint("RECENT CLOSED CALLS", ANSI_BOLD, color),
     ]
+    lines.extend(
+        [_event_line(line, color) for line in snapshot.recent_call_summaries]
+        or [_paint("No closed call summary yet", ANSI_DIM, color)]
+    )
+    lines.extend([
+        "",
+        _paint("RECENT CALL EVENTS", ANSI_BOLD, color),
+    ])
     lines.extend(
         [_event_line(line, color) for line in snapshot.events]
         or [_paint("Waiting for a new call...", ANSI_DIM, color)]
