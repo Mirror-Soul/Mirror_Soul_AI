@@ -6,10 +6,18 @@ from typing import Any
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from model_calling.schemas import PersonalityProfile, SpeechProfile, UserStyle
-from model_calling.services import process_stt, extract_user_style, process_llm, process_tts, clone_user_voice
+from model_calling.services import (
+    build_memory_search_query,
+    clone_user_voice,
+    extract_user_style,
+    process_llm,
+    process_stt,
+    process_tts,
+)
 from model_calling.utils import load_user_persona
 from model_training.base_profiles import get_mbti_base_profile
 from model_training.services import search_user_memories
+from shared.config import settings
 
 router = APIRouter(tags=["model_calling"])
 
@@ -55,8 +63,8 @@ def load_personalization_context(
     try:
         retrieved_memories = search_user_memories(
             user_id=user_id,
-            query=user_text,
-            top_k=5,
+            query=build_memory_search_query(user_text),
+            top_k=max(1, settings.RAG_TOP_K),
         )
     except Exception as exc:
         print(f"[RAG 검색 경고] user_id={user_id}: {repr(exc)}")

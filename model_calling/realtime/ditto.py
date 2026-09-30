@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from model_calling.realtime.trace import trace_fields
+
 if TYPE_CHECKING:
     from model_calling.realtime.video import QueuedVideoTrack
 
@@ -26,7 +28,9 @@ _render_gate_loop: asyncio.AbstractEventLoop | None = None
 
 
 class DittoRealtimeError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "DITTO_RENDER_FAILED") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class DittoCallConfig:
     max_response_bytes: int = 100 * 1024 * 1024
     retry_attempts: int = 6
     retry_base_seconds: float = 1.0
+    queue_timeout_seconds: float = 90.0
 
     @classmethod
     def from_env(cls) -> "DittoCallConfig | None":
@@ -75,11 +80,16 @@ class DittoCallConfig:
             "DITTO_CALL_RETRY_BASE_SECONDS",
             1.0,
         )
+        queue_timeout_seconds = _env_float(
+            "DITTO_CALL_QUEUE_TIMEOUT_SECONDS",
+            90.0,
+        )
         if (
             timeout_seconds <= 0
             or max_response_bytes <= 0
             or retry_attempts <= 0
             or retry_base_seconds < 0
+            or queue_timeout_seconds <= 0
         ):
             raise DittoRealtimeError(
                 "Ditto call limits and retry settings are invalid."
@@ -91,6 +101,7 @@ class DittoCallConfig:
             max_response_bytes=max_response_bytes,
             retry_attempts=retry_attempts,
             retry_base_seconds=retry_base_seconds,
+            queue_timeout_seconds=queue_timeout_seconds,
         )
 
 
@@ -116,6 +127,9 @@ class DittoRenderClient:
         self,
         profile: FaceRenderProfile,
         audio_bytes: bytes,
+        *,
+        call_id: int | None = None,
+        turn_id: int | None = None,
     ) -> bytes:
         if not audio_bytes:
             raise DittoRealtimeError("Ditto reply audio must not be empty.")
@@ -151,7 +165,8 @@ class DittoRenderClient:
                     delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
                     print(
                         "[DITTO_CALL] transport error; retrying render: "
-                        f"attempt={attempt} delay={delay:.2f}s error={exc!r}",
+                        f"{trace_fields(call_id, turn_id)} attempt={attempt} "
+                        f"delay={delay:.2f}s error={exc!r}",
                         flush=True,
                     )
                     await asyncio.sleep(delay)
@@ -162,6 +177,7 @@ class DittoRenderClient:
                     delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
                     print(
                         "[DITTO_CALL] renderer unavailable; retrying render: "
+                        f"{trace_fields(call_id, turn_id)} "
                         f"status={response.status_code} attempt={attempt} "
                         f"delay={delay:.2f}s",
                         flush=True,
@@ -173,12 +189,29 @@ class DittoRenderClient:
         render_gate = _get_render_gate()
         queued_at = time.monotonic()
         if render_gate.locked():
-            print("[DITTO_CALL] render queued behind another call", flush=True)
-        async with render_gate:
+            print(
+                "[DITTO_CALL] render queued behind another call: "
+                f"{trace_fields(call_id, turn_id)}",
+                flush=True,
+            )
+        try:
+            await asyncio.wait_for(
+                render_gate.acquire(),
+                timeout=self.config.queue_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            queue_wait_seconds = time.monotonic() - queued_at
+            raise DittoRealtimeError(
+                "Ditto render queue wait exceeded "
+                f"{self.config.queue_timeout_seconds:.1f} seconds.",
+                code="DITTO_RENDER_QUEUE_TIMEOUT",
+            ) from exc
+        try:
             queue_wait_seconds = time.monotonic() - queued_at
             print(
                 "[DITTO_CALL] render slot acquired: "
-                f"queue_wait={queue_wait_seconds:.3f}s",
+                f"{trace_fields(call_id, turn_id)} "
+                f"queue_wait_ms={round(queue_wait_seconds * 1000)}",
                 flush=True,
             )
             if self._http_client is not None:
@@ -188,6 +221,8 @@ class DittoRenderClient:
                     timeout=self.config.timeout_seconds
                 ) as client:
                     response = await send(client)
+        finally:
+            render_gate.release()
 
         if response.status_code != 200:
             detail = response.text.strip().replace("\n", " ")[:500]
@@ -209,7 +244,7 @@ class DittoRenderClient:
             )
         print(
             "[DITTO_CALL] render completed: "
-            f"bytes={len(response.content)} "
+            f"{trace_fields(call_id, turn_id)} bytes={len(response.content)} "
             f"seconds={response.headers.get('x-ditto-render-seconds', 'unknown')}",
             flush=True,
         )
@@ -220,14 +255,25 @@ class FaceProfileLoader:
     def __init__(self, *, s3_client: Any | None = None) -> None:
         self._s3_client = s3_client
 
-    async def load(self, user_id: str, clone_id: int) -> FaceRenderProfile:
-        return await asyncio.to_thread(self._load, user_id, clone_id)
+    async def load(
+        self,
+        user_id: str,
+        clone_id: int,
+        *,
+        call_id: int | None = None,
+    ) -> FaceRenderProfile:
+        return await asyncio.to_thread(self._load, user_id, clone_id, call_id)
 
-    def _load(self, user_id: str, clone_id: int) -> FaceRenderProfile:
+    def _load(
+        self,
+        user_id: str,
+        clone_id: int,
+        call_id: int | None = None,
+    ) -> FaceRenderProfile:
         local_portrait = os.getenv("DITTO_CALL_LOCAL_PORTRAIT_PATH", "").strip()
         if local_portrait:
             return self._load_local(Path(local_portrait), user_id, clone_id)
-        return self._load_s3(user_id, clone_id)
+        return self._load_s3(user_id, clone_id, call_id=call_id)
 
     def _load_local(
         self,
@@ -262,7 +308,13 @@ class FaceProfileLoader:
             profile_bytes=profile_bytes,
         )
 
-    def _load_s3(self, user_id: str, clone_id: int) -> FaceRenderProfile:
+    def _load_s3(
+        self,
+        user_id: str,
+        clone_id: int,
+        *,
+        call_id: int | None = None,
+    ) -> FaceRenderProfile:
         bucket = (
             os.getenv("DITTO_CALL_S3_BUCKET")
             or os.getenv("AWS_S3_BUCKET")
@@ -326,7 +378,8 @@ class FaceProfileLoader:
         )
         print(
             "[DITTO_CALL] face profile loaded: "
-            f"user={user_id} clone_id={clone_id} key={profile_key}",
+            f"{trace_fields(call_id)} user={user_id} "
+            f"clone_id={clone_id} key={profile_key}",
             flush=True,
         )
         return FaceRenderProfile(
@@ -346,12 +399,14 @@ class DittoVideoSession:
         track: "QueuedVideoTrack",
         client: DittoRenderClient,
         profile_loader: FaceProfileLoader,
+        call_id: int | None = None,
     ) -> None:
         self.user_id = user_id
         self.clone_id = clone_id
         self.track = track
         self.client = client
         self.profile_loader = profile_loader
+        self.call_id = call_id
         self._profile: FaceRenderProfile | None = None
         self._profile_lock = asyncio.Lock()
 
@@ -363,18 +418,36 @@ class DittoVideoSession:
                 self._profile = await self.profile_loader.load(
                     self.user_id,
                     self.clone_id,
+                    call_id=self.call_id,
                 )
                 self.track.set_idle_image(self._profile.portrait_bytes)
+                print(
+                    "[DITTO_CALL] profile ready for call: "
+                    f"{trace_fields(self.call_id)} user={self.user_id} "
+                    f"clone_id={self.clone_id}",
+                    flush=True,
+                )
 
-    async def enqueue_reply(self, audio_bytes: bytes) -> None:
+    async def enqueue_reply(
+        self,
+        audio_bytes: bytes,
+        *,
+        turn_id: int | None = None,
+    ) -> None:
         await self.prepare()
         assert self._profile is not None
-        video_bytes = await self.client.render(self._profile, audio_bytes)
+        video_bytes = await self.client.render(
+            self._profile,
+            audio_bytes,
+            call_id=self.call_id,
+            turn_id=turn_id,
+        )
         self.track.enqueue_encoded_video(video_bytes)
 
 
 def create_ditto_video_session(
     *,
+    call_id: int | None = None,
     user_id: str,
     clone_id: int,
     track: "QueuedVideoTrack",
@@ -382,7 +455,8 @@ def create_ditto_video_session(
     config = DittoCallConfig.from_env()
     if config is None:
         print(
-            "[DITTO_CALL] video renderer disabled: service is not configured",
+            "[DITTO_CALL] video renderer disabled: "
+            f"{trace_fields(call_id)} service is not configured",
             flush=True,
         )
         return None
@@ -392,6 +466,7 @@ def create_ditto_video_session(
         track=track,
         client=DittoRenderClient(config),
         profile_loader=FaceProfileLoader(),
+        call_id=call_id,
     )
 
 

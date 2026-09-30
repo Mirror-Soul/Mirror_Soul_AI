@@ -241,13 +241,27 @@ Optional realtime response and voice activity detection settings:
 
 ```env
 RAG_MAX_DISTANCE=0.75
+RAG_TOP_K=6
+RAG_CONTEXT_MAX_CHARS=3000
 REALTIME_HISTORY_MAX_TURNS=8
+REALTIME_RAG_QUERY_HISTORY_TURNS=2
 LLM_MODEL=gpt-4o-mini
 LLM_TEMPERATURE=0.4
 LLM_MAX_OUTPUT_TOKENS=200
+LLM_RESPONSE_MAX_CHARS=240
+LLM_RESPONSE_MAX_SENTENCES=3
+LLM_PERSONALITY_SIGNAL_THRESHOLD=12
 LLM_REASONING_EFFORT=none
 STT_MODEL=whisper-1
 STT_LANGUAGE=ko
+REALTIME_STT_TIMEOUT_SECONDS=30
+REALTIME_CONTEXT_TIMEOUT_SECONDS=15
+REALTIME_RAG_TIMEOUT_SECONDS=10
+REALTIME_LLM_TIMEOUT_SECONDS=30
+REALTIME_TTS_TIMEOUT_SECONDS=45
+REALTIME_VIDEO_TIMEOUT_SECONDS=180
+REALTIME_UTTERANCE_MAX_QUEUE_SECONDS=20
+DITTO_CALL_QUEUE_TIMEOUT_SECONDS=90
 REALTIME_VAD_ENERGY_THRESHOLD=900
 REALTIME_VAD_SILENCE_SECONDS=0.8
 REALTIME_VAD_MIN_SPEECH_SECONDS=0.7
@@ -265,14 +279,44 @@ changes. GPT-5/6 and o-series models automatically use
 `LLM_REASONING_EFFORT` and the completion-token parameter expected by those
 models.
 
+Realtime RAG searches with the current transcript plus the latest
+`REALTIME_RAG_QUERY_HISTORY_TURNS` user turns. Assistant replies are excluded
+from the search query so a generated claim cannot become retrieval evidence.
+The prompt separates verified profile fields, direct interview answers,
+personality guidance, speech style, and weak MBTI fallback information. Big Five
+values within `LLM_PERSONALITY_SIGNAL_THRESHOLD` of 50 are treated as neutral
+and do not influence the persona. Retrieved memory text is deduplicated and
+bounded by `RAG_CONTEXT_MAX_CHARS`.
+
+Generated replies are normalized to `LLM_RESPONSE_MAX_SENTENCES` and
+`LLM_RESPONSE_MAX_CHARS`, with duplicate sentences removed. An empty provider
+response becomes a short conversational fallback. These limits reduce TTS and
+video latency while keeping realtime answers concise.
+
+Each realtime stage has an independent timeout so one external dependency does
+not leave the call pipeline stuck indefinitely. RAG timeout is a soft failure
+and the reply continues without retrieved memories. STT, member context, LLM,
+TTS, and required video failures stop only the affected turn and emit a stable
+`error_code`. Utterances older than the queue-age limit are skipped, and a full
+queue replaces its oldest item with the caller's latest speech. Ending a call
+cancels and awaits every receiver, processing, and video preparation task.
+
 Successful conversation logs:
 
 ```text
-[WEBRTC] track received: kind=audio
-[REALTIME] STT user=...: ...
-[REALTIME] LLM user=...: ...
-[REALTIME] reply audio queued
+[WEBRTC] track received: callId=81 kind=audio
+[REALTIME] STT user=... callId=81 turn=1 elapsed_ms=...: ...
+[REALTIME] RAG lookup complete: callId=81 turn=1 ... elapsed_ms=...
+[REALTIME] LLM user=... callId=81 turn=1 elapsed_ms=...: ...
+[REALTIME] TTS complete: callId=81 turn=1 ... elapsed_ms=...
+[CALL_TRACE] turn completed: callId=81 turn=1 ... total_ms=...
+[CALL_TRACE] call closed: callId=81 ... status=COMPLETED ...
 ```
+
+Every realtime stage includes the call ID and utterance sequence. The turn
+summary contains per-stage latency, while the call summary reports completed,
+failed, skipped, and cancelled turn counts. This keeps concurrent calls
+separable in `tools/realtime_call_monitor.py`.
 
 If `data/{user_id}/persona.json` exists, the realtime pipeline uses its
 personality, speech style, and ElevenLabs voice ID. Otherwise it loads the
