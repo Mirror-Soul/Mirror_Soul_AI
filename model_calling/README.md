@@ -32,6 +32,7 @@ Required video-call environment variables:
 
 ```env
 DITTO_CALL_SERVICE_URL=https://ditto.internal:8080
+DITTO_CALL_SERVICE_URLS=
 DITTO_CALL_SERVICE_API_KEY=
 DITTO_CALL_S3_BUCKET=mirrorsoul-storage-64
 DITTO_CALL_FACE_RESULT_PREFIX=face-results
@@ -62,6 +63,19 @@ DITTO_CALL_LOCAL_PROFILE_PATH=/path/to/face-profile.json
 Plain HTTP is accepted only for loopback by default. For a Tailscale,
 WireGuard, or equivalent encrypted private tunnel, set
 `DITTO_CALL_ALLOW_INSECURE_HTTP=true`; use HTTPS on other networks.
+
+For concurrent GPU rendering, set `DITTO_CALL_SERVICE_URLS` to a
+comma-separated list such as
+`http://127.0.0.1:18080,http://127.0.0.1:18081`. Each URL has one independent
+render slot, so different workers render concurrently while requests waiting
+for the same pool remain FIFO. `DITTO_CALL_SERVICE_URL` remains compatible with
+single-worker deployments. If both settings are present, duplicate URLs are
+removed and the singular URL is used as the first worker.
+
+`DITTO_CALL_PARALLEL_MAX_AUDIO_SECONDS` defaults to 8 seconds. A longer reply
+reserves every worker slot and renders alone because long Ditto sequences can
+consume most of a 24 GB GPU. Set it to `0` only after a GPU-specific benchmark
+has shown that unrestricted parallel renders are safe.
 
 The current implementation is turn-based: it waits for the complete TTS audio
 and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the

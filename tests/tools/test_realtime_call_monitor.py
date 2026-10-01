@@ -90,10 +90,15 @@ class RealtimeCallMonitorTest(unittest.TestCase):
         metadata = {
             "CALL_SERVICE": "active",
             "TUNNEL_SERVICE": "active",
+            "TUNNEL_SERVICE_2": "active",
             "CALL_HEALTH": '{"status":"ok"}',
             "DITTO_READY": (
                 '{"status":"ready","engine":{"busy":false,'
                 '"gpu":"RTX 4090","renderCount":0,"lastError":null}}'
+            ),
+            "DITTO_READY_2": (
+                '{"status":"ready","engine":{"busy":true,'
+                '"gpu":"RTX 4090","renderCount":2,"lastError":null}}'
             ),
         }
 
@@ -107,6 +112,9 @@ class RealtimeCallMonitorTest(unittest.TestCase):
         self.assertIn(f"{ANSI_GREEN}OK{ANSI_RESET}", output)
         self.assertIn(ANSI_RED, output)
         self.assertIn("FAILED", output)
+        self.assertIn("Ditto workers: 2/2 READY", output)
+        self.assertIn("Render count : 2", output)
+        self.assertIn("GPU busy     :", output)
 
     def test_render_marks_cached_call_data_as_stale(self) -> None:
         metadata = {

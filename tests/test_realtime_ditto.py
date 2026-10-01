@@ -17,7 +17,7 @@ from model_calling.realtime.ditto import (
     DittoVideoSession,
     FaceProfileLoader,
     FaceRenderProfile,
-    _get_render_gate,
+    _get_render_pool,
 )
 from model_calling.realtime.video_integrity import (
     VideoIntegrityConfig,
@@ -124,12 +124,13 @@ class _RenderClient:
 class DittoRealtimeTests(unittest.TestCase):
     def test_render_queue_timeout_has_stable_error_code(self) -> None:
         async def run() -> None:
-            gate = _get_render_gate()
-            await gate.acquire()
+            worker_urls = ("http://127.0.0.1:8080",)
+            pool = _get_render_pool(worker_urls)
+            worker = await pool.acquire(1.0)
             try:
                 client = DittoRenderClient(
                     DittoCallConfig(
-                        service_url="http://127.0.0.1:8080",
+                        service_url=worker_urls[0],
                         api_key="secret",
                         queue_timeout_seconds=0.001,
                     ),
@@ -158,7 +159,7 @@ class DittoRealtimeTests(unittest.TestCase):
                 finally:
                     await client._http_client.aclose()
             finally:
-                gate.release()
+                pool.release(worker)
 
         asyncio.run(run())
 
@@ -167,12 +168,36 @@ class DittoRealtimeTests(unittest.TestCase):
             os.environ,
             {
                 "DITTO_CALL_SERVICE_URL": "http://10.0.0.5:8080",
+                "DITTO_CALL_SERVICE_URLS": "",
                 "DITTO_CALL_SERVICE_API_KEY": "secret",
             },
             clear=False,
         ):
             with self.assertRaisesRegex(DittoRealtimeError, "require HTTPS"):
                 DittoCallConfig.from_env()
+
+    def test_config_accepts_multiple_loopback_workers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DITTO_CALL_SERVICE_URL": "",
+                "DITTO_CALL_SERVICE_URLS": (
+                    "http://127.0.0.1:18080, http://127.0.0.1:18081"
+                ),
+                "DITTO_CALL_SERVICE_API_KEY": "secret",
+            },
+            clear=False,
+        ):
+            config = DittoCallConfig.from_env()
+
+        assert config is not None
+        self.assertEqual(
+            config.worker_urls,
+            (
+                "http://127.0.0.1:18080",
+                "http://127.0.0.1:18081",
+            ),
+        )
 
     def test_render_client_sends_profile_and_returns_mp4(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -334,6 +359,128 @@ class DittoRealtimeTests(unittest.TestCase):
             asyncio.run(run()),
             [b"rendered-mp4", b"rendered-mp4"],
         )
+        self.assertEqual(max_active_requests, 1)
+
+    def test_render_client_uses_two_workers_concurrently(self) -> None:
+        active_requests = 0
+        max_active_requests = 0
+        requested_ports = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active_requests, max_active_requests
+            requested_ports.append(request.url.port)
+            active_requests += 1
+            max_active_requests = max(max_active_requests, active_requests)
+            await asyncio.sleep(0.02)
+            active_requests -= 1
+            return httpx.Response(
+                200,
+                content=b"rendered-mp4",
+                headers={"Content-Type": "video/mp4"},
+            )
+
+        async def run() -> list[bytes]:
+            transport = httpx.MockTransport(handler)
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                config = DittoCallConfig(
+                    service_url="http://127.0.0.1:18080",
+                    service_urls=(
+                        "http://127.0.0.1:18080",
+                        "http://127.0.0.1:18081",
+                    ),
+                    api_key="secret",
+                    parallel_max_audio_seconds=0,
+                    video_integrity=VideoIntegrityConfig(enabled=False),
+                )
+                clients = [
+                    DittoRenderClient(config, http_client=http_client)
+                    for _ in range(3)
+                ]
+                profile = FaceRenderProfile(
+                    portrait_bytes=b"portrait",
+                    portrait_filename="portrait.jpg",
+                    portrait_content_type="image/jpeg",
+                )
+                return await asyncio.gather(
+                    *(client.render(profile, b"audio") for client in clients)
+                )
+
+        self.assertEqual(
+            asyncio.run(run()),
+            [b"rendered-mp4", b"rendered-mp4", b"rendered-mp4"],
+        )
+        self.assertEqual(max_active_requests, 2)
+        self.assertEqual(set(requested_ports), {18080, 18081})
+
+    def test_exclusive_render_reserves_every_worker(self) -> None:
+        async def run() -> None:
+            pool = _get_render_pool(
+                (
+                    "http://127.0.0.1:18080",
+                    "http://127.0.0.1:18081",
+                )
+            )
+            reservation = await pool.acquire(1.0, slots=2)
+            try:
+                with self.assertRaises(DittoRealtimeError) as raised:
+                    await pool.acquire(0.001)
+                self.assertEqual(
+                    raised.exception.code,
+                    "DITTO_RENDER_QUEUE_TIMEOUT",
+                )
+            finally:
+                pool.release(reservation)
+
+        asyncio.run(run())
+
+    @patch(
+        "model_calling.realtime.ditto.audio_duration_seconds",
+        return_value=9.0,
+    )
+    def test_long_audio_serializes_across_worker_pool(self, _duration) -> None:
+        active_requests = 0
+        max_active_requests = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active_requests, max_active_requests
+            active_requests += 1
+            max_active_requests = max(max_active_requests, active_requests)
+            await asyncio.sleep(0.01)
+            active_requests -= 1
+            return httpx.Response(
+                200,
+                content=b"rendered-mp4",
+                headers={"Content-Type": "video/mp4"},
+            )
+
+        async def run() -> None:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http_client:
+                config = DittoCallConfig(
+                    service_url="http://127.0.0.1:18080",
+                    service_urls=(
+                        "http://127.0.0.1:18080",
+                        "http://127.0.0.1:18081",
+                    ),
+                    api_key="secret",
+                    parallel_max_audio_seconds=8,
+                    video_integrity=VideoIntegrityConfig(enabled=False),
+                )
+                clients = [
+                    DittoRenderClient(config, http_client=http_client),
+                    DittoRenderClient(config, http_client=http_client),
+                ]
+                profile = FaceRenderProfile(
+                    portrait_bytes=b"portrait",
+                    portrait_filename="portrait.jpg",
+                    portrait_content_type="image/jpeg",
+                )
+                await asyncio.gather(
+                    *(client.render(profile, b"audio") for client in clients)
+                )
+
+        asyncio.run(run())
         self.assertEqual(max_active_requests, 1)
 
     def test_local_profile_must_match_call_identity(self) -> None:
