@@ -314,6 +314,12 @@ def fetch_call_server(
         "curl -fsS --max-time 4 http://127.0.0.1:8000/health 2>/dev/null || echo unavailable; "
         "echo; printf '__DITTO_READY__='; "
         "curl -fsS --max-time 4 http://127.0.0.1:18080/ready 2>/dev/null || echo unavailable; "
+        "echo; if systemctl cat mirror-soul-ditto-tunnel-2.service >/dev/null 2>&1; then "
+        "printf '__TUNNEL_SERVICE_2__='; "
+        "systemctl is-active mirror-soul-ditto-tunnel-2.service 2>/dev/null || true; "
+        "printf '__DITTO_READY_2__='; "
+        "curl -fsS --max-time 4 http://127.0.0.1:18081/ready 2>/dev/null || echo unavailable; "
+        "echo; fi; "
         "echo; echo __LOGS__; "
         "journalctl -u mirror-soul-call.service "
         f"--since '-{since} minutes' -n {args.lines} --no-pager -o cat 2>/dev/null"
@@ -373,7 +379,16 @@ def render(
 ) -> str:
     call_health = _json_object(metadata.get("CALL_HEALTH"))
     ditto_ready = _json_object(metadata.get("DITTO_READY"))
-    engine = ditto_ready.get("engine") if isinstance(ditto_ready.get("engine"), dict) else {}
+    ditto_ready_2 = _json_object(metadata.get("DITTO_READY_2"))
+    worker_states = [ditto_ready]
+    if metadata.get("DITTO_READY_2"):
+        worker_states.append(ditto_ready_2)
+    engines = [
+        state.get("engine")
+        for state in worker_states
+        if isinstance(state.get("engine"), dict)
+    ]
+    engine = engines[0] if engines else {}
 
     server_connection = (
         "OK"
@@ -383,9 +398,14 @@ def render(
         else f"ERROR ({remote.error})"
     )
     api_status = "OK" if call_health.get("status") == "ok" else "ERROR"
-    ditto_status = "READY" if ditto_ready.get("status") == "ready" else "ERROR"
+    ready_workers = sum(state.get("status") == "ready" for state in worker_states)
+    worker_count = len(worker_states)
+    ditto_status = "READY" if ready_workers == worker_count else "ERROR"
     call_service = _service(metadata.get("CALL_SERVICE"))
     tunnel_service = _service(metadata.get("TUNNEL_SERVICE"))
+    if metadata.get("TUNNEL_SERVICE_2"):
+        tunnel_2 = _service(metadata.get("TUNNEL_SERVICE_2"))
+        tunnel_service = "OK" if tunnel_service == tunnel_2 == "OK" else "ERROR"
     signaling = snapshot.signaling_connection
     if cached:
         call_service = f"STALE ({call_service})"
@@ -393,12 +413,23 @@ def render(
         signaling = f"STALE ({signaling})"
         tunnel_service = f"STALE ({tunnel_service})"
         ditto_status = f"STALE ({ditto_status})"
-    busy = engine.get("busy")
+    busy_values = [item.get("busy") for item in engines]
+    busy = True if True in busy_values else False if busy_values else None
     busy_text = "YES" if busy is True else "NO" if busy is False else "UNKNOWN"
     busy_style = ANSI_YELLOW if busy is True else ANSI_GREEN if busy is False else ANSI_YELLOW
-    last_render = engine.get("lastRenderSeconds")
+    last_renders = [
+        item.get("lastRenderSeconds")
+        for item in engines
+        if item.get("lastRenderSeconds") is not None
+    ]
+    last_render = max(last_renders) if last_renders else None
     last_render_text = f"{last_render}s" if last_render is not None else "-"
-    last_error = engine.get("lastError") or "none"
+    errors = [item.get("lastError") for item in engines if item.get("lastError")]
+    last_error = "; ".join(str(error) for error in errors) or "none"
+    render_count = sum(
+        int(item.get("renderCount") or 0)
+        for item in engines
+    )
     error_style = ANSI_GREEN if last_error == "none" else ANSI_RED + ANSI_BOLD
 
     lines = [
@@ -417,9 +448,10 @@ def render(
         f"Signaling    : {_colored_status(signaling, color)}",
         f"Ditto tunnel : {_colored_status(tunnel_service, color)}",
         f"Ditto GPU    : {_colored_status(ditto_status, color)}",
+        f"Ditto workers: {ready_workers}/{worker_count} READY",
         f"GPU model    : {engine.get('gpu', '-')}",
         f"GPU busy     : {_paint(busy_text, busy_style, color)}",
-        f"Render count : {engine.get('renderCount', '-')}  "
+        f"Render count : {render_count}  "
         f"last={last_render_text}",
         f"Last error   : {_paint(str(last_error), error_style, color)}",
         "",

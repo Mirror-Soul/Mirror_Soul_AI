@@ -207,6 +207,11 @@ def _audio_duration(audio_bytes: bytes) -> float:
     return duration
 
 
+def audio_duration_seconds(audio_bytes: bytes) -> float:
+    """Return decoded audio duration for render admission decisions."""
+    return _audio_duration(audio_bytes)
+
+
 def _video_duration(
     container,
     stream,

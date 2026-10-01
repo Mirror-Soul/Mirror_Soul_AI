@@ -1,6 +1,6 @@
 # 신규 회원 통합 테스트 준비 및 실행 체크리스트
 
-최종 확인 기준: 2026-09-28 (Asia/Seoul)
+최종 확인 기준: 2026-09-30 (Asia/Seoul)
 
 이 문서는 신규 회원가입부터 RAG 프로필, 음성 복제, 얼굴 프로필, 클론 준비 완료,
 영상 통화까지 검증하기 전에 필요한 준비 작업을 실행 순서대로 정리한 문서입니다.
@@ -16,7 +16,7 @@
 | AWS AI API | `active`, API 응답 정상 | 내일 시작 전 상태만 재확인 |
 | AWS 음성 워커 | `active` | 음성 코드 변경 시 재시작 |
 | GPU 연결·메모리 | 접속 정상, RTX 4090 약 24GB 중 약 3.4GB 사용 | 예약 시간과 SSH 포트 재확인 |
-| GPU Ditto 서비스 | `ditto-service` 실행, `/ready` 정상 | 예약 종료 후에는 시작 스크립트 재실행 |
+| GPU Ditto 서비스 | `ditto-service-1`, `ditto-service-2` 실행 | 예약 종료 후에는 시작 스크립트 재실행 |
 | GPU 얼굴 워커 | `face-worker` 실행, production 대기 중 | 예약 종료 후에는 시작 스크립트 재실행 |
 | 얼굴 요청·결과 SQS URL | GPU 환경에 설정됨 | 실제 값을 출력하지 말고 유지 |
 | `ffmpeg`·`ffprobe` | GPU 환경에 절대경로 설정됨 | 기존 설정 유지 |
@@ -52,7 +52,7 @@ exit
 ### 0.2 GPU AI 서비스 일괄 시작
 
 로컬 Windows PowerShell 또는 CMD에서 실행합니다. 이 스크립트는 사전 점검을 수행한 뒤
-`ditto-service`와 `face-worker`가 없을 때만 시작하고, Ditto `/ready`까지 기다립니다.
+두 Ditto 워커와 `face-worker`가 없을 때만 시작하고, 모든 Ditto `/ready`까지 기다립니다.
 
 ```powershell
 ssh -i "$env:USERPROFILE\.ssh\mirrorsoul_gpu_vscode_ed25519" -p 40053 mirrorsoul@203.249.75.55 "bash /shareHost/C084003-ai/start-ai-services.sh"
@@ -64,7 +64,7 @@ CMD에서는 다음 명령을 사용합니다.
 ssh -i "%USERPROFILE%\.ssh\mirrorsoul_gpu_vscode_ed25519" -p 40053 mirrorsoul@203.249.75.55 "bash /shareHost/C084003-ai/start-ai-services.sh"
 ```
 
-출력에서 사전 점검 성공, Ditto 준비 완료, `ditto-service`와 `face-worker` 세션 실행을
+출력에서 사전 점검 성공, Ditto 준비 완료, `ditto-service-1`, `ditto-service-2`와 `face-worker` 세션 실행을
 확인합니다.
 
 ### 0.3 AWS 통화 서버의 Ditto 터널 재시작
@@ -73,6 +73,7 @@ GPU 컨테이너를 다시 시작한 경우 터널도 재시작합니다.
 
 ```powershell
 ssh -i "E:\Mirror_Soul_AI\mirrorsoul-call-key.pem" ec2-user@43.202.181.134 "sudo systemctl restart mirror-soul-ditto-tunnel.service"
+ssh -i "E:\Mirror_Soul_AI\mirrorsoul-call-key.pem" ec2-user@43.202.181.134 "sudo systemctl restart mirror-soul-ditto-tunnel-2.service"
 ```
 
 ### 0.4 로컬 VS Code에 모니터 두 개 실행
@@ -448,7 +449,7 @@ chmod 600 /shareHost/C084003-ai/.env.ditto-service
 ## 8. GPU Ditto 렌더 서비스 실행
 
 권장 방법은 0.2절의 `/shareHost/C084003-ai/start-ai-services.sh`를 실행하는 것입니다.
-이 스크립트가 사전 점검, Ditto 시작, `/ready` 대기, 얼굴 워커 시작을 한 번에 처리합니다.
+이 스크립트가 사전 점검, Ditto 워커 풀 시작, 각 `/ready` 대기, 얼굴 워커 시작을 한 번에 처리합니다.
 아래 명령은 일괄 시작 스크립트가 실패했을 때 수동으로 확인하기 위한 절차입니다.
 
 기존 세션을 먼저 확인합니다.
@@ -457,17 +458,24 @@ chmod 600 /shareHost/C084003-ai/.env.ditto-service
 tmux ls
 ```
 
-`ditto-service` 세션이 없을 때만 다음 명령으로 시작합니다.
+GPU 환경 파일에는 다음 값을 유지합니다. RTX 4090 실측 결과 운영 기본값은 2개입니다.
+
+```env
+DITTO_SERVICE_WORKERS=2
+DITTO_SERVICE_BASE_PORT=8080
+```
+
+기존 단일 `ditto-service` 세션이 없어야 하며, 다음 명령으로 워커 풀을 시작합니다.
 
 ```bash
-mkdir -p /shareHost/C084003-ai/logs
-tmux new-session -d -s ditto-service "bash /shareHost/C084003-ai/run-ditto-service.sh >> /shareHost/C084003-ai/logs/ditto-service.log 2>&1"
+bash /shareHost/C084003-ai/Mirror_Soul_AI/tools/gpu/start-ditto-worker-pool.sh
 ```
 
 모델 로드에 RTX 4090 기준 약 25~30초가 걸립니다. 로그를 확인합니다.
 
 ```bash
-tail -f /shareHost/C084003-ai/logs/ditto-service.log
+tail -f /shareHost/C084003-ai/logs/ditto-service-1.log
+tail -f /shareHost/C084003-ai/logs/ditto-service-2.log
 ```
 
 `Ctrl+C`로 로그 보기만 종료한 뒤 헬스체크를 실행합니다. GPU 컨테이너에는 `curl`이
@@ -476,6 +484,8 @@ tail -f /shareHost/C084003-ai/logs/ditto-service.log
 ```bash
 wget -qO- http://127.0.0.1:8080/health
 wget -qO- http://127.0.0.1:8080/ready
+wget -qO- http://127.0.0.1:8081/health
+wget -qO- http://127.0.0.1:8081/ready
 ```
 
 `/ready`가 성공하기 전에는 얼굴 워커의 점수 미리보기나 영상 통화를 시작하지 않습니다.
@@ -526,6 +536,7 @@ ssh -i "E:\Mirror_Soul_AI\mirrorsoul-call-key.pem" ec2-user@43.202.181.134
 ```bash
 systemctl is-active mirror-soul-call.service
 systemctl is-active mirror-soul-ditto-tunnel.service
+systemctl is-active mirror-soul-ditto-tunnel-2.service
 ```
 
 꺼져 있으면 시작하고, GPU 컨테이너를 새로 시작했다면 터널을 재시작합니다.
@@ -533,6 +544,7 @@ systemctl is-active mirror-soul-ditto-tunnel.service
 ```bash
 sudo systemctl start mirror-soul-call.service
 sudo systemctl restart mirror-soul-ditto-tunnel.service
+sudo systemctl restart mirror-soul-ditto-tunnel-2.service
 ```
 
 통화 서버와 GPU Ditto 연결을 확인합니다.
@@ -541,12 +553,14 @@ sudo systemctl restart mirror-soul-ditto-tunnel.service
 curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:18080/health
 curl -fsS http://127.0.0.1:18080/ready
+curl -fsS http://127.0.0.1:18081/health
+curl -fsS http://127.0.0.1:18081/ready
 ```
 
 `18080` 헬스체크가 실패하면 다음 순서로 확인합니다.
 
-1. GPU의 `ditto-service` tmux 세션이 실행 중인지 확인
-2. GPU 로컬 `127.0.0.1:8080/ready` 확인
+1. GPU의 `ditto-service-1`, `ditto-service-2` tmux 세션이 실행 중인지 확인
+2. GPU 로컬 `127.0.0.1:8080/ready`, `127.0.0.1:8081/ready` 확인
 3. 컨테이너 SSH 포트가 현재도 `40053`인지 확인
 4. `mirror-soul-ditto-tunnel.service`의 SSH 포트 설정 확인 및 재시작
 

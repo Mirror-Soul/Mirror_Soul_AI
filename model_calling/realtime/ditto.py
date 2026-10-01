@@ -17,6 +17,7 @@ from model_calling.realtime.trace import trace_fields
 from model_calling.realtime.video_integrity import (
     VideoIntegrityConfig,
     VideoIntegrityError,
+    audio_duration_seconds,
     validate_rendered_video,
 )
 
@@ -28,8 +29,9 @@ PROFILE_MAX_BYTES = 128 * 1024
 PORTRAIT_MAX_BYTES = 10 * 1024 * 1024
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
-_render_gate: asyncio.Lock | None = None
-_render_gate_loop: asyncio.AbstractEventLoop | None = None
+_render_pool: _DittoRenderPool | None = None
+_render_pool_loop: asyncio.AbstractEventLoop | None = None
+_render_pool_urls: tuple[str, ...] = ()
 
 
 class DittoRealtimeError(RuntimeError):
@@ -38,43 +40,103 @@ class DittoRealtimeError(RuntimeError):
         self.code = code
 
 
+class _DittoRenderPool:
+    def __init__(self, service_urls: tuple[str, ...]) -> None:
+        self.service_urls = service_urls
+        self._available: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
+        for index, service_url in enumerate(service_urls):
+            self._available.put_nowait((index, service_url))
+        self._admission_lock = asyncio.Lock()
+
+    @property
+    def worker_count(self) -> int:
+        return len(self.service_urls)
+
+    @property
+    def all_busy(self) -> bool:
+        return self._available.empty()
+
+    async def acquire(
+        self,
+        timeout_seconds: float,
+        *,
+        slots: int = 1,
+    ) -> tuple[tuple[int, str], ...]:
+        if slots <= 0 or slots > self.worker_count:
+            raise ValueError("Requested Ditto render slots are invalid.")
+        deadline = time.monotonic() + timeout_seconds
+        acquired: list[tuple[int, str]] = []
+        try:
+            await asyncio.wait_for(
+                self._admission_lock.acquire(),
+                timeout=_remaining_seconds(deadline),
+            )
+            try:
+                for _ in range(slots):
+                    acquired.append(
+                        await asyncio.wait_for(
+                            self._available.get(),
+                            timeout=_remaining_seconds(deadline),
+                        )
+                    )
+            finally:
+                self._admission_lock.release()
+            return tuple(acquired)
+        except TimeoutError as exc:
+            for worker in acquired:
+                self._available.put_nowait(worker)
+            raise DittoRealtimeError(
+                "Ditto render queue wait exceeded "
+                f"{timeout_seconds:.1f} seconds.",
+                code="DITTO_RENDER_QUEUE_TIMEOUT",
+            ) from exc
+        except BaseException:
+            for worker in acquired:
+                self._available.put_nowait(worker)
+            raise
+
+    def release(self, workers: tuple[tuple[int, str], ...]) -> None:
+        for worker in workers:
+            self._available.put_nowait(worker)
+
+
 @dataclass(frozen=True)
 class DittoCallConfig:
     service_url: str
     api_key: str
+    service_urls: tuple[str, ...] = ()
     timeout_seconds: float = 300.0
     max_response_bytes: int = 100 * 1024 * 1024
     retry_attempts: int = 6
     retry_base_seconds: float = 1.0
     queue_timeout_seconds: float = 90.0
+    parallel_max_audio_seconds: float = 8.0
     video_integrity: VideoIntegrityConfig = VideoIntegrityConfig()
+
+    @property
+    def worker_urls(self) -> tuple[str, ...]:
+        return self.service_urls or (self.service_url,)
 
     @classmethod
     def from_env(cls) -> "DittoCallConfig | None":
         service_url = os.getenv("DITTO_CALL_SERVICE_URL", "").strip()
+        service_urls_value = os.getenv("DITTO_CALL_SERVICE_URLS", "").strip()
         api_key = os.getenv("DITTO_CALL_SERVICE_API_KEY", "").strip()
-        if not service_url and not api_key:
+        service_urls = _parse_service_urls(service_urls_value)
+        if service_url:
+            service_urls = _deduplicate((service_url, *service_urls))
+        if not service_urls and not api_key:
             return None
-        if not service_url or not api_key:
+        if not service_urls or not api_key:
             raise DittoRealtimeError(
-                "DITTO_CALL_SERVICE_URL and DITTO_CALL_SERVICE_API_KEY "
-                "must be configured together."
+                "A Ditto call service URL and DITTO_CALL_SERVICE_API_KEY "
+                "must be configured together. Set DITTO_CALL_SERVICE_URL or "
+                "DITTO_CALL_SERVICE_URLS."
             )
 
-        parsed = urlparse(service_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise DittoRealtimeError("DITTO_CALL_SERVICE_URL is invalid.")
-        is_loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-        if (
-            parsed.scheme == "http"
-            and not is_loopback
-            and not _env_bool("DITTO_CALL_ALLOW_INSECURE_HTTP", False)
-        ):
-            raise DittoRealtimeError(
-                "Non-loopback Ditto connections require HTTPS or an explicit "
-                "DITTO_CALL_ALLOW_INSECURE_HTTP=true override for an encrypted "
-                "private tunnel."
-            )
+        service_urls = tuple(url.rstrip("/") for url in service_urls)
+        for configured_url in service_urls:
+            _validate_service_url(configured_url)
 
         timeout_seconds = _env_float("DITTO_CALL_TIMEOUT_SECONDS", 300.0)
         max_response_bytes = _env_int(
@@ -90,24 +152,31 @@ class DittoCallConfig:
             "DITTO_CALL_QUEUE_TIMEOUT_SECONDS",
             90.0,
         )
+        parallel_max_audio_seconds = _env_float(
+            "DITTO_CALL_PARALLEL_MAX_AUDIO_SECONDS",
+            8.0,
+        )
         if (
             timeout_seconds <= 0
             or max_response_bytes <= 0
             or retry_attempts <= 0
             or retry_base_seconds < 0
             or queue_timeout_seconds <= 0
+            or parallel_max_audio_seconds < 0
         ):
             raise DittoRealtimeError(
                 "Ditto call limits and retry settings are invalid."
             )
         return cls(
-            service_url=service_url.rstrip("/"),
+            service_url=service_urls[0],
             api_key=api_key,
+            service_urls=service_urls,
             timeout_seconds=timeout_seconds,
             max_response_bytes=max_response_bytes,
             retry_attempts=retry_attempts,
             retry_base_seconds=retry_base_seconds,
             queue_timeout_seconds=queue_timeout_seconds,
+            parallel_max_audio_seconds=parallel_max_audio_seconds,
             video_integrity=VideoIntegrityConfig.from_env(),
         )
 
@@ -155,81 +224,99 @@ class DittoRenderClient:
                 "application/json",
             )
 
-        async def send(client: httpx.AsyncClient) -> httpx.Response:
-            response = None
-            for attempt in range(1, self.config.retry_attempts + 1):
-                try:
-                    response = await client.post(
-                        f"{self.config.service_url}/api/v1/render",
-                        headers={"X-Ditto-Api-Key": self.config.api_key},
-                        files=files,
-                    )
-                except httpx.HTTPError as exc:
-                    if attempt >= self.config.retry_attempts:
-                        raise DittoRealtimeError(
-                            f"Ditto render request failed: {exc}"
-                        ) from exc
-                    delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
-                    print(
-                        "[DITTO_CALL] transport error; retrying render: "
-                        f"{trace_fields(call_id, turn_id)} attempt={attempt} "
-                        f"delay={delay:.2f}s error={exc!r}",
-                        flush=True,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                if response.status_code not in RETRYABLE_STATUS_CODES:
-                    return response
-                if attempt < self.config.retry_attempts:
-                    delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
-                    print(
-                        "[DITTO_CALL] renderer unavailable; retrying render: "
-                        f"{trace_fields(call_id, turn_id)} "
-                        f"status={response.status_code} attempt={attempt} "
-                        f"delay={delay:.2f}s",
-                        flush=True,
-                    )
-                    await asyncio.sleep(delay)
-            assert response is not None
-            return response
-
-        render_gate = _get_render_gate()
+        render_pool = _get_render_pool(self.config.worker_urls)
+        reserved_slots = 1
+        expected_audio_duration = 0.0
+        if (
+            render_pool.worker_count > 1
+            and self.config.parallel_max_audio_seconds > 0
+        ):
+            try:
+                expected_audio_duration = await asyncio.to_thread(
+                    audio_duration_seconds,
+                    audio_bytes,
+                )
+            except VideoIntegrityError as exc:
+                raise DittoRealtimeError(str(exc), code=exc.code) from exc
+            if expected_audio_duration > self.config.parallel_max_audio_seconds:
+                reserved_slots = render_pool.worker_count
         queued_at = time.monotonic()
-        if render_gate.locked():
+        if render_pool.all_busy:
             print(
                 "[DITTO_CALL] render queued behind another call: "
-                f"{trace_fields(call_id, turn_id)}",
+                f"{trace_fields(call_id, turn_id)} "
+                f"workers={render_pool.worker_count}",
                 flush=True,
             )
-        try:
-            await asyncio.wait_for(
-                render_gate.acquire(),
-                timeout=self.config.queue_timeout_seconds,
+        response: httpx.Response | None = None
+        last_transport_error: httpx.HTTPError | None = None
+        for attempt in range(1, self.config.retry_attempts + 1):
+            workers = await render_pool.acquire(
+                self.config.queue_timeout_seconds,
+                slots=reserved_slots,
             )
-        except TimeoutError as exc:
-            queue_wait_seconds = time.monotonic() - queued_at
-            raise DittoRealtimeError(
-                "Ditto render queue wait exceeded "
-                f"{self.config.queue_timeout_seconds:.1f} seconds.",
-                code="DITTO_RENDER_QUEUE_TIMEOUT",
-            ) from exc
-        try:
+            worker_index, service_url = workers[0]
             queue_wait_seconds = time.monotonic() - queued_at
             print(
                 "[DITTO_CALL] render slot acquired: "
                 f"{trace_fields(call_id, turn_id)} "
+                f"worker={worker_index + 1}/{render_pool.worker_count} "
+                f"reserved_slots={reserved_slots} "
+                f"audio_seconds={expected_audio_duration:.3f} "
                 f"queue_wait_ms={round(queue_wait_seconds * 1000)}",
                 flush=True,
             )
-            if self._http_client is not None:
-                response = await send(self._http_client)
+            try:
+                if self._http_client is not None:
+                    response = await self._send_once(
+                        self._http_client,
+                        service_url,
+                        files,
+                    )
+                else:
+                    async with httpx.AsyncClient(
+                        timeout=self.config.timeout_seconds
+                    ) as client:
+                        response = await self._send_once(
+                            client,
+                            service_url,
+                            files,
+                        )
+                last_transport_error = None
+            except httpx.HTTPError as exc:
+                last_transport_error = exc
+                response = None
+            finally:
+                render_pool.release(workers)
+
+            retryable = (
+                response is None
+                or response.status_code in RETRYABLE_STATUS_CODES
+            )
+            if not retryable or attempt >= self.config.retry_attempts:
+                break
+            delay = self.config.retry_base_seconds * (2 ** (attempt - 1))
+            if response is None:
+                print(
+                    "[DITTO_CALL] transport error; retrying render: "
+                    f"{trace_fields(call_id, turn_id)} attempt={attempt} "
+                    f"delay={delay:.2f}s error={last_transport_error!r}",
+                    flush=True,
+                )
             else:
-                async with httpx.AsyncClient(
-                    timeout=self.config.timeout_seconds
-                ) as client:
-                    response = await send(client)
-        finally:
-            render_gate.release()
+                print(
+                    "[DITTO_CALL] renderer unavailable; retrying render: "
+                    f"{trace_fields(call_id, turn_id)} "
+                    f"status={response.status_code} attempt={attempt} "
+                    f"delay={delay:.2f}s",
+                    flush=True,
+                )
+            await asyncio.sleep(delay)
+
+        if response is None:
+            raise DittoRealtimeError(
+                f"Ditto render request failed: {last_transport_error}"
+            ) from last_transport_error
 
         if response.status_code != 200:
             detail = response.text.strip().replace("\n", " ")[:500]
@@ -277,6 +364,18 @@ class DittoRenderClient:
             flush=True,
         )
         return response.content
+
+    async def _send_once(
+        self,
+        client: httpx.AsyncClient,
+        service_url: str,
+        files: dict[str, tuple[str, bytes, str]],
+    ) -> httpx.Response:
+        return await client.post(
+            f"{service_url}/api/v1/render",
+            headers={"X-Ditto-Api-Key": self.config.api_key},
+            files=files,
+        )
 
 
 class FaceProfileLoader:
@@ -604,10 +703,48 @@ def _env_int(name: str, default: int) -> int:
         raise DittoRealtimeError(f"{name} must be an integer.") from exc
 
 
-def _get_render_gate() -> asyncio.Lock:
-    global _render_gate, _render_gate_loop
+def _get_render_pool(service_urls: tuple[str, ...]) -> _DittoRenderPool:
+    global _render_pool, _render_pool_loop, _render_pool_urls
     loop = asyncio.get_running_loop()
-    if _render_gate is None or _render_gate_loop is not loop:
-        _render_gate = asyncio.Lock()
-        _render_gate_loop = loop
-    return _render_gate
+    if (
+        _render_pool is None
+        or _render_pool_loop is not loop
+        or _render_pool_urls != service_urls
+    ):
+        _render_pool = _DittoRenderPool(service_urls)
+        _render_pool_loop = loop
+        _render_pool_urls = service_urls
+    return _render_pool
+
+
+def _parse_service_urls(value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return _deduplicate(
+        tuple(item.strip() for item in value.split(",") if item.strip())
+    )
+
+
+def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+def _validate_service_url(service_url: str) -> None:
+    parsed = urlparse(service_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise DittoRealtimeError("A configured Ditto call service URL is invalid.")
+    is_loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if (
+        parsed.scheme == "http"
+        and not is_loopback
+        and not _env_bool("DITTO_CALL_ALLOW_INSECURE_HTTP", False)
+    ):
+        raise DittoRealtimeError(
+            "Non-loopback Ditto connections require HTTPS or an explicit "
+            "DITTO_CALL_ALLOW_INSECURE_HTTP=true override for an encrypted "
+            "private tunnel."
+        )
+
+
+def _remaining_seconds(deadline: float) -> float:
+    return max(0.001, deadline - time.monotonic())
