@@ -297,12 +297,15 @@ CLONE_TRAINING_CALLBACK_BASE_URL=http://10.0.1.49:8080
 CLONE_TRAINING_CALLBACK_SECRET=
 ```
 
-비밀값은 `.env`에만 저장하고 로그, 문서, Git에는 기록하지 않는다. 콜백 실패 시
-프로필 API도 실패로 응답한다. RAG 프로필은 동일 문서 ID로 upsert되므로 요청을
-재시도해도 중복 문서가 생성되지 않는다. 프로필 요청에 포함된 유효한 인터뷰
-질문·답변은 요약 문서와 별도의 검색 가능한 기억 문서로 함께 저장한다. 재학습 시
-현재 요청에 없는 이전 인터뷰 기억은 제거하되 `/training/samples`로 독립 저장한
-문서는 건드리지 않는다.
+비밀값은 `.env`에만 저장하고 로그, 문서, Git에는 기록하지 않는다. 콜백은 RAG 저장이
+끝난 뒤에만 호출되며, 콜백 실패 시 프로필 API도 실패로 응답한다.
+
+RAG 저장은 `model_training/services.py`의 `upsert_rag_documents()` 하나로 통일되어 있다.
+`/training/profiles`와 `/training/samples` 모두 `{userId}:{sourceType}:{sourceId}` 결정적 ID로
+upsert하므로 재시도하거나 두 경로로 같은 인터뷰를 보내도 중복 문서가 생기지 않는다.
+재학습 시 같은 profileKey에서 프로필 동기화가 소유한 이전 인터뷰만 제거하고,
+`/training/samples`로만 저장된 문서는 건드리지 않는다. 문서 규격, 검색 규칙, 기존 데이터
+마이그레이션은 [docs/rag-memory-structure.md](../docs/rag-memory-structure.md)를 참고한다.
 
 GPU 얼굴 워커 전용 의존성은 다음과 같이 설치한다.
 

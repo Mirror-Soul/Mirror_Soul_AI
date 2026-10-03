@@ -34,6 +34,8 @@ def add_training_sample(request: TrainingSampleRequest):
         mbti=request.mbti,
         description=request.description,
         audio_url=request.audioUrl,
+        source_id=request.sourceId,
+        clone_id=request.cloneId,
     )
 
     return TrainingSampleResponse(
@@ -58,14 +60,21 @@ def add_member_profile(request: MemberProfileRequest):
         flush=True,
     )
     try:
+        # The completion callback must only run after the RAG write (upsert and
+        # stale cleanup) has fully succeeded.
         result = add_member_profile_to_rag(
             user_id=request.userId,
             ai_profile_id=request.aiProfileId,
+            clone_id=request.cloneId,
+            name=request.name,
+            nickname=request.nickname,
             age=request.age,
             gender=request.gender,
             mbti=request.mbti,
+            job=request.job,
             description=request.description,
             interests=request.interests,
+            values=request.values,
             interview_topics=request.interviewTopics,
             interview_samples=interview_samples,
             keyword_limit=request.keywordLimit,
@@ -90,6 +99,8 @@ def add_member_profile(request: MemberProfileRequest):
         f"profile_score={profile_quality.get('profileScore')} "
         f"data_reliability={profile_quality.get('dataReliabilityScore')} "
         f"penalty={profile_quality.get('penaltyScore', 0.0)} "
+        f"documents={result.get('documentCount')} "
+        f"removed={result.get('removedDocumentCount')} "
         f"callback_sent={callback_sent}",
         flush=True,
     )
