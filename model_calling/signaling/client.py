@@ -33,7 +33,7 @@ async def signaling_loop():
                     message = json.loads(raw_message)
                     print("[SIGNALING] received:", message)
 
-                    # CALL_INVITE 수신 시 RDS에서 클론 정보를 조회한 뒤 ACCEPT/REJECT를 응답한다.
+                    # CALL_INVITE 수신 시 백엔드 컨텍스트 API를 조회해 ACCEPT/REJECT를 응답한다.
                     await handle_signaling_message(ws, message)
 
         except Exception as e:

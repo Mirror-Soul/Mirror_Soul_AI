@@ -6,10 +6,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
 
-from model_calling.repository.clone_repository import (
-    CloneRepositoryError,
-    find_member_runtime_profile,
-)
 from model_calling.schemas import PersonalityProfile, SpeechProfile
 from model_calling.services import (
     build_memory_search_query,
@@ -21,10 +17,10 @@ from model_calling.utils import load_user_persona
 from model_calling.realtime.audio import QueuedAudioTrack, receive_utterances
 from model_calling.realtime.ditto import DittoVideoSession
 from model_calling.realtime.trace import CallTrace, trace_fields
+from model_calling.webrtc.session import get_call_context
 from model_training.base_profiles import get_mbti_base_profile
 from model_training.services import search_user_memories
 from shared.config import settings
-from shared.clone_voice import find_active_clone_voice
 
 
 T = TypeVar("T")
@@ -184,6 +180,32 @@ async def load_runtime_context(
     call_id: int | None = None,
     turn_id: int | None = None,
 ) -> tuple[dict[str, Any], PersonalityProfile, SpeechProfile, str | None]:
+    if call_id is None:
+        raise RealtimePipelineError(
+            "CONTEXT",
+            "CALL_CONTEXT_MISSING",
+            "callId is required for runtime context.",
+        )
+    context = get_call_context(call_id)
+    if context is None:
+        raise RealtimePipelineError(
+            "CONTEXT",
+            "CALL_CONTEXT_MISSING",
+            "Call context is not registered.",
+        )
+    if context.clone.userUuid != user_id:
+        raise RealtimePipelineError(
+            "CONTEXT",
+            "CALL_CONTEXT_MISMATCH",
+            "Call user does not match registered context.",
+        )
+    if context.clone.cloneId != clone_id:
+        raise RealtimePipelineError(
+            "CONTEXT",
+            "CALL_CONTEXT_MISMATCH",
+            "Clone ID does not match registered context.",
+        )
+
     local_persona = _load_local_persona(
         user_id,
         call_id=call_id,
@@ -197,47 +219,22 @@ async def load_runtime_context(
         speech = SpeechProfile(
             **{
                 **_model_data(stored_speech),
-                "voice_id": None,
+                "voice_id": context.clone.voice.voiceId,
             }
         )
     else:
-        profile = await asyncio.to_thread(find_member_runtime_profile, user_id)
-        print(
-            "[REALTIME] loaded runtime profile from RDS: "
-            f"{trace_fields(call_id, turn_id)} user={user_id} "
-            f"mbti={profile.mbti or 'none'}",
-            flush=True,
-        )
+        persona = context.clone.persona
         user_persona = {
-            "name": profile.name or "회원",
-            "age": _calculate_age(profile.birth_date),
-            "gender": profile.gender,
-            "occupation": profile.job_description or profile.job,
-            "core_values": profile.self_introduction,
-            "mbti": profile.mbti,
+            "name": persona.name or "회원",
+            "age": _calculate_age(persona.birthDate),
+            "gender": persona.gender,
+            "occupation": persona.jobDescription or persona.job,
+            "core_values": persona.selfIntroduction,
+            "mbti": persona.mbti,
         }
-        personality = _default_personality(profile.mbti)
-        speech = _default_speech(user_id)
-        mbti = profile.mbti
-
-    voice_profile = await asyncio.to_thread(
-        find_active_clone_voice,
-        user_id,
-        expected_clone_id=clone_id,
-    )
-    print(
-        "[REALTIME] active member voice resolved: "
-        f"{trace_fields(call_id, turn_id)} user={user_id} "
-        f"clone_id={voice_profile.clone_id} "
-        f"job_id={voice_profile.voice_training_job_id or 'none'}",
-        flush=True,
-    )
-    speech = SpeechProfile(
-        **{
-            **_model_data(speech),
-            "voice_id": voice_profile.elevenlabs_voice_id,
-        }
-    )
+        personality = _default_personality(persona.mbti)
+        speech = _default_speech(user_id, context.clone.voice.voiceId)
+        mbti = persona.mbti
 
     return (
         user_persona,
@@ -673,20 +670,6 @@ async def start_realtime_audio(
                     flush=True,
                 )
                 raise
-            except CloneRepositoryError as exc:
-                error_code = "CONTEXT_PROFILE_NOT_FOUND"
-                error = f"{error_code}: {_single_line(exc)}"
-                trace.finish_turn(turn_id, "FAILED", error=error)
-                print(
-                    f"[REALTIME] member profile lookup failed: {fields} "
-                    f"user={user_id} error_code={error_code} error={error}",
-                    flush=True,
-                )
-                print(
-                    f"[CALL_TRACE] turn failed: {fields} user={user_id} "
-                    f"stage={stage} error_code={error_code} error={error}",
-                    flush=True,
-                )
             except Exception as exc:
                 error_code = getattr(exc, "code", "PIPELINE_FAILED")
                 error_stage = getattr(exc, "stage", stage)

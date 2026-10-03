@@ -8,6 +8,15 @@ class Settings:
     OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
     ELEVENLABS_API_KEY: str | None = os.getenv("ELEVENLABS_API_KEY")
 
+    BACKEND_API_BASE_URL: str = os.getenv(
+        "BACKEND_API_BASE_URL",
+        "",
+    ).strip()
+    AI_INTERNAL_API_KEY: str = os.getenv("AI_INTERNAL_API_KEY", "").strip()
+    BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS: float = float(
+        os.getenv("BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS", "5")
+    )
+
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     RAG_DB_PATH: str = os.getenv("RAG_DB_PATH", "./rag_store/chroma")
     RAG_COLLECTION_NAME: str = os.getenv(
