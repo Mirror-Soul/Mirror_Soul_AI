@@ -133,7 +133,7 @@ Last error   : none
 
 | 구성요소 | 실행 위치 | 정상 기준 |
 | --- | --- | --- |
-| 백엔드 API·결과 소비자 | AWS API 서버 | 회원가입 요청 발행, 얼굴 결과 소비, 클론 상태 갱신 |
+| 백엔드 API·결과 소비자 | AWS API 서버 | 회원가입 요청 발행, 얼굴·음성 결과 소비, 클론 상태 갱신 |
 | AI API·RAG | AWS AI 서버 | `mirrorsoul-ai.service`가 `active` |
 | 음성 학습 워커 | AWS AI 서버 | `mirrorsoul-voice-worker.service`가 `active` |
 | Ditto 렌더 서비스 | 학교 GPU 컨테이너 | `ditto-service` tmux 세션과 `/ready` 정상 |
@@ -156,6 +156,9 @@ Ditto 서비스를 실행하지 않으면 얼굴 점수용 미리보기와 영�
 
 - AWS API 인스턴스와 백엔드 서비스가 실행 중인지
 - `FACE_RESULT_CONSUMER_ENABLED=true`인지
+- 음성 요청에 비어 있지 않은 `audioObjectKeys`가 포함되는지
+- 음성 결과 큐 소비자가 `VOICE_TRAINING_STATUS`를 처리하고 음성 프로필·점수를 저장하는지
+- AWS AI 서버가 음성 결과 큐에 `sqs:SendMessage`할 수 있는지
 - `RAG_PROFILE_ENABLED=true`인지
 - 백엔드가 인터뷰 저장 후 `POST /api/v1/training/profiles`를 호출하는지
 - 위 요청에 올바른 `cloneId`와 회원 UUID가 포함되는지
@@ -259,7 +262,7 @@ git log -1 --oneline
 비밀값을 출력하지 않고 필수 키가 설정되어 있는지만 확인합니다.
 
 ```bash
-for key in OPENAI_API_KEY ELEVENLABS_API_KEY AWS_SQS_VOICE_TRAINING_QUEUE_URL CLONE_TRAINING_CALLBACK_BASE_URL CLONE_TRAINING_CALLBACK_SECRET; do
+for key in OPENAI_API_KEY ELEVENLABS_API_KEY AWS_SQS_VOICE_TRAINING_QUEUE_URL AWS_SQS_VOICE_TRAINING_RESULT_QUEUE_URL CLONE_TRAINING_CALLBACK_BASE_URL CLONE_TRAINING_CALLBACK_SECRET; do
   if grep -q "^${key}=.\+" .env; then echo "${key}=SET"; else echo "${key}=MISSING"; fi
 done
 ```
@@ -810,6 +813,7 @@ AWS 서버는 다른 팀원이 사용할 수 있으므로 별도 합의 없이 �
 - [ ] AWS AI·Call 서버와 GPU 저장소의 배포 버전 확인
 - [ ] AWS API·AI·Call 인스턴스 실행 및 상태 검사 통과
 - [ ] 백엔드 결과 소비자와 RAG 플래그 활성화 확인
+- [ ] 음성 결과 큐 소비자·새 요청 형식·AI 결과 전송 IAM 권한 확인
 - [ ] 백엔드 점수 DB 마이그레이션 및 집계 코드 배포 확인
 - [ ] ElevenLabs 커스텀 음성 슬롯 확보
 - [ ] GPU 예약 완료 및 `C084003` 컨테이너 실행
