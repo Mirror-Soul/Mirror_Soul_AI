@@ -19,7 +19,7 @@ from model_calling.realtime.ditto import DittoVideoSession
 from model_calling.realtime.trace import CallTrace, trace_fields
 from model_calling.webrtc.session import get_call_context
 from model_training.base_profiles import get_mbti_base_profile
-from model_training.services import search_user_memories
+from model_calling.clients.rag_search import search_mode, search_user_memories
 from shared.config import settings
 
 
@@ -340,7 +340,7 @@ async def generate_reply_audio(
             ) or "none"
             print(
                 "[REALTIME] RAG lookup complete: "
-                f"{fields} user={user_id} count={len(memories)} "
+                f"{fields} user={user_id} mode={search_mode()} count={len(memories)} "
                 f"best_distance={min(distances) if distances else 'none'} "
                 f"query_chars={len(rag_query)} sources={source_summary} "
                 f"elapsed_ms={timings['rag']}",
@@ -350,6 +350,7 @@ async def generate_reply_audio(
             timings["rag"] = _elapsed_ms(stage_started)
             print(
                 f"[REALTIME] RAG lookup skipped: {fields} user={user_id} "
+                f"mode={search_mode()} "
                 f"elapsed_ms={timings['rag']} error_code={exc.code} "
                 f"error={_single_line(exc)}",
                 flush=True,

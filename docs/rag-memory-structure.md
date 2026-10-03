@@ -89,6 +89,39 @@ AI 서버의 회원 RAG는 ChromaDB 컬렉션 하나(`RAG_DB_PATH`, `RAG_COLLECT
 구버전 sourceType(`member_profile_summary`, `member_profile_interview`, `interview_answer`)도
 마이그레이션 기간 동안 그대로 검색·프롬프트에 반영된다.
 
+## 저장소 위치와 통화 중 검색 경로
+
+RAG 저장소(ChromaDB)는 **AWS AI API 서버 한 곳**에만 있다. 저장(`/api/v1/training/profiles`,
+`/samples`)과 검색은 모두 이 저장소를 사용한다.
+
+```text
+통화 서버 (실시간 답변)
+  → POST {RAG_SEARCH_BASE_URL}/internal/rag/search   (X-Rag-Internal-Key)
+  → AI API 서버의 search_user_memories()  → AI API 서버의 ChromaDB
+```
+
+- 통화 서버는 자체 ChromaDB를 열지 않는다. 예전에는 통화 서버가 자기 디스크의 빈
+  `rag_store/chroma`를 검색해 `RAG lookup count=0`이 나왔다.
+- 검색 실패·시간 초과(`RAG_SEARCH_TIMEOUT_SECONDS`, 기본 3초)는 통화를 끊지 않는다.
+  `RAG lookup skipped ... error_code=RAG_SEARCH_*`를 남기고 RAG 없이 답변한다.
+- 통화 서버 `/health`의 `ragSearch`가 `remote`이면 정상, `local`이면 설정 누락이다.
+  모니터에는 `RAG search : OK (AI server store)` / `WARNING (local store ...)`로 표시된다.
+
+| 서버 | 설정 |
+| --- | --- |
+| AI API 서버 | `RAG_INTERNAL_API_KEY=<공유 비밀값>`, `RAG_SEARCH_BASE_URL`은 비움 |
+| 통화 서버 | `RAG_SEARCH_BASE_URL=http://<AI 서버 사설 IP>:8000`, 같은 `RAG_INTERNAL_API_KEY` |
+
+AI API 서버에 키가 없으면 내부 검색 API는 `503`으로 거절하고, 키가 다르면 `401`이다.
+AWS 보안그룹에서 통화 서버 → AI 서버 8000 포트를 허용해야 하며, 이후 8000 포트를
+백엔드 전용으로 제한할 때도 통화 서버는 허용 목록에 남겨야 한다.
+
+| 거절·실패 코드 (통화 로그) | 의미 |
+| --- | --- |
+| `RAG_SEARCH_UNAVAILABLE` | AI 서버 연결 실패, 시간 초과, 5xx |
+| `RAG_SEARCH_CONFIG_ERROR` | 키 미설정·불일치(401/403), AI 서버 키 미설정(503) |
+| `RAG_SEARCH_REJECTED` | 요청 형식 오류(4xx) |
+
 ## 기존 데이터 마이그레이션
 
 운영 ChromaDB를 초기화하거나 삭제하지 않는다. 구버전 문서는 그대로 읽히므로 마이그레이션은

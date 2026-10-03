@@ -111,6 +111,8 @@ def _status_color(value: str) -> str:
         return STATUS_COLORS["ERROR"]
     if upper.startswith("WARNING") or upper.startswith("STALE"):
         return ANSI_YELLOW
+    if upper.startswith("OK"):
+        return ANSI_GREEN
     return STATUS_COLORS.get(upper, "")
 
 
@@ -225,7 +227,13 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             snapshot.stt = Stage("WARNING", "No speech recognized")
 
         if "[realtime] rag lookup complete" in lowered:
-            snapshot.rag = Stage("COMPLETED", line)
+            if " count=0 " in f"{lowered} ":
+                snapshot.rag = Stage(
+                    "WARNING",
+                    "No member memories found (count=0) - check RAG search mode/data",
+                )
+            else:
+                snapshot.rag = Stage("COMPLETED", line)
         if "[realtime] rag lookup skipped" in lowered:
             snapshot.rag = Stage("WARNING", line)
 
@@ -439,6 +447,14 @@ def render(
         tunnel_2 = _service(metadata.get("TUNNEL_SERVICE_2"))
         tunnel_service = "OK" if tunnel_service == tunnel_2 == "OK" else "ERROR"
     signaling = snapshot.signaling_connection
+    rag_mode = str(call_health.get("ragSearch") or "")
+    rag_search = (
+        "OK (AI server store)"
+        if rag_mode == "remote"
+        else "WARNING (local store - set RAG_SEARCH_BASE_URL)"
+        if rag_mode == "local"
+        else "UNKNOWN"
+    )
     if cached:
         call_service = f"STALE ({call_service})"
         api_status = f"STALE ({api_status})"
@@ -482,6 +498,7 @@ def render(
         f"Call service : {_colored_status(call_service, color)}",
         f"Call API     : {_colored_status(api_status, color)}",
         f"Signaling    : {_colored_status(signaling, color)}",
+        f"RAG search   : {_colored_status(rag_search, color)}",
         f"Ditto tunnel : {_colored_status(tunnel_service, color)}",
         f"Ditto GPU    : {_colored_status(ditto_status, color)}",
         f"Ditto workers: {ready_workers}/{worker_count} READY",

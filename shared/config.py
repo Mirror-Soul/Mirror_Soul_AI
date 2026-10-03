@@ -40,6 +40,14 @@ class Settings:
     RAG_CONTEXT_MAX_CHARS: int = int(
         os.getenv("RAG_CONTEXT_MAX_CHARS", "3000")
     )
+    # Realtime calls search member memories through the AI API server, which
+    # owns the only RAG store. Empty base URL = search the local store (used
+    # by the AI API server itself and local development).
+    RAG_SEARCH_BASE_URL: str = os.getenv("RAG_SEARCH_BASE_URL", "").strip()
+    RAG_INTERNAL_API_KEY: str = os.getenv("RAG_INTERNAL_API_KEY", "").strip()
+    RAG_SEARCH_TIMEOUT_SECONDS: float = float(
+        os.getenv("RAG_SEARCH_TIMEOUT_SECONDS", "3")
+    )
     REALTIME_HISTORY_MAX_TURNS: int = int(
         os.getenv("REALTIME_HISTORY_MAX_TURNS", "8")
     )

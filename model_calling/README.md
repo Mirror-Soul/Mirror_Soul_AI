@@ -348,6 +348,13 @@ values within `LLM_PERSONALITY_SIGNAL_THRESHOLD` of 50 are treated as neutral
 and do not influence the persona. Retrieved memory text is deduplicated and
 bounded by `RAG_CONTEXT_MAX_CHARS`.
 
+Member memories are stored only on the AI API server. The call server does not
+open a ChromaDB of its own: with `RAG_SEARCH_BASE_URL` and
+`RAG_INTERNAL_API_KEY` set it calls `POST /internal/rag/search` on the AI API
+server (see `docs/rag-memory-structure.md`). The RAG log line includes
+`mode=remote` or `mode=local`; `local` on the call server means the setting is
+missing and no member memories will be found.
+
 Generated replies are normalized to `LLM_RESPONSE_MAX_SENTENCES` and
 `LLM_RESPONSE_MAX_CHARS`, with duplicate sentences removed. An empty provider
 response becomes a short conversational fallback. These limits reduce TTS and
