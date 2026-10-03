@@ -89,6 +89,28 @@ class RealtimeCallMonitorRefreshTests(unittest.TestCase):
         self.assertIn("CLONE_NOT_READY", snapshot.signal.detail)
 
 
+class RagSearchMonitorTests(unittest.TestCase):
+    def test_empty_rag_result_is_warning(self) -> None:
+        logs = """
+[SIGNALING] CALL_ACCEPT sent: callId=95 mediaType=VOICE user=u clone_id=1
+[REALTIME] RAG lookup complete: callId=95 turn=1 user=u mode=local count=0 best_distance=none sources=none
+"""
+        snapshot = call_monitor.parse_call_logs(logs)
+        self.assertEqual(snapshot.rag.status, "WARNING")
+        self.assertIn("count=0", snapshot.rag.detail)
+
+    def test_rag_search_mode_from_health(self) -> None:
+        def output(mode: str) -> str:
+            return call_monitor.render(
+                call_monitor.parse_call_logs(""),
+                call_monitor.RemoteResult(True, ""),
+                {"CALL_SERVICE": "active", "CALL_HEALTH": f'{{"status":"ok","ragSearch":"{mode}"}}'},
+            )
+
+        self.assertIn("RAG search   : OK (AI server store)", output("remote"))
+        self.assertIn("RAG search   : WARNING (local store", output("local"))
+
+
 class MonitorFormatTests(unittest.TestCase):
     def test_event_tags(self) -> None:
         self.assertEqual(event_tag("[RAG_PROFILE] completed: x"), "RAG")

@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from model_calling.routers import chat
 from model_training.routers.training import router as training_router
+from model_training.routers.internal_rag import router as internal_rag_router
 
 app = FastAPI(title="Mirror Soul AI Server")
 
@@ -25,6 +26,7 @@ app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(training_router)
+app.include_router(internal_rag_router)
 
 
 if __name__ == "__main__":
