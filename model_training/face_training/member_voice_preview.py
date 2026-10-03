@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -14,7 +16,6 @@ from model_training.face_training.natural_motion import (
     NaturalMotionConfig,
     prepare_natural_motion_clip,
 )
-from shared.clone_voice import ActiveCloneVoice, find_active_clone_voice
 from shared.elevenlabs_tts import (
     ElevenLabsVoiceSettings,
     synthesize_member_speech,
@@ -22,6 +23,21 @@ from shared.elevenlabs_tts import (
 
 
 DEFAULT_MEMBER_PREVIEW_TEXT = "안녕하세요. 처음 뵙겠습니다."
+
+# The face worker no longer reads the backend database. The voice for the
+# preview is chosen in this order:
+#   1. a member voice id passed explicitly by the caller
+#   2. a fixed ElevenLabs evaluation voice (FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID)
+#   3. a fixed audio file (FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH)
+# Face and voice training run asynchronously, so a member voice is often not
+# ready yet; in that case a fixed voice is used or the preview is skipped.
+VOICE_SOURCE_MEMBER = "MEMBER_VOICE"
+VOICE_SOURCE_FALLBACK_VOICE = "FALLBACK_VOICE"
+VOICE_SOURCE_FALLBACK_AUDIO = "FALLBACK_AUDIO"
+
+
+class MemberVoicePreviewUnavailable(RuntimeError):
+    """No member or fallback voice is configured for the preview."""
 
 
 @dataclass(frozen=True)
@@ -31,6 +47,7 @@ class MemberVoicePreviewResult:
     voice_training_job_id: int | None
     text: str
     audio_path: Path
+    voice_source: str = VOICE_SOURCE_MEMBER
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -39,6 +56,7 @@ class MemberVoicePreviewResult:
             "voiceTrainingJobId": self.voice_training_job_id,
             "text": self.text,
             "audioPath": str(self.audio_path),
+            "voiceSource": self.voice_source,
         }
 
 
@@ -49,45 +67,86 @@ class MemberFacePreviewResult:
     natural_motion: NaturalMotionClipResult | None = None
 
 
+def _clean(value: str | None) -> str:
+    return str(value or "").strip()
+
+
 async def generate_member_voice_preview(
     *,
     user_uuid: str,
     clone_id: int,
     output_path: Path,
     text: str = DEFAULT_MEMBER_PREVIEW_TEXT,
-    voice_resolver: Callable[..., ActiveCloneVoice] = find_active_clone_voice,
+    member_voice_id: str | None = None,
+    voice_training_job_id: int | None = None,
+    fallback_voice_id: str | None = None,
+    fallback_audio_path: Path | str | None = None,
     synthesizer: Callable[..., Awaitable[bytes]] = synthesize_member_speech,
 ) -> MemberVoicePreviewResult:
-    voice = await asyncio.to_thread(
-        voice_resolver,
-        user_uuid,
-        expected_clone_id=clone_id,
+    """Create the preview audio without any database lookup.
+
+    The voice id itself is never written to the result or the manifest.
+    """
+    resolved_fallback_voice = _clean(
+        fallback_voice_id
+        if fallback_voice_id is not None
+        else os.getenv("FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID")
     )
-    audio = await synthesizer(
-        text=text,
-        voice_id=voice.elevenlabs_voice_id,
-        settings=ElevenLabsVoiceSettings(
-            stability=0.5,
-            similarity_boost=0.9,
-            style=0.0,
-            use_speaker_boost=True,
-        ),
+    resolved_fallback_audio = _clean(
+        str(fallback_audio_path)
+        if fallback_audio_path is not None
+        else os.getenv("FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH")
     )
+
+    voice_id = _clean(member_voice_id)
+    voice_source = VOICE_SOURCE_MEMBER
+    if not voice_id and resolved_fallback_voice:
+        voice_id = resolved_fallback_voice
+        voice_source = VOICE_SOURCE_FALLBACK_VOICE
+        voice_training_job_id = None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
-    try:
-        temporary_path.write_bytes(audio)
-        temporary_path.replace(output_path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    if voice_id:
+        audio = await synthesizer(
+            text=text,
+            voice_id=voice_id,
+            settings=ElevenLabsVoiceSettings(
+                stability=0.5,
+                similarity_boost=0.9,
+                style=0.0,
+                use_speaker_boost=True,
+            ),
+        )
+        temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+        try:
+            temporary_path.write_bytes(audio)
+            temporary_path.replace(output_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    elif resolved_fallback_audio:
+        source = Path(resolved_fallback_audio)
+        if not source.is_file():
+            raise MemberVoicePreviewUnavailable(
+                "FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH does not exist."
+            )
+        output_path = output_path.with_suffix(source.suffix or output_path.suffix)
+        shutil.copyfile(source, output_path)
+        voice_source = VOICE_SOURCE_FALLBACK_AUDIO
+        voice_training_job_id = None
+    else:
+        raise MemberVoicePreviewUnavailable(
+            "No member voice id was provided and no fallback preview voice "
+            "(FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID or "
+            "FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH) is configured."
+        )
 
     return MemberVoicePreviewResult(
-        user_uuid=voice.user_uuid,
-        clone_id=voice.clone_id,
-        voice_training_job_id=voice.voice_training_job_id,
+        user_uuid=user_uuid,
+        clone_id=clone_id,
+        voice_training_job_id=voice_training_job_id,
         text=text,
         audio_path=output_path,
+        voice_source=voice_source,
     )
 
 
@@ -99,6 +158,7 @@ def generate_member_face_preview(
     text: str,
     musetalk_config: MuseTalkConfig,
     natural_motion_config: NaturalMotionConfig | None = None,
+    member_voice_id: str | None = None,
 ) -> MemberFacePreviewResult:
     output_root = manifest_path.parent / "outputs" / "member-voice-preview"
     voice_result = asyncio.run(
@@ -107,6 +167,7 @@ def generate_member_face_preview(
             clone_id=clone_id,
             output_path=output_root / "member-voice.mp3",
             text=text,
+            member_voice_id=member_voice_id,
         )
     )
     natural_motion_result = None

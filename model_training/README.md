@@ -116,10 +116,18 @@ python -m model_training.face_training.preview \
 
 ### 회원 음성 얼굴 프리뷰
 
-얼굴과 음성을 같은 회원 기준으로 검증하려면 `--member-voice-preview`를 사용한다.
-이 모드는 SQS 메시지의 `userUuid`와 `cloneId`에 해당하는 활성 음성 프로필을
-RDS에서 조회하고, 그 회원의 ElevenLabs 복제 음성으로 고정 문장을 생성한 뒤
-선택된 얼굴 프레임을 MuseTalk로 애니메이션한다.
+얼굴 프레임을 음성과 함께 확인하려면 `--member-voice-preview`를 사용한다.
+고정 문장을 음성으로 만든 뒤 선택된 얼굴 프레임을 MuseTalk로 애니메이션한다.
+얼굴 워커는 백엔드 DB를 조회하지 않으므로 음성은 다음 순서로 고른다.
+
+1. `--voice-id`로 직접 지정한 ElevenLabs 음성 (로컬 실행 전용)
+2. `FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID`의 고정 평가 음성
+3. `FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH`의 고정 음성 파일
+
+얼굴 학습과 음성 학습은 비동기라 회원 음성이 아직 없을 수 있다. 위 값이 모두 없으면
+프리뷰만 건너뛰고(`member voice face preview skipped` 로그) 얼굴 프로필 생성은 계속한다.
+manifest의 `memberVoicePreview.voiceSource`에 `MEMBER_VOICE`, `FALLBACK_VOICE`,
+`FALLBACK_AUDIO` 중 어떤 음성을 썼는지 기록하며 Voice ID 자체는 기록하지 않는다.
 
 ```bash
 python -m model_training.face_training.preview \
@@ -128,16 +136,17 @@ python -m model_training.face_training.preview \
   --member-voice-preview
 ```
 
-얼굴의 `cloneId`와 활성 음성 프로필의 `clone_id`가 다르거나 활성 Voice ID가
-없으면 작업은 즉시 실패한다. 공통 `ELEVENLABS_VOICE_ID`로 다른 회원 목소리를
-대체하지 않는다. `ELEVENLABS_API_KEY`와 DB 연결 정보는 필요하지만 Voice ID는
-환경변수에 저장하지 않는다.
+고정 평가 음성은 특정 회원의 목소리가 아닌 평가용 음성을 사용한다. 다른 회원의
+복제 음성 ID를 고정 값으로 넣지 않는다. 음성 합성 시 `ELEVENLABS_API_KEY`가 필요하며
+DB 연결 정보는 필요 없다.
 
 로컬 GPU 서버에서는 다음 MuseTalk 설정을 사용한다.
 
 ```env
 FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT=안녕하세요. 처음 뵙겠습니다.
 FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE=false
+FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID=
+FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH=
 FACE_TRAINING_MUSETALK_REPO_DIR=/shareHost/C084003-musetalk/MuseTalk
 FACE_TRAINING_MUSETALK_PYTHON=/shareHost/C084003-musetalk/conda-env/bin/python
 FACE_TRAINING_MUSETALK_TIMEOUT_SECONDS=900

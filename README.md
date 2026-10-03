@@ -58,7 +58,7 @@ model_calling/
   signaling/           백엔드 WebSocket 시그널링 처리
   webrtc/              WebRTC 연결과 통화 세션 관리
   realtime/            발화 감지, STT, LLM, TTS 실시간 파이프라인
-  repository/          RDS 회원 및 Clone 정보 조회
+  clients/             백엔드 내부 API(통화 컨텍스트) 클라이언트
   services.py          OpenAI, Whisper, ElevenLabs 처리
 
 model_training/
@@ -95,11 +95,8 @@ pip install -r requirements.txt
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
 
-DB_HOST=
-DB_PORT=3306
-DB_NAME=
-DB_USERNAME=
-DB_PASSWORD=
+BACKEND_API_BASE_URL=
+AI_INTERNAL_API_KEY=
 
 WEBRTC_STUN_URL=stun:stun.l.google.com:19302
 WEBRTC_TURN_URL=
@@ -107,7 +104,9 @@ WEBRTC_TURN_USERNAME=
 WEBRTC_TURN_CREDENTIAL=
 ```
 
-API Key와 DB 비밀번호가 포함된 `.env` 파일은 GitHub에 커밋하지 않습니다.
+API Key와 내부 API 비밀값이 포함된 `.env` 파일은 GitHub에 커밋하지 않습니다.
+AI 서버는 백엔드 MySQL에 직접 접속하지 않으므로 `DB_*` 환경변수가 필요 없습니다.
+회원·클론·음성 정보는 백엔드 내부 API(`/internal/ai/calls/{callId}/context`)로만 받습니다.
 
 ### 3. 서버 실행
 

@@ -53,8 +53,17 @@ def main() -> None:
         "--member-voice-preview",
         action="store_true",
         help=(
-            "Resolve this member's active voice from RDS, generate the fixed "
-            "preview sentence, and animate the selected face with MuseTalk."
+            "Generate the fixed preview sentence and animate the selected face "
+            "with MuseTalk. Uses --voice-id when given, otherwise the configured "
+            "fallback preview voice or audio. No database is accessed."
+        ),
+    )
+    parser.add_argument(
+        "--voice-id",
+        default=None,
+        help=(
+            "Optional ElevenLabs voice id for this local preview run. Applied "
+            "only to this process as the preview voice."
         ),
     )
     parser.add_argument(
@@ -89,6 +98,8 @@ def main() -> None:
         "true" if args.member_voice_preview else "false"
     )
     os.environ["FACE_TRAINING_MEMBER_VOICE_PREVIEW_TEXT"] = args.preview_text
+    if args.voice_id:
+        os.environ["FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID"] = args.voice_id
     os.environ["FACE_TRAINING_MUSETALK_BBOX_SHIFT"] = str(
         args.musetalk_bbox_shift
     )

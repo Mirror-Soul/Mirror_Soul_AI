@@ -6,7 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from model_training.face_training.member_voice_preview import (
+    VOICE_SOURCE_FALLBACK_AUDIO,
+    VOICE_SOURCE_FALLBACK_VOICE,
+    VOICE_SOURCE_MEMBER,
     MemberVoicePreviewResult,
+    MemberVoicePreviewUnavailable,
     generate_member_face_preview,
     generate_member_voice_preview,
 )
@@ -18,45 +22,102 @@ from model_training.face_training.natural_motion import (
     NaturalMotionClipResult,
     NaturalMotionConfig,
 )
-from shared.clone_voice import ActiveCloneVoice
 
 
 class MemberVoicePreviewTests(unittest.TestCase):
-    def test_uses_resolved_member_voice_without_persisting_voice_id(self) -> None:
+    def _generate(self, directory: str, **kwargs):
         calls = {}
 
-        def resolve(user_uuid: str, *, expected_clone_id: int):
-            calls["resolved"] = (user_uuid, expected_clone_id)
-            return ActiveCloneVoice(
-                clone_id=6,
-                user_uuid=user_uuid,
+        async def synthesize(**synth_kwargs):
+            calls["voice_id"] = synth_kwargs["voice_id"]
+            return b"synthesized-audio"
+
+        params = {
+            "user_uuid": "65ebdde2-a48d-4a1c-b492-d59532a77557",
+            "clone_id": 6,
+            "output_path": Path(directory) / "member.mp3",
+            "synthesizer": synthesize,
+            "fallback_voice_id": "",
+            "fallback_audio_path": "",
+        }
+        params.update(kwargs)
+        with patch.dict("os.environ", {}, clear=False):
+            result = asyncio.run(generate_member_voice_preview(**params))
+        return result, calls
+
+    def test_uses_member_voice_without_persisting_voice_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, calls = self._generate(
+                directory,
+                member_voice_id="private-member-voice-id",
                 voice_training_job_id=19,
-                elevenlabs_voice_id="private-member-voice-id",
-                status="ACTIVE",
-                is_active=True,
+                fallback_voice_id="fixed-evaluation-voice",
             )
+
+            self.assertEqual(result.audio_path.read_bytes(), b"synthesized-audio")
+            self.assertEqual(calls["voice_id"], "private-member-voice-id")
+            self.assertEqual(result.voice_source, VOICE_SOURCE_MEMBER)
+            self.assertEqual(result.voice_training_job_id, 19)
+            self.assertNotIn("voiceId", result.to_dict())
+            self.assertNotIn("private-member-voice-id", str(result.to_dict()))
+
+    def test_falls_back_to_fixed_voice_when_member_voice_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, calls = self._generate(
+                directory,
+                fallback_voice_id="fixed-evaluation-voice",
+            )
+
+            self.assertEqual(calls["voice_id"], "fixed-evaluation-voice")
+            self.assertEqual(result.voice_source, VOICE_SOURCE_FALLBACK_VOICE)
+            self.assertIsNone(result.voice_training_job_id)
+            self.assertNotIn("fixed-evaluation-voice", str(result.to_dict()))
+
+    def test_falls_back_to_fixed_audio_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixed_audio = Path(directory) / "fixed.wav"
+            fixed_audio.write_bytes(b"fixed-audio")
+            result, calls = self._generate(
+                directory,
+                fallback_audio_path=fixed_audio,
+            )
+
+            self.assertNotIn("voice_id", calls)
+            self.assertEqual(result.voice_source, VOICE_SOURCE_FALLBACK_AUDIO)
+            self.assertEqual(result.audio_path.suffix, ".wav")
+            self.assertEqual(result.audio_path.read_bytes(), b"fixed-audio")
+
+    def test_unavailable_without_member_or_fallback_voice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(MemberVoicePreviewUnavailable):
+                self._generate(directory)
+            with self.assertRaises(MemberVoicePreviewUnavailable):
+                self._generate(
+                    directory,
+                    fallback_audio_path=Path(directory) / "missing.wav",
+                )
+
+    def test_reads_fallback_voice_from_environment(self) -> None:
+        calls = {}
 
         async def synthesize(**kwargs):
             calls["voice_id"] = kwargs["voice_id"]
-            return b"member-audio"
+            return b"audio"
 
-        with tempfile.TemporaryDirectory() as directory:
-            output_path = Path(directory) / "member.mp3"
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID": "env-fixed-voice"},
+        ):
             result = asyncio.run(
                 generate_member_voice_preview(
-                    user_uuid="65ebdde2-a48d-4a1c-b492-d59532a77557",
-                    clone_id=6,
-                    output_path=output_path,
-                    voice_resolver=resolve,
+                    user_uuid="member",
+                    clone_id=1,
+                    output_path=Path(directory) / "member.mp3",
                     synthesizer=synthesize,
                 )
             )
-
-            self.assertEqual(output_path.read_bytes(), b"member-audio")
-            self.assertEqual(calls["voice_id"], "private-member-voice-id")
-            self.assertEqual(calls["resolved"][1], 6)
-            self.assertNotIn("voiceId", result.to_dict())
-            self.assertNotIn("private-member-voice-id", str(result.to_dict()))
+        self.assertEqual(calls["voice_id"], "env-fixed-voice")
+        self.assertEqual(result.voice_source, VOICE_SOURCE_FALLBACK_VOICE)
 
     def test_face_preview_reuses_member_audio_and_records_artifacts(self) -> None:
         user_uuid = "65ebdde2-a48d-4a1c-b492-d59532a77557"

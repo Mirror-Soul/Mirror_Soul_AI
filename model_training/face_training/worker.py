@@ -45,6 +45,7 @@ from model_training.face_training.result_message import (
 )
 from model_training.face_training.member_voice_preview import (
     DEFAULT_MEMBER_PREVIEW_TEXT,
+    MemberVoicePreviewUnavailable,
     generate_member_face_preview,
 )
 from model_training.face_training.musetalk_runner import MuseTalkConfig
@@ -614,12 +615,24 @@ def _preprocess_face_training_message(
         ),
         encoding="utf-8",
     )
-    if _env_bool("FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE", False):
-        print(
-            "[FACE_TRAINING] member voice face preview started: "
-            f"user_uuid={message.user_uuid} clone_id={message.clone_id}",
-            flush=True,
-        )
+    _maybe_generate_member_face_preview(manifest_path, message)
+    return manifest_path
+
+
+def _maybe_generate_member_face_preview(
+    manifest_path: Path,
+    message: FaceTrainingMessage,
+) -> None:
+    """Optional preview; it never reads the database and never fails the job
+    just because no member or fallback voice is available."""
+    if not _env_bool("FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE", False):
+        return
+    print(
+        "[FACE_TRAINING] member voice face preview started: "
+        f"user_uuid={message.user_uuid} clone_id={message.clone_id}",
+        flush=True,
+    )
+    try:
         preview_result = generate_member_face_preview(
             manifest_path=manifest_path,
             user_uuid=message.user_uuid,
@@ -635,13 +648,24 @@ def _preprocess_face_training_message(
                 else None
             ),
         )
+    except MemberVoicePreviewUnavailable as exc:
+        # The member voice may not be trained yet and the worker has no
+        # database access; the preview is optional, so the face profile
+        # build continues without it.
+        print(
+            "[FACE_TRAINING] member voice face preview skipped: "
+            f"user_uuid={message.user_uuid} clone_id={message.clone_id} "
+            f"reason={exc}",
+            flush=True,
+        )
+    else:
         print(
             "[FACE_TRAINING] member voice face preview completed: "
             f"user_uuid={message.user_uuid} clone_id={message.clone_id} "
+            f"voice_source={preview_result.voice.voice_source} "
             f"output={preview_result.musetalk.output_path}",
             flush=True,
         )
-    return manifest_path
 
 
 def _download_face_video(
