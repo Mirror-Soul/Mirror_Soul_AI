@@ -19,7 +19,7 @@ try:
         ANSI_MAGENTA,
         ANSI_RED,
         ANSI_RESET,
-        _event_line,
+        _tagged_event_line,
     )
 except ModuleNotFoundError:
     from ai_pipeline_monitor import (
@@ -30,7 +30,7 @@ except ModuleNotFoundError:
         ANSI_MAGENTA,
         ANSI_RED,
         ANSI_RESET,
-        _event_line,
+        _tagged_event_line,
     )
 
 
@@ -44,7 +44,7 @@ def format_event(source: str, line: str, *, color: bool) -> str:
     return (
         f"{_paint(timestamp, ANSI_DIM, color)} "
         f"{_paint(f'[{source:<3}]', ANSI_BOLD + source_style, color)} "
-        f"{_event_line(line, color)}"
+        f"{_tagged_event_line(line, color)}"
     )
 
 
