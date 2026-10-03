@@ -105,9 +105,9 @@ Late, duplicate, or older events must not replace newer active component data.
 The API returns `sync_rate` as a JSON number with one decimal place, for example
 `60.7` or `94.7`.
 
-The voice worker now publishes `VOICE_PROFILE_BUILD_STATUS` to the voice result
+The voice worker now publishes `VOICE_TRAINING_STATUS` to the voice result
 queue. On `COMPLETED`, its `result.voiceScore` is the voice component and
 `result.elevenlabsVoiceId` identifies the new voice profile. The backend must
 consume this event and update the voice component and aggregate atomically.
-Legacy request messages lack `schemaVersion` and `cloneId`; update the backend
-publisher and consumer before deploying the new worker.
+The result contains `jobId` and `userUuid`; the backend resolves the clone and
+handles duplicate or stale events idempotently by `jobId`.

@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,6 @@ from model_calling.voice_training.result_message import (
     failure_detail,
     publish_voice_training_result,
 )
-from shared.clone_similarity import CLONE_SIMILARITY_CALCULATION_VERSION
 
 load_dotenv()
 
@@ -41,12 +41,10 @@ class VoiceTrainingWorkerError(Exception):
 
 @dataclass(frozen=True)
 class VoiceTrainingMessage:
-    schema_version: int
     job_type: str
     source: str
     job_id: int
     user_uuid: str
-    clone_id: int
     bucket: str
     audio_object_keys: list[str]
     requested_at: str | None = None
@@ -57,6 +55,9 @@ class DownloadedAudio:
     filename: str
     content: bytes
     content_type: str
+
+
+_completed_results: OrderedDict[int, tuple[str, dict[str, Any]]] = OrderedDict()
 
 
 def main() -> None:
@@ -96,7 +97,7 @@ def run_worker(*, once: bool = False) -> None:
             MaxNumberOfMessages=1,
             WaitTimeSeconds=wait_seconds,
             VisibilityTimeout=visibility_timeout,
-            MessageSystemAttributeNames=["ApproximateReceiveCount"],
+            AttributeNames=["ApproximateReceiveCount"],
         )
         messages = response.get("Messages", [])
 
@@ -158,12 +159,23 @@ def _handle_sqs_message(
         return False
 
     try:
-        result = _process_voice_training_message(s3_client, message)
+        result = _cached_result(message)
+        if result is None:
+            result = _process_voice_training_message(s3_client, message)
+            _cache_result(message, result)
+        else:
+            print(
+                "[VOICE_TRAINING] reusing completed result: "
+                f"job_id={message.job_id}",
+                flush=True,
+            )
     except Exception as exc:
         print(
             f"[VOICE_TRAINING] job failed: job_id={message.job_id} error={exc}",
             flush=True,
         )
+        max_attempts = max(_env_int("VOICE_TRAINING_MAX_ATTEMPTS", 3), 1)
+        retryable = _is_retryable_failure(exc) and attempt_number < max_attempts
         try:
             _publish_status(
                 sqs_client,
@@ -171,7 +183,7 @@ def _handle_sqs_message(
                 message=message,
                 status="FAILED",
                 attempt_number=attempt_number,
-                error=failure_detail(exc),
+                error=failure_detail(exc, retryable=retryable),
             )
         except Exception as publish_exc:
             print(
@@ -180,7 +192,7 @@ def _handle_sqs_message(
                 flush=True,
             )
             return False
-        return True
+        return not retryable
 
     try:
         _publish_status(
@@ -217,7 +229,6 @@ def _publish_status(
         message=VoiceTrainingResultMessage(
             job_id=message.job_id,
             user_uuid=message.user_uuid,
-            clone_id=message.clone_id,
             status=status,
             attempt_number=attempt_number,
             result=result,
@@ -238,7 +249,7 @@ def _process_voice_training_message(
     print(
         "[VOICE_TRAINING] processing: "
         f"job_id={message.job_id} user_uuid={message.user_uuid} "
-        f"clone_id={message.clone_id} files={len(message.audio_object_keys)}",
+        f"files={len(message.audio_object_keys)}",
         flush=True,
     )
 
@@ -280,20 +291,13 @@ def _process_voice_training_message(
     )
     print(
         "[VOICE_TRAINING] completed: "
-        f"job_id={message.job_id} clone_id={message.clone_id} "
+        f"job_id={message.job_id} "
         f"voice_id={_mask_voice_id(voice_id)} voice_score={voice_score}",
         flush=True,
     )
     return {
         "elevenlabsVoiceId": voice_id,
         "voiceScore": voice_score,
-        "voiceScoreMethod": (
-            "speaker_embedding"
-            if actual_voice_score is not None
-            else "sample_coverage_proxy"
-        ),
-        "acceptedSampleCount": len(training_files),
-        "calculationVersion": CLONE_SIMILARITY_CALCULATION_VERSION,
     }
 
 
@@ -307,6 +311,45 @@ def _fallback_voice_score(sample_count: int) -> float:
         return round(30.0 + 32.0 * sample_count / expected, 2)
     extra_ratio = (sample_count - expected) / (excellent - expected)
     return round(62.0 + 33.0 * min(extra_ratio, 1.0), 2)
+
+
+def _cached_result(message: VoiceTrainingMessage) -> dict[str, Any] | None:
+    cached = _completed_results.get(message.job_id)
+    if cached is None:
+        return None
+    cached_user_uuid, result = cached
+    if cached_user_uuid != message.user_uuid:
+        raise VoiceTrainingWorkerError(
+            f"jobId {message.job_id} was already used by another userUuid"
+        )
+    _completed_results.move_to_end(message.job_id)
+    return dict(result)
+
+
+def _cache_result(
+    message: VoiceTrainingMessage,
+    result: dict[str, Any],
+) -> None:
+    _completed_results[message.job_id] = (message.user_uuid, dict(result))
+    _completed_results.move_to_end(message.job_id)
+    cache_size = max(_env_int("VOICE_TRAINING_IDEMPOTENCY_CACHE_SIZE", 1000), 1)
+    while len(_completed_results) > cache_size:
+        _completed_results.popitem(last=False)
+
+
+def _is_retryable_failure(exc: Exception) -> bool:
+    if isinstance(exc, VoiceTrainingInputQualityError):
+        return False
+    message = str(exc).lower()
+    non_retryable_markers = (
+        "voice_input_quality_failed",
+        "empty s3 object",
+        "audioobjectkeys",
+        "invalid audioobjectkey",
+        "must be",
+        "unsupported",
+    )
+    return not any(marker in message for marker in non_retryable_markers)
 
 
 def _prepare_voice_training_audio(
@@ -481,8 +524,12 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
     missing_fields = [
         field
         for field in (
-            "schemaVersion", "jobType", "source", "jobId", "userUuid",
-            "cloneId", "bucket", "audioObjectKeys",
+            "jobType",
+            "source",
+            "jobId",
+            "userUuid",
+            "bucket",
+            "audioObjectKeys",
         )
         if data.get(field) in (None, "")
     ]
@@ -492,17 +539,13 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
         )
 
     try:
-        schema_version = int(data["schemaVersion"])
         job_id = int(data["jobId"])
-        clone_id = int(data["cloneId"])
     except (TypeError, ValueError) as exc:
-        raise VoiceTrainingWorkerError(
-            "schemaVersion, jobId, and cloneId must be integers."
-        ) from exc
-    if schema_version != 1 or str(data["jobType"]) != "VOICE_TRAINING":
-        raise VoiceTrainingWorkerError("Unsupported voice training message version or type.")
-    if job_id <= 0 or clone_id <= 0:
-        raise VoiceTrainingWorkerError("jobId and cloneId must be positive.")
+        raise VoiceTrainingWorkerError("jobId must be an integer.") from exc
+    if str(data["jobType"]) != "VOICE_TRAINING":
+        raise VoiceTrainingWorkerError("Unsupported voice training message type.")
+    if job_id <= 0:
+        raise VoiceTrainingWorkerError("jobId must be positive.")
     user_uuid = str(data["userUuid"])
     try:
         UUID(user_uuid)
@@ -521,12 +564,10 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
         normalized_keys.append(normalized)
 
     return VoiceTrainingMessage(
-        schema_version=schema_version,
         job_type="VOICE_TRAINING",
         source=str(data["source"]),
         job_id=job_id,
         user_uuid=user_uuid,
-        clone_id=clone_id,
         bucket=str(data["bucket"]),
         audio_object_keys=normalized_keys,
         requested_at=data.get("requestedAt"),

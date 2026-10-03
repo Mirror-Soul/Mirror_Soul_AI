@@ -156,8 +156,8 @@ Ditto 서비스를 실행하지 않으면 얼굴 점수용 미리보기와 영�
 
 - AWS API 인스턴스와 백엔드 서비스가 실행 중인지
 - `FACE_RESULT_CONSUMER_ENABLED=true`인지
-- 음성 요청에 `schemaVersion`, `cloneId`, 비어 있지 않은 `audioObjectKeys`가 포함되는지
-- 음성 결과 큐 소비자가 `VOICE_PROFILE_BUILD_STATUS`를 처리하고 음성 프로필·점수를 저장하는지
+- 음성 요청에 비어 있지 않은 `audioObjectKeys`가 포함되는지
+- 음성 결과 큐 소비자가 `VOICE_TRAINING_STATUS`를 처리하고 음성 프로필·점수를 저장하는지
 - AWS AI 서버가 음성 결과 큐에 `sqs:SendMessage`할 수 있는지
 - `RAG_PROFILE_ENABLED=true`인지
 - 백엔드가 인터뷰 저장 후 `POST /api/v1/training/profiles`를 호출하는지

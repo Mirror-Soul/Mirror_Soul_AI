@@ -117,12 +117,10 @@ Expected SQS message contract:
 
 ```json
 {
-  "schemaVersion": 1,
   "jobType": "VOICE_TRAINING",
   "source": "ONBOARDING_INTERVIEW",
   "jobId": 1,
   "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
-  "cloneId": 1,
   "bucket": "mirrorsoul-bucket",
   "audioObjectKeys": [
     "interviews/d6bfd311-3c88-40b5-992c-31f12b4f06fd/sample.wav"
@@ -139,6 +137,8 @@ AWS_SQS_VOICE_TRAINING_QUEUE_URL=
 AWS_SQS_VOICE_TRAINING_RESULT_QUEUE_URL=https://sqs.ap-northeast-2.amazonaws.com/447343943160/mirrorsoul-voice-training-result-queue
 VOICE_TRAINING_WAIT_SECONDS=20
 VOICE_TRAINING_VISIBILITY_TIMEOUT=600
+VOICE_TRAINING_MAX_ATTEMPTS=3
+VOICE_TRAINING_IDEMPOTENCY_CACHE_SIZE=1000
 VOICE_TRAINING_AUDIO_QUALITY_ENABLED=true
 VOICE_TRAINING_FFMPEG_BINARY=ffmpeg
 VOICE_TRAINING_MIN_ACCEPTED_SAMPLES=3
@@ -185,40 +185,42 @@ SQS message
 -> backend stores active profile, job status, and aggregate score
 ```
 
-The worker requires `schemaVersion`, `cloneId`, and non-empty `audioObjectKeys`
-in every request. Legacy requests without them remain on the request queue and
-must not be sent after switching workers. The worker deletes a request only
-after publishing `COMPLETED` or `FAILED`. Result delivery failure retains the
-request; retrying a completed ElevenLabs call can currently create another
-voice, so the backend consumer must ignore stale/duplicate results by `jobId`.
+The worker requires non-empty `audioObjectKeys` in every request. It deletes a
+request only after publishing `COMPLETED` or a final `FAILED`. A retryable
+failure retains the request and publishes another final result after retry.
+Completed results are cached by `jobId` in the running worker so ordinary SQS
+redelivery does not create another ElevenLabs voice. The backend consumer must
+also process duplicate or stale result events idempotently by `jobId`.
 
 Result event contract (`PROCESSING` and `FAILED` omit `result`):
 
 ```json
 {
-  "schemaVersion": 1,
-  "eventType": "VOICE_PROFILE_BUILD_STATUS",
+  "eventType": "VOICE_TRAINING_STATUS",
   "jobId": 1,
   "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
-  "cloneId": 1,
   "status": "COMPLETED",
-  "attemptNumber": 1,
-  "occurredAt": "2026-10-03T06:30:00+00:00",
   "result": {
     "elevenlabsVoiceId": "example-voice-id",
-    "voiceScore": 62.0,
-    "voiceScoreMethod": "sample_coverage_proxy",
-    "acceptedSampleCount": 5,
-    "calculationVersion": "clone-similarity-v1"
+    "voiceScore": 62.0
   }
 }
 ```
 
-On failure, `error` has `code`, `message`, and `retryable: false`.
+`voiceScore` is always present on completion, is clamped to `0..100`, and has
+at most two decimal places. `introAudio` is optional and is currently omitted.
+If it is added, upload it to S3 before publishing the result and include
+`bucket`, `objectKey`, `contentType`, `sizeBytes`, and `durationMs`.
+
+On failure, `error` has `code`, `message`, and `retryable`. Retryable failures
+are attempted up to `VOICE_TRAINING_MAX_ATTEMPTS`; the last failure is published
+with `retryable: false`.
 Backend should validate job/member/clone identity, ignore stale or duplicate
 events, activate the returned voice ID on `COMPLETED`, and recompute the total
-score with the supplied `voiceScore`. `sample_coverage_proxy` is a fallback
-when speaker embedding cannot be computed; it is not a measured voice match.
+score with the supplied `voiceScore`. The backend resolves the clone from
+`userUuid`; voice result events do not contain `cloneId`. When speaker embedding
+cannot be computed, `voiceScore` uses the existing accepted-sample readiness
+proxy rather than a measured voice match.
 
 ## Clone similarity score
 
