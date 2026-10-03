@@ -13,9 +13,7 @@ from dotenv import load_dotenv
 from model_calling.webrtc.session import (
     WebRTCSession,
     close_session,
-    get_call_clone_id,
-    get_call_media_type,
-    get_call_user,
+    get_call_context,
     get_session,
     save_session,
 )
@@ -169,16 +167,18 @@ async def create_answer_from_offer(
     caller_signal_id: str,
     offer_sdp: dict,
 ) -> dict:
+    context = get_call_context(call_id)
+    if context is None:
+        raise ValueError(f"Call context not registered: callId={call_id}")
+    if context.roomId != room_id:
+        raise ValueError(f"Call room does not match context: callId={call_id}")
+
     session = get_session(call_id)
 
     if session is None:
-        clone_user_uuid = get_call_user(call_id)
-        if not clone_user_uuid:
-            raise ValueError(f"Call user not registered: callId={call_id}")
-        clone_id = get_call_clone_id(call_id)
-        if clone_id is None:
-            raise ValueError(f"Call clone not registered: callId={call_id}")
-        media_type = get_call_media_type(call_id) or "VOICE"
+        clone_user_uuid = context.clone.userUuid
+        clone_id = context.clone.cloneId
+        media_type = context.mediaType
 
         pc = create_peer_connection(call_id)
         output_track = QueuedAudioTrack()

@@ -4,6 +4,7 @@ from typing import Any
 
 from aiortc import RTCPeerConnection
 
+from model_calling.clients.backend_call_context import CallContext
 from model_calling.realtime.trace import CallTrace
 
 
@@ -38,32 +39,30 @@ class WebRTCSession:
 
 
 _sessions: dict[int, WebRTCSession] = {}
-_call_users: dict[int, str] = {}
-_call_clone_ids: dict[int, int] = {}
-_call_media_types: dict[int, str] = {}
+_call_contexts: dict[int, CallContext] = {}
 
 
-def register_call_user(
-    call_id: int,
-    clone_user_uuid: str,
-    clone_id: int,
-    media_type: str = "VOICE",
-) -> None:
-    _call_users[call_id] = clone_user_uuid
-    _call_clone_ids[call_id] = clone_id
-    _call_media_types[call_id] = media_type.upper()
+def register_call_context(context: CallContext) -> None:
+    _call_contexts[context.callId] = context
+
+
+def get_call_context(call_id: int) -> CallContext | None:
+    return _call_contexts.get(call_id)
 
 
 def get_call_user(call_id: int) -> str | None:
-    return _call_users.get(call_id)
+    context = get_call_context(call_id)
+    return context.clone.userUuid if context else None
 
 
 def get_call_clone_id(call_id: int) -> int | None:
-    return _call_clone_ids.get(call_id)
+    context = get_call_context(call_id)
+    return context.clone.cloneId if context else None
 
 
 def get_call_media_type(call_id: int) -> str | None:
-    return _call_media_types.get(call_id)
+    context = get_call_context(call_id)
+    return context.mediaType if context else None
 
 
 def save_session(session: WebRTCSession) -> None:
@@ -75,9 +74,7 @@ def get_session(call_id: int) -> WebRTCSession | None:
 
 
 async def close_session(call_id: int, *, reason: str = "SESSION_CLOSED") -> None:
-    _call_users.pop(call_id, None)
-    _call_clone_ids.pop(call_id, None)
-    _call_media_types.pop(call_id, None)
+    _call_contexts.pop(call_id, None)
     session = _sessions.pop(call_id, None)
     if session:
         cancelled_tasks: list[asyncio.Task] = []

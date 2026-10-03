@@ -97,13 +97,20 @@ Required environment variables:
 ```env
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
-
-DB_HOST=
-DB_PORT=3306
-DB_NAME=
-DB_USERNAME=
-DB_PASSWORD=
+BACKEND_API_BASE_URL=https://api.mirrorsoul64.com
+AI_INTERNAL_API_KEY=<shared-secret>
+BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS=5
 ```
+
+On `CALL_INVITE`, the call server sends one authenticated request to
+`GET /internal/ai/calls/{callId}/context`. It validates and caches the returned
+clone, persona, voice, and media type for the lifetime of that call. Realtime
+turn processing reads only this in-memory context and does not query MySQL.
+`AI_INTERNAL_API_KEY` must match the backend setting and must never be logged.
+
+The voice training worker below still writes training results to RDS, so its
+deployment continues to require the `DB_*` variables documented in the root
+`.env.example`.
 
 ## Voice training worker
 

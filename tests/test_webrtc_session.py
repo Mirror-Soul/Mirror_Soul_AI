@@ -22,9 +22,32 @@ from model_calling.webrtc.session import (
     get_call_clone_id,
     get_call_media_type,
     get_call_user,
-    register_call_user,
+    get_call_context,
+    register_call_context,
     save_session,
 )
+from model_calling.clients.backend_call_context import CallContext
+
+
+def _context(call_id: int, user_uuid: str, clone_id: int, media_type: str):
+    return CallContext(
+        schemaVersion=1,
+        callId=call_id,
+        roomId=f"room-{call_id}",
+        mediaType=media_type,
+        status="READY",
+        clone={
+            "cloneId": clone_id,
+            "userUuid": user_uuid,
+            "persona": {},
+            "voice": {
+                "voiceProfileId": 1,
+                "voiceTrainingJobId": 2,
+                "provider": "ELEVENLABS",
+                "voiceId": f"voice-{call_id}",
+            },
+        },
+    )
 
 
 class WebRTCSessionRegistryTests(unittest.TestCase):
@@ -69,9 +92,19 @@ class WebRTCSessionRegistryTests(unittest.TestCase):
 
     def test_registers_and_clears_member_and_clone_together(self) -> None:
         call_id = 912345
-        register_call_user(call_id, "member-uuid", 6, "VIDEO")
+        context = _context(
+            call_id,
+            "5f0154ef-7d83-4ae4-a724-ae591e1c985e",
+            6,
+            "VIDEO",
+        )
+        register_call_context(context)
 
-        self.assertEqual(get_call_user(call_id), "member-uuid")
+        self.assertIs(get_call_context(call_id), context)
+        self.assertEqual(
+            get_call_user(call_id),
+            "5f0154ef-7d83-4ae4-a724-ae591e1c985e",
+        )
         self.assertEqual(get_call_clone_id(call_id), 6)
         self.assertEqual(get_call_media_type(call_id), "VIDEO")
 
@@ -80,6 +113,30 @@ class WebRTCSessionRegistryTests(unittest.TestCase):
         self.assertIsNone(get_call_user(call_id))
         self.assertIsNone(get_call_clone_id(call_id))
         self.assertIsNone(get_call_media_type(call_id))
+
+    def test_contexts_are_isolated_by_call_id(self) -> None:
+        first = _context(
+            912347,
+            "5f0154ef-7d83-4ae4-a724-ae591e1c985e",
+            6,
+            "VOICE",
+        )
+        second = _context(
+            912348,
+            "66506c15-c42a-455f-8af7-a23f76c03bb2",
+            9,
+            "VIDEO",
+        )
+        register_call_context(first)
+        register_call_context(second)
+        try:
+            self.assertIs(get_call_context(first.callId), first)
+            self.assertIs(get_call_context(second.callId), second)
+            self.assertEqual(get_call_clone_id(first.callId), 6)
+            self.assertEqual(get_call_clone_id(second.callId), 9)
+        finally:
+            asyncio.run(close_session(first.callId))
+            asyncio.run(close_session(second.callId))
 
     def test_conversation_history_is_isolated_per_session(self) -> None:
         first = WebRTCSession(
