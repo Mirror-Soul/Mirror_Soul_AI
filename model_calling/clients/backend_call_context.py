@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -8,6 +9,9 @@ import httpx
 from pydantic import BaseModel, StrictInt, StrictStr
 
 from shared.config import settings
+
+
+_RETRYABLE_STATUS_CODES = frozenset({502, 504})
 
 
 class PersonaContext(BaseModel):
@@ -165,16 +169,37 @@ async def fetch_call_context(
         )
 
     url = f"{base_url.rstrip('/')}/internal/ai/calls/{call_id}/context"
+    max_attempts = max(1, int(settings.BACKEND_CALL_CONTEXT_MAX_ATTEMPTS))
+    backoff_seconds = max(0.0, float(settings.BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS))
     owns_client = client is None
     http_client = client or httpx.AsyncClient(timeout=timeout_seconds)
     try:
-        response = await http_client.get(
-            url,
-            headers={"X-Internal-Api-Key": api_key},
-            timeout=timeout_seconds,
-        )
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        raise CallContextUnavailable("Backend call context is unavailable.") from exc
+        # GET is idempotent, so only transient transport failures and gateway
+        # errors are retried a limited number of times. Business errors (404,
+        # 409, 401, ...) are never retried.
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = await http_client.get(
+                    url,
+                    headers={"X-Internal-Api-Key": api_key},
+                    timeout=timeout_seconds,
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                if attempt < max_attempts:
+                    await asyncio.sleep(backoff_seconds * attempt)
+                    continue
+                raise CallContextUnavailable(
+                    "Backend call context is unavailable."
+                ) from exc
+            if (
+                response.status_code in _RETRYABLE_STATUS_CODES
+                and attempt < max_attempts
+            ):
+                await asyncio.sleep(backoff_seconds * attempt)
+                continue
+            break
     finally:
         if owns_client:
             await http_client.aclose()

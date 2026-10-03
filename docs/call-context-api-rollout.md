@@ -45,3 +45,33 @@ Then verify one VOICE call and one VIDEO call:
    the same window.
 5. Restart `mirror-soul-call` and confirm it is active.
 6. Complete and record the VOICE and VIDEO smoke checks above.
+
+## Removing database credentials from AI servers
+
+After `codex/backend-db-read-decoupling`, no AI component opens a MySQL
+connection: the call server uses the call context API, the training API writes
+only to ChromaDB, the voice and face workers report through SQS, and the face
+member-voice preview uses a fixed fallback voice instead of reading
+`ai_voice_profiles`. Remove the credentials only after the call context API is
+confirmed in production:
+
+1. Deploy this AI change (no DB variables are read any more).
+2. Complete the VOICE and VIDEO smoke checks above and confirm
+   `[SIGNALING] CALL_ACCEPT sent` without any MySQL error.
+3. On the GPU face worker, set `FACE_TRAINING_PREVIEW_FALLBACK_VOICE_ID` or
+   `FACE_TRAINING_PREVIEW_FALLBACK_AUDIO_PATH` if
+   `FACE_TRAINING_MEMBER_VOICE_PREVIEW_ENABLE=true`; otherwise the preview is
+   skipped and logged as `member voice face preview skipped`.
+4. Remove `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD`
+   from every AI server `.env` (API, call server, voice worker, GPU worker) and
+   restart the services.
+5. Revoke the AI server's MySQL user or security-group rule on the backend side.
+
+Optional cache and retry settings for the call server:
+
+```env
+BACKEND_CALL_CONTEXT_MAX_ATTEMPTS=2
+BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS=0.2
+CALL_CONTEXT_CACHE_TTL_SECONDS=600
+CALL_CONTEXT_CACHE_MAX_ENTRIES=500
+```

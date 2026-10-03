@@ -16,6 +16,18 @@ class Settings:
     BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS: float = float(
         os.getenv("BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS", "5")
     )
+    BACKEND_CALL_CONTEXT_MAX_ATTEMPTS: int = int(
+        os.getenv("BACKEND_CALL_CONTEXT_MAX_ATTEMPTS", "2")
+    )
+    BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS: float = float(
+        os.getenv("BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS", "0.2")
+    )
+    CALL_CONTEXT_CACHE_TTL_SECONDS: float = float(
+        os.getenv("CALL_CONTEXT_CACHE_TTL_SECONDS", "600")
+    )
+    CALL_CONTEXT_CACHE_MAX_ENTRIES: int = int(
+        os.getenv("CALL_CONTEXT_CACHE_MAX_ENTRIES", "500")
+    )
 
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     RAG_DB_PATH: str = os.getenv("RAG_DB_PATH", "./rag_store/chroma")

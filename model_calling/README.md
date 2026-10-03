@@ -100,6 +100,10 @@ ELEVENLABS_API_KEY=
 BACKEND_API_BASE_URL=https://api.mirrorsoul64.com
 AI_INTERNAL_API_KEY=<shared-secret>
 BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS=5
+BACKEND_CALL_CONTEXT_MAX_ATTEMPTS=2
+BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS=0.2
+CALL_CONTEXT_CACHE_TTL_SECONDS=600
+CALL_CONTEXT_CACHE_MAX_ENTRIES=500
 ```
 
 On `CALL_INVITE`, the call server sends one authenticated request to
@@ -108,9 +112,18 @@ clone, persona, voice, and media type for the lifetime of that call. Realtime
 turn processing reads only this in-memory context and does not query MySQL.
 `AI_INTERNAL_API_KEY` must match the backend setting and must never be logged.
 
-The voice training worker below still writes training results to RDS, so its
-deployment continues to require the `DB_*` variables documented in the root
-`.env.example`.
+Transport errors and HTTP 502/504 are retried up to
+`BACKEND_CALL_CONTEXT_MAX_ATTEMPTS` in total; business errors (404, 409, 401,
+503 `INTERNAL_5030`) are rejected immediately with the existing reject reasons.
+With the defaults the worst case before `CALL_REJECT` is about 10 seconds.
+
+`CALL_END` or peer close removes the cached context. Contexts of calls that
+never reach a WebRTC session expire after `CALL_CONTEXT_CACHE_TTL_SECONDS`, and
+at most `CALL_CONTEXT_CACHE_MAX_ENTRIES` idle contexts are kept. Contexts with
+an active session are never evicted.
+
+No AI server component (call server, training API, voice or face worker)
+connects to MySQL, so the `DB_*` variables and PyMySQL are not required.
 
 ## Voice training worker
 
@@ -366,24 +379,7 @@ failed, skipped, and cancelled turn counts. This keeps concurrent calls
 separable in `tools/realtime_call_monitor.py`.
 
 If `data/{user_id}/persona.json` exists, the realtime pipeline uses its
-personality, speech style, and ElevenLabs voice ID. Otherwise it loads the
-member profile and MBTI from RDS.
-
-For RDS-backed calls, the pipeline first looks for an active voice profile:
-
-```sql
-SELECT avp.elevenlabs_voice_id
-FROM ai_voice_profiles avp
-JOIN clones c ON c.id = avp.clone_id
-JOIN users u ON u.id = c.user_id
-WHERE u.uuid = ?
-  AND avp.status = 'ACTIVE'
-  AND avp.is_active = TRUE
-ORDER BY avp.updated_at DESC
-LIMIT 1;
-```
-
-An active `ai_voice_profiles` row matching both the invited member UUID and
-`cloneId` is required. Calls fail explicitly when the member voice is missing,
-the clone IDs differ, or RDS cannot be queried; the server never substitutes
-another member's voice from a global environment variable.
+personality and speech style. Otherwise it builds the member profile from the
+`persona` in the call context. The ElevenLabs voice always comes from the call
+context (`clone.voice.voiceId`); the server never substitutes another member's
+voice from a global environment variable and never queries MySQL for it.
