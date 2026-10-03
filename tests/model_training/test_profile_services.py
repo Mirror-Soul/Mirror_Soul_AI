@@ -41,36 +41,32 @@ class _FakeCollection:
 
 
 class _FakeSearchCollection:
+    def __init__(self, *, with_summary: bool = True) -> None:
+        self.with_summary = with_summary
+        self.query_kwargs = None
+
     def query(self, **kwargs):
+        self.query_kwargs = kwargs
         return {
             "ids": [["near-memory", "far-memory", "unknown-distance"]],
             "documents": [["가까운 기억", "관련 없는 기억", "거리 없는 기억"]],
             "metadatas": [[
-                {"sourceType": "member_profile_interview"},
-                {"sourceType": "member_profile_interview"},
-                {"sourceType": "member_profile_summary"},
+                {"userId": "member-uuid", "sourceType": "member_profile_interview", "questionId": 1},
+                {"userId": "member-uuid", "sourceType": "member_profile_interview", "questionId": 2},
+                {"userId": "member-uuid", "sourceType": "conversation_memory"},
             ]],
             "distances": [[0.31, 1.12, None]],
         }
 
-
-class _FakeSearchWithoutSummaryCollection:
-    def query(self, **kwargs):
-        return {
-            "ids": [["near-memory", "far-memory"]],
-            "documents": [["가까운 기억", "관련 없는 기억"]],
-            "metadatas": [[
-                {"sourceType": "member_profile_interview"},
-                {"sourceType": "member_profile_interview"},
-            ]],
-            "distances": [[0.31, 1.12]],
-        }
-
     def get(self, **kwargs):
+        if not self.with_summary:
+            return {"ids": [], "documents": [], "metadatas": []}
         return {
             "ids": ["profile-summary"],
             "documents": ["회원 핵심 프로필"],
-            "metadatas": [{"sourceType": "member_profile_summary"}],
+            "metadatas": [
+                {"userId": "member-uuid", "sourceType": "member_profile_summary"}
+            ],
         }
 
 
@@ -175,7 +171,7 @@ class ProfileServiceTests(unittest.TestCase):
             interview_documents = [
                 text
                 for text, metadata in zip(stored["documents"], stored["metadatas"])
-                if metadata["sourceType"] == "member_profile_interview"
+                if metadata["sourceType"] == "interview_memory"
             ]
             self.assertEqual(len(interview_documents), 1)
             self.assertIn("수정된 첫 번째 답변", interview_documents[0])
@@ -200,8 +196,9 @@ class ProfileServiceTests(unittest.TestCase):
         )
 
     def test_memory_search_filters_results_above_distance_limit(self):
+        collection = _FakeSearchCollection()
         with (
-            patch.object(services, "collection", _FakeSearchCollection()),
+            patch.object(services, "collection", collection),
             patch.object(services, "create_embedding", return_value=[1.0, 0.0]),
         ):
             memories = services.search_user_memories(
@@ -213,30 +210,44 @@ class ProfileServiceTests(unittest.TestCase):
 
         self.assertEqual(
             [memory["documentId"] for memory in memories],
-            ["unknown-distance", "near-memory"],
+            ["profile-summary", "near-memory", "unknown-distance"],
         )
         self.assertIsNone(memories[0]["distance"])
         self.assertEqual(memories[1]["distance"], 0.31)
+        where = collection.query_kwargs["where"]["$and"]
+        self.assertIn({"userId": "member-uuid"}, where)
 
     def test_memory_search_always_includes_stored_profile_summary(self):
         with (
-            patch.object(
-                services,
-                "collection",
-                _FakeSearchWithoutSummaryCollection(),
-            ),
+            patch.object(services, "collection", _FakeSearchCollection()),
             patch.object(services, "create_embedding", return_value=[1.0, 0.0]),
         ):
             memories = services.search_user_memories(
                 "member-uuid",
                 "안녕",
-                top_k=5,
+                top_k=1,
                 max_distance=0.75,
             )
 
         self.assertEqual(
             [memory["documentId"] for memory in memories],
             ["profile-summary", "near-memory"],
+        )
+
+    def test_memory_search_without_profile_returns_memories_only(self):
+        with (
+            patch.object(
+                services, "collection", _FakeSearchCollection(with_summary=False)
+            ),
+            patch.object(services, "create_embedding", return_value=[1.0, 0.0]),
+        ):
+            memories = services.search_user_memories(
+                "member-uuid", "안녕", top_k=5, max_distance=0.75
+            )
+
+        self.assertEqual(
+            [memory["documentId"] for memory in memories],
+            ["near-memory", "unknown-distance"],
         )
 
 

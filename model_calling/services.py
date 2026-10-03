@@ -10,6 +10,10 @@ import httpx
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from model_calling.schemas import PersonalityProfile, SpeechProfile
+from model_training.rag_documents import (
+    INTERVIEW_SOURCE_TYPES as RAG_INTERVIEW_SOURCE_TYPES,
+    PROFILE_SOURCE_TYPES,
+)
 from shared.config import settings
 from shared.elevenlabs_tts import (
     ElevenLabsVoiceSettings,
@@ -79,8 +83,10 @@ def format_mbti_base_profile(mbti_base_profile: dict[str, Any] | None) -> str:
     )
 
 
-PROFILE_SUMMARY_SOURCE_TYPES = {"member_profile_summary"}
-INTERVIEW_SOURCE_TYPES = {"member_profile_interview", "interview_answer"}
+# Shared with the RAG store so v2 (profile_snapshot / interview_memory) and
+# legacy v1 documents are grouped the same way in the prompt.
+PROFILE_SUMMARY_SOURCE_TYPES = PROFILE_SOURCE_TYPES
+INTERVIEW_SOURCE_TYPES = RAG_INTERVIEW_SOURCE_TYPES
 
 
 def _compact_text(value: Any, *, max_chars: int | None = None) -> str:

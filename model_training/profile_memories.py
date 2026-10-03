@@ -1,24 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
-from model_training.utils import (
-    build_member_profile_summary_text,
-    build_training_text,
-    create_member_profile_document_id,
-    create_member_profile_interview_document_id,
+from model_training.rag_documents import (
+    INTERVIEW_MEMORY,
+    RagDocument,
+    build_interview_memory_document,
+    build_profile_snapshot_document,
+    find_stale_profile_document_ids,
+    resolve_profile_key,
+    utc_now_iso,
 )
 
+# Backwards compatible alias: profile interviews are now stored as the unified
+# ``interview_memory`` source type.
+PROFILE_INTERVIEW_SOURCE_TYPE = INTERVIEW_MEMORY
 
-PROFILE_INTERVIEW_SOURCE_TYPE = "member_profile_interview"
-
-
-@dataclass(frozen=True)
-class ProfileMemoryDocument:
-    document_id: str
-    text: str
-    metadata: dict[str, str | int | float | bool]
+# Kept for callers/tests that still import the old dataclass name.
+ProfileMemoryDocument = RagDocument
 
 
 def build_member_profile_documents(
@@ -31,106 +30,69 @@ def build_member_profile_documents(
     description: str | None,
     keywords: list[str],
     interview_samples: list[dict[str, Any]],
-) -> list[ProfileMemoryDocument]:
-    profile_key = ai_profile_id or "default"
-    profile_metadata: dict[str, str | int | float | bool] = {
-        "userId": user_id,
-        "sourceType": "member_profile_summary",
-        "profileKey": profile_key,
-        "keywordCount": len(keywords),
-        "keywords": ", ".join(keywords),
-    }
-    if ai_profile_id:
-        profile_metadata["aiProfileId"] = ai_profile_id
-    if age is not None:
-        profile_metadata["age"] = age
-    if gender:
-        profile_metadata["gender"] = gender
-    if mbti:
-        profile_metadata["mbti"] = mbti.upper()
+    clone_id: int | None = None,
+    name: str | None = None,
+    nickname: str | None = None,
+    job: str | None = None,
+    interests: list[str] | None = None,
+    values: list[str] | None = None,
+    updated_at: str | None = None,
+) -> list[RagDocument]:
+    """Build the profile snapshot plus one interview memory per answer.
 
-    documents = [
-        ProfileMemoryDocument(
-            document_id=create_member_profile_document_id(user_id, ai_profile_id),
-            text=build_member_profile_summary_text(
-                age=age,
-                gender=gender,
-                mbti=mbti,
-                keywords=keywords,
-            ),
-            metadata=profile_metadata,
+    The first returned document is always the ``profile_snapshot``. Interview
+    ids do not depend on the order of ``interview_samples``. When the same
+    interview appears more than once in one request, the last one wins.
+    """
+    profile_key = resolve_profile_key(ai_profile_id)
+    timestamp = updated_at or utc_now_iso()
+    snapshot = build_profile_snapshot_document(
+        user_id=user_id,
+        profile_key=profile_key,
+        clone_id=clone_id,
+        ai_profile_id=ai_profile_id,
+        name=name,
+        nickname=nickname,
+        age=age,
+        gender=gender,
+        mbti=mbti,
+        job=job,
+        description=description,
+        interests=interests,
+        values=values,
+        keywords=keywords,
+        updated_at=timestamp,
+    )
+
+    interviews: dict[str, RagDocument] = {}
+    for sample in interview_samples:
+        document = build_interview_memory_document(
+            user_id=user_id,
+            sample=sample,
+            profile_key=profile_key,
+            clone_id=clone_id,
+            ai_profile_id=ai_profile_id,
+            profile_managed=True,
+            updated_at=timestamp,
         )
-    ]
+        if document is not None:
+            interviews[document.document_id] = document
 
-    for interview_index, sample in enumerate(interview_samples, start=1):
-        transcript = str(sample.get("transcript") or "").strip()
-        if not transcript:
-            continue
-
-        question_id = _optional_int(sample.get("questionId"))
-        question_category = str(sample.get("questionCategory") or "").strip()
-        question_text = str(sample.get("questionText") or "").strip()
-        metadata: dict[str, str | int | float | bool] = {
-            "userId": user_id,
-            "sourceType": PROFILE_INTERVIEW_SOURCE_TYPE,
-            "profileKey": profile_key,
-            "interviewIndex": interview_index,
-        }
-        if ai_profile_id:
-            metadata["aiProfileId"] = ai_profile_id
-        if question_id is not None:
-            metadata["questionId"] = question_id
-        if question_category:
-            metadata["questionCategory"] = question_category
-
-        documents.append(
-            ProfileMemoryDocument(
-                document_id=create_member_profile_interview_document_id(
-                    user_id,
-                    ai_profile_id,
-                    interview_index,
-                    question_id,
-                ),
-                text=build_training_text(
-                    mbti=mbti,
-                    description=description,
-                    question_category=question_category,
-                    question_text=question_text,
-                    transcript=transcript,
-                ),
-                metadata=metadata,
-            )
-        )
-
-    return documents
+    return [snapshot, *interviews.values()]
 
 
 def find_stale_profile_interview_ids(
     *,
     existing_ids: list[str],
-    existing_metadatas: list[dict[str, Any] | None],
+    existing_metadatas: list[Mapping[str, Any] | None],
     user_id: str,
     ai_profile_id: str | None,
     current_ids: set[str],
 ) -> list[str]:
-    profile_key = ai_profile_id or "default"
-    stale_ids: list[str] = []
-    for document_id, metadata in zip(existing_ids, existing_metadatas):
-        metadata = metadata or {}
-        if (
-            metadata.get("userId") == user_id
-            and metadata.get("sourceType") == PROFILE_INTERVIEW_SOURCE_TYPE
-            and metadata.get("profileKey") == profile_key
-            and document_id not in current_ids
-        ):
-            stale_ids.append(document_id)
-    return stale_ids
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return find_stale_profile_document_ids(
+        existing_ids=existing_ids,
+        existing_metadatas=existing_metadatas,
+        user_id=user_id,
+        profile_key=resolve_profile_key(ai_profile_id),
+        current_ids=current_ids,
+    )

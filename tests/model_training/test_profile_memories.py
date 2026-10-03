@@ -5,6 +5,11 @@ from model_training.profile_memories import (
     build_member_profile_documents,
     find_stale_profile_interview_ids,
 )
+from model_training.rag_documents import (
+    INTERVIEW_MEMORY,
+    PROFILE_SNAPSHOT,
+    RAG_SCHEMA_VERSION,
+)
 
 
 class ProfileMemoryDocumentTests(unittest.TestCase):
@@ -12,6 +17,7 @@ class ProfileMemoryDocumentTests(unittest.TestCase):
         documents = build_member_profile_documents(
             user_id="member/uuid",
             ai_profile_id="clone-14",
+            clone_id=14,
             age=29,
             gender="male",
             mbti="enfp",
@@ -34,18 +40,27 @@ class ProfileMemoryDocumentTests(unittest.TestCase):
         )
 
         self.assertEqual(len(documents), 3)
+        self.assertEqual(PROFILE_INTERVIEW_SOURCE_TYPE, INTERVIEW_MEMORY)
+        snapshot = documents[0]
+        self.assertEqual(snapshot.metadata["sourceType"], PROFILE_SNAPSHOT)
+        self.assertEqual(snapshot.document_id, "member/uuid:profile_snapshot:clone-14")
+        self.assertIn("MBTI: ENFP", snapshot.text)
+        self.assertIn("자기소개: 새로운 사람을 만나는 것을 좋아합니다.", snapshot.text)
+
+        interview = documents[1]
+        self.assertEqual(interview.metadata["sourceType"], INTERVIEW_MEMORY)
         self.assertEqual(
-            documents[0].metadata["sourceType"],
-            "member_profile_summary",
+            interview.document_id,
+            "member/uuid:interview_memory:question-10",
         )
-        self.assertEqual(
-            documents[1].metadata["sourceType"],
-            PROFILE_INTERVIEW_SOURCE_TYPE,
-        )
-        self.assertIn("쉬는 날에는 무엇을 하나요?", documents[1].text)
-        self.assertIn("친구들과 새로운 카페를 찾아다녀요.", documents[1].text)
-        self.assertIn("새로운 사람을 만나는 것을 좋아합니다.", documents[1].text)
-        self.assertEqual(documents[1].metadata["questionId"], 10)
+        self.assertIn("쉬는 날에는 무엇을 하나요?", interview.text)
+        self.assertIn("친구들과 새로운 카페를 찾아다녀요.", interview.text)
+        # Profile data lives in the snapshot instead of every interview.
+        self.assertNotIn("새로운 사람을 만나는 것을 좋아합니다.", interview.text)
+        self.assertEqual(interview.metadata["questionId"], 10)
+        self.assertEqual(interview.metadata["cloneId"], 14)
+        self.assertEqual(interview.metadata["schemaVersion"], RAG_SCHEMA_VERSION)
+        self.assertTrue(interview.metadata["profileManaged"])
 
     def test_ignores_blank_interview_transcripts(self) -> None:
         documents = build_member_profile_documents(
@@ -67,27 +82,55 @@ class ProfileMemoryDocumentTests(unittest.TestCase):
 
     def test_finds_only_stale_memories_for_same_profile(self) -> None:
         stale_ids = find_stale_profile_interview_ids(
-            existing_ids=["keep", "stale", "other-profile", "other-source"],
+            existing_ids=[
+                "keep",
+                "stale",
+                "legacy-stale",
+                "other-profile",
+                "independent-sample",
+                "legacy-sample",
+                "other-user",
+            ],
             existing_metadatas=[
                 {
                     "userId": "member",
-                    "sourceType": PROFILE_INTERVIEW_SOURCE_TYPE,
+                    "sourceType": INTERVIEW_MEMORY,
+                    "profileKey": "clone-14",
+                    "profileManaged": True,
+                },
+                {
+                    "userId": "member",
+                    "sourceType": INTERVIEW_MEMORY,
+                    "profileKey": "clone-14",
+                    "profileManaged": True,
+                },
+                {
+                    "userId": "member",
+                    "sourceType": "member_profile_interview",
                     "profileKey": "clone-14",
                 },
                 {
                     "userId": "member",
-                    "sourceType": PROFILE_INTERVIEW_SOURCE_TYPE,
-                    "profileKey": "clone-14",
-                },
-                {
-                    "userId": "member",
-                    "sourceType": PROFILE_INTERVIEW_SOURCE_TYPE,
+                    "sourceType": INTERVIEW_MEMORY,
                     "profileKey": "clone-13",
+                    "profileManaged": True,
+                },
+                {
+                    "userId": "member",
+                    "sourceType": INTERVIEW_MEMORY,
+                    "profileKey": "clone-14",
+                    "profileManaged": False,
                 },
                 {
                     "userId": "member",
                     "sourceType": "interview_answer",
                     "profileKey": "clone-14",
+                },
+                {
+                    "userId": "someone-else",
+                    "sourceType": INTERVIEW_MEMORY,
+                    "profileKey": "clone-14",
+                    "profileManaged": True,
                 },
             ],
             user_id="member",
@@ -95,7 +138,7 @@ class ProfileMemoryDocumentTests(unittest.TestCase):
             current_ids={"keep"},
         )
 
-        self.assertEqual(stale_ids, ["stale"])
+        self.assertEqual(stale_ids, ["stale", "legacy-stale"])
 
 
 if __name__ == "__main__":

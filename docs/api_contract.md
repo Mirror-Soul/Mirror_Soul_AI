@@ -66,23 +66,28 @@ http://localhost:8000
 
 ### POST /api/v1/training/profiles
 
-백엔드가 회원 기본 정보와 인터뷰 요약 재료를 전달하면, AI 서버는 원문 전체를 저장하지 않고 핵심 프로필 문서로 가공해 RAG DB에 저장합니다.
+온보딩 RAG의 대표 저장 경로입니다. 백엔드가 회원 기본 정보와 인터뷰 답변을 전달하면 AI 서버는 이를 회원 RAG 문서(`profile_snapshot` 1개 + `interview_memory` 여러 개)로 가공해 upsert합니다. 문서 구조와 규칙은 [rag-memory-structure.md](rag-memory-structure.md)를 참고하세요.
 
-Request:
+Request (`*` 표시는 이번 RAG 단일화에서 추가된 선택 필드이며, 보내지 않아도 기존처럼 동작합니다):
 
-```json
+```jsonc
 {
   "userId": "user_123",
   "cloneId": 123,
   "aiProfileId": "profile_user_123",
+  "name": "홍길동",            // * 선택
+  "nickname": "길동",          // * 선택
   "age": 24,
   "gender": "female",
   "mbti": "INFP",
+  "job": "학생",               // * 선택
   "description": "자기소개 원문",
   "interests": ["음악", "여행"],
+  "values": ["정직", "가족"],   // * 선택
   "interviewTopics": ["가족", "진로"],
   "interviewSamples": [
     {
+      "sourceId": "interview-123",  // * 선택, 답변의 안정적인 원본 ID
       "questionId": 1,
       "questionCategory": "가치관",
       "questionText": "가장 중요하게 생각하는 가치는 무엇인가요?",
@@ -93,6 +98,8 @@ Request:
 }
 ```
 
+인터뷰 문서 ID는 `{userId}:interview_memory:{sourceId}`입니다. `sourceId`가 없으면 `question-{questionId}`, 둘 다 없으면 질문 문장(없으면 답변) 해시로 생성하므로 인터뷰 순서가 바뀌어도 ID가 유지됩니다.
+
 RAG 프로필 저장이 완료되면 AI 서버는 다음 내부 콜백을 호출한다.
 
 ```text
@@ -100,22 +107,66 @@ POST {CLONE_TRAINING_CALLBACK_BASE_URL}/internal/clone-training/{cloneId}/person
 X-Clone-Training-Callback-Secret: {CLONE_TRAINING_CALLBACK_SECRET}
 ```
 
-요청 본문은 없다. 콜백이 실패하면 프로필 학습 요청도 실패로 응답하며, 동일한
-`userId + aiProfileId`의 RAG 문서는 upsert되므로 재시도해도 중복 문서가 생기지 않는다.
+콜백은 RAG 문서 upsert와 이전 문서 정리가 모두 성공한 뒤에만 호출됩니다. 저장이나 콜백이
+실패하면 프로필 학습 요청도 실패로 응답하며, 모든 문서는 결정적 ID로 upsert되므로 재시도해도
+중복 문서가 생기지 않는다.
 
-AI 서버가 실제 RAG 문서에 저장하는 내용은 나이, 성별, MBTI, 핵심 키워드 목록입니다. `description`, `questionText`, `transcript`는 키워드 추출 재료로만 사용하고 원문 전체를 그대로 저장하지 않습니다.
+`profile_snapshot`에는 요청에 실제로 들어온 값(이름·닉네임, 나이, 성별, MBTI, 직업, 자기소개(최대 500자),
+관심사, 가치관, 핵심 키워드)만 기록하고 비어 있는 항목은 추측하거나 `미입력`으로 채우지 않습니다.
+인터뷰 질문·답변은 `interview_memory` 문서로 각각 저장합니다.
+
+재학습 시 같은 `userId + profileKey(aiProfileId, 없으면 default)` 범위에서 이 경로가 이전에 저장했던
+인터뷰 중 현재 요청에 없는 문서와, 같은 범위의 구버전(`member_profile_summary`, `member_profile_interview`)
+문서만 삭제합니다. `/samples`로만 저장된 인터뷰, 다른 profileKey, 다른 회원, 대화·선호 기억 문서는 삭제하지 않습니다.
 
 Response:
 
 ```json
 {
   "success": true,
-  "documentId": "member_profile_user_123_profile_user_123",
+  "documentId": "user_123:profile_snapshot:profile_user_123",
   "status": "stored",
   "keywords": ["음악", "여행", "가족", "진로"],
   "profileSummary": "[회원 핵심 프로필]\\n..."
 }
 ```
+
+### POST /api/v1/training/samples
+
+개별 인터뷰 답변 저장 경로입니다(호환 유지). 내부적으로 `/profiles`와 같은 문서 규격·ID 규칙·upsert 서비스를 사용하므로 같은 인터뷰를 `/samples`와 `/profiles`로 모두 보내도 문서는 하나만 남습니다.
+
+Request (기존 필드 그대로, `sourceId`·`cloneId`는 선택):
+
+```json
+{
+  "userId": "user_123",
+  "aiProfileId": "profile_user_123",
+  "cloneId": 123,
+  "sourceId": "interview-123",
+  "questionId": 1,
+  "questionCategory": "가치관",
+  "questionText": "가장 중요하게 생각하는 가치는 무엇인가요?",
+  "transcript": "인터뷰 답변 STT 텍스트",
+  "audioUrl": "s3://..."
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "documentId": "user_123:interview_memory:interview-123",
+  "sampleId": "interview-123",
+  "status": "stored"
+}
+```
+
+`sampleId`는 이제 임의 값이 아니라 문서의 `sourceId`입니다. `mbti`, `description`은 호환을 위해 받지만 인터뷰 문서에는 넣지 않고 `profile_snapshot`에서만 관리합니다.
+
+### POST /api/v1/training/search
+
+회원 RAG 검색(디버그·운영 확인용). 응답 `memories`의 첫 항목은 해당 회원의 프로필 문서(있을 때 정확히 1개, `distance: null`)이고, 이어서 질문과 관련 있는 기억 문서가 최대 `topK`개 옵니다. 프로필은 `topK` 자리를 차지하지 않습니다.
 
 ### Chat personalization
 
