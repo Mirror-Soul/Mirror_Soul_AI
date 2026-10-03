@@ -13,6 +13,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from tools.monitor_format import (
+        compact_event,
+        section,
+        tagged_event,
+        terminal_width,
+    )
+except ModuleNotFoundError:
+    from monitor_format import compact_event, section, tagged_event, terminal_width
+
 
 USER_PATTERN = re.compile(r"user_uuid=([^\s]+)")
 FIELD_PATTERN = re.compile(r"([a-zA-Z_]+)=([^\s]+)")
@@ -90,7 +100,7 @@ def _fields(line: str) -> dict[str, str]:
 
 def _status_from_line(line: str) -> str | None:
     lowered = line.lower()
-    if " failed" in lowered or "error=" in lowered:
+    if " failed" in lowered or "error=" in lowered or "status=failed" in lowered:
         return "FAILED"
     if " completed" in lowered or "status=completed" in lowered:
         return "COMPLETED"
@@ -178,6 +188,11 @@ def parse_pipeline_logs(
                     f"penalty={values.get('penalty', '-')} "
                     f"callback={values.get('callback_sent', '-')}"
                 )
+                if "documents" in values:
+                    snapshot.rag.detail += (
+                        f" docs={values['documents']}"
+                        f" removed={values.get('removed', '0')}"
+                    )
                 if values.get("callback_sent", "").lower() == "false":
                     snapshot.rag.status = "WARNING"
             elif status == "FAILED":
@@ -185,14 +200,28 @@ def parse_pipeline_logs(
             else:
                 snapshot.rag.detail = f"samples={values.get('samples', '-')}"
 
-        if "[VOICE_TRAINING]" in line:
+        if "[VOICE_TRAINING] status published:" in line:
+            # Result-queue status events only confirm the state change; keep
+            # the detail from the processing/completed line.
+            status = _status_from_line(line)
+            if status:
+                snapshot.voice.status = status
+            snapshot.voice.job_id = values.get("job_id", snapshot.voice.job_id)
+        elif "[VOICE_TRAINING]" in line:
             status = _status_from_line(line)
             if status:
                 snapshot.voice.status = status
             snapshot.voice.job_id = values.get("job_id", snapshot.voice.job_id)
             snapshot.voice.clone_id = values.get("clone_id", snapshot.voice.clone_id)
             if status == "COMPLETED":
-                snapshot.voice.detail = f"voice_id={values.get('voice_id', 'set')}"
+                # Since the result-queue worker, the voice score is logged on
+                # the completion line; the overall score is computed by the
+                # backend and no longer logged by the AI server.
+                snapshot.voice.score = values.get("voice_score", snapshot.voice.score)
+                snapshot.voice.detail = (
+                    f"voice_score={values.get('voice_score', '-')} "
+                    f"voice_id={values.get('voice_id', 'set')}"
+                )
             elif status == "FAILED":
                 snapshot.voice.detail = line.split("error=", 1)[-1]
             else:
@@ -396,7 +425,12 @@ def fetch_gpu(args: argparse.Namespace) -> tuple[RemoteResult, dict[str, str], s
 
 
 def _service(value: str | None) -> str:
-    return "OK" if value == "active" else (value or "UNKNOWN").upper()
+    if value == "active":
+        return "OK"
+    if value in {"activating", "reloading"}:
+        # systemd shows "activating" while a crashing service is restarting.
+        return "WARNING (restarting - check journalctl)"
+    return (value or "UNKNOWN").upper()
 
 
 def _paint(text: str, style: str, enabled: bool) -> str:
@@ -455,6 +489,35 @@ def _event_line(line: str, color: bool) -> str:
     return _paint(line, style, color)
 
 
+def _event_style(line: str) -> str:
+    lowered = line.lower()
+    if (
+        " failed" in lowered
+        or "error=" in lowered
+        or "status=failed" in lowered
+        or "status=rejected" in lowered
+    ):
+        return STATUS_COLORS["FAILED"]
+    if (
+        " completed" in lowered
+        or "status=completed" in lowered
+        or "status=passed" in lowered
+        or "status=accepted" in lowered
+    ):
+        return STATUS_COLORS["COMPLETED"]
+    if " processing" in lowered or "preprocessing" in lowered:
+        return STATUS_COLORS["PROCESSING"]
+    if "skipped" in lowered or "bypassed" in lowered or "warning" in lowered:
+        return ANSI_YELLOW
+    if "worker started" in lowered:
+        return ANSI_GREEN
+    return ANSI_DIM
+
+
+def _tagged_event_line(line: str, color: bool, width: int | None = None) -> str:
+    return tagged_event(line, _event_style(line), color=color, width=width)
+
+
 def render(
     snapshot: PipelineSnapshot,
     ai_result: RemoteResult,
@@ -494,17 +557,18 @@ def render(
         overall_score = _paint(
             overall_score, ANSI_BOLD + ANSI_BRIGHT_CYAN, color
         )
+    width = terminal_width()
     lines = [
         _paint(
-            "MIRROR SOUL - AI PIPELINE MONITOR",
+            "MIRROR SOUL - AI PIPELINE MONITOR  (sign-up / RAG / voice / face)",
             ANSI_BOLD + ANSI_BRIGHT_CYAN,
             color,
         ),
         f"Updated: {now}",
-        "=" * 78,
-        f"Target user : {snapshot.user_uuid or 'Waiting for a new AI job...'}",
+        "=" * min(width, 100),
+        f"Target user : {_paint(snapshot.user_uuid or 'Waiting for a new AI job...', ANSI_BOLD, color)}",
         "",
-        _paint("CONNECTIONS / PROCESSES", ANSI_BOLD, color),
+        section("CONNECTIONS / PROCESSES", color, width),
         f"AI server   : {_colored_status(ai_connection, color)}",
         f"AI API      : {_colored_status(ai_api, color)}",
         f"Voice worker: {_colored_status(voice_worker, color)}",
@@ -512,25 +576,38 @@ def render(
         f"Face worker : {_colored_status(face_worker, color)}",
         f"GPU         : {gpu_value}  (used MiB, total MiB, utilization %)",
         "",
-        _paint("PIPELINE", ANSI_BOLD, color),
+        section("PIPELINE (this member)", color, width),
         _stage_line("RAG", snapshot.rag, color),
-        f"         {snapshot.rag.detail}",
+        _paint(f"         └ {compact_event(snapshot.rag.detail, width - 12)}", ANSI_DIM, color),
         _stage_line("VOICE", snapshot.voice, color),
-        f"         {snapshot.voice.detail}",
+        _paint(f"         └ {compact_event(snapshot.voice.detail, width - 12)}", ANSI_DIM, color),
         _stage_line("FACE", snapshot.face, color),
-        f"         {snapshot.face.detail}",
+        _paint(f"         └ {compact_event(snapshot.face.detail, width - 12)}", ANSI_DIM, color),
         "",
         f"{_paint('OVERALL', ANSI_BOLD, color)}  : {overall_score}  "
         f"({snapshot.overall_note})",
         f"COMPONENTS: {snapshot.score_components}",
+        _paint(
+            "            Official clone score is calculated and stored by the backend.",
+            ANSI_DIM,
+            color,
+        ),
         "",
-        _paint("RECENT AI EVENTS", ANSI_BOLD, color),
+        section("RECENT AI EVENTS (oldest -> newest)", color, width),
     ]
     lines.extend(
-        [_event_line(line, color) for line in snapshot.events]
+        [_tagged_event_line(line, color, width) for line in snapshot.events]
         or [_paint("No matching events yet.", ANSI_DIM, color)]
     )
-    lines.extend(["", "Ctrl+C to stop. Logs refresh automatically."])
+    lines.extend([
+        "",
+        _paint(
+            "Colors: green=done  cyan=running  yellow=warning  red=failed  gray=waiting"
+            "   |  Ctrl+C to stop",
+            ANSI_DIM,
+            color,
+        ),
+    ])
     return "\n".join(lines)
 
 

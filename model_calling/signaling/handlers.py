@@ -102,7 +102,12 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
     except Exception:
         await close_session(call_id, reason="CALL_ACCEPT_SEND_FAILED")
         raise
-    print(f"[SIGNALING] CALL_ACCEPT sent: callId={call_id}")
+    print(
+        "[SIGNALING] CALL_ACCEPT sent: "
+        f"callId={call_id} mediaType={context.mediaType} "
+        f"user={context.clone.userUuid} clone_id={context.clone.cloneId}",
+        flush=True,
+    )
 
 
 async def send_call_reject(
@@ -126,7 +131,11 @@ async def send_call_reject(
     }
 
     await send_json(ws, reject_message)
-    print(f"[SIGNALING] CALL_REJECT sent: reason={reason}")
+    print(
+        "[SIGNALING] CALL_REJECT sent: "
+        f"callId={data.get('callId')} reason={reason}",
+        flush=True,
+    )
 
 
 async def handle_offer(ws: Any, message: dict[str, Any]) -> None:

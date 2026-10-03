@@ -12,6 +12,16 @@ import sys
 import time
 from datetime import datetime
 
+try:
+    from tools.monitor_format import (
+        compact_event,
+        section,
+        tagged_event,
+        terminal_width,
+    )
+except ModuleNotFoundError:
+    from monitor_format import compact_event, section, tagged_event, terminal_width
+
 
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -54,7 +64,10 @@ CALL_ID_PATTERN = re.compile(r"callId['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
 USER_PATTERN = re.compile(
     r"(?:cloneUserUuid['\"]?\s*[:=]\s*['\"]?|user=)([^,'\"\s}]+)"
 )
-MEDIA_PATTERN = re.compile(r"mediaType['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
+MEDIA_PATTERN = re.compile(
+    r"(?:mediaType['\"]?\s*[:=]\s*['\"]?|media_type=)([^,'\"\s}]+)"
+)
+REASON_PATTERN = re.compile(r"reason['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
 
 
 @dataclass
@@ -180,8 +193,16 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             snapshot.signal = Stage("PROCESSING", "Call invite received")
         if "call_accept sent" in lowered:
             snapshot.signal = Stage("COMPLETED", "Call accepted")
+        if "call_accept sent" in lowered and "mediatype=" in lowered:
+            snapshot.signal = Stage(
+                "COMPLETED", "Call accepted (context loaded from backend API)"
+            )
         if "call_reject sent" in lowered:
-            snapshot.signal = Stage("FAILED", line)
+            reason = REASON_PATTERN.search(line)
+            snapshot.signal = Stage(
+                "FAILED",
+                f"Call rejected: {reason.group(1) if reason else line}",
+            )
 
         if "[webrtc] peer connection created" in lowered:
             snapshot.webrtc = Stage("PROCESSING", "Peer connection created")
@@ -335,7 +356,11 @@ def fetch_call_server(
 
 
 def _service(value: str | None) -> str:
-    return "OK" if value == "active" else (value or "UNKNOWN").upper()
+    if value == "active":
+        return "OK"
+    if value in {"activating", "reloading"}:
+        return "WARNING (restarting - check journalctl)"
+    return (value or "UNKNOWN").upper()
 
 
 def _json_object(value: str | None) -> dict:
@@ -351,22 +376,29 @@ def _json_object(value: str | None) -> dict:
 def _stage_line(name: str, stage: Stage, color: bool) -> str:
     label = _paint(f"{name:<8}", ANSI_BLUE, color)
     status = _paint(f"{stage.status:<10}", _status_color(stage.status), color)
-    return f"{label} [{status}] {stage.detail}"
+    detail = compact_event(stage.detail, max(20, terminal_width() - 23))
+    return f"{label} [{status}] {detail}"
+
+
+def _event_style(line: str) -> str:
+    lowered = line.lower()
+    if any(word in lowered for word in ("failed", "error=", "reject", "unavailable")):
+        return ANSI_RED + ANSI_BOLD
+    if "warning" in lowered or "skipped" in lowered or "retry" in lowered:
+        return ANSI_YELLOW
+    if any(word in lowered for word in ("completed", "connected", "ready", "queued", "accept")):
+        return ANSI_GREEN
+    if any(word in lowered for word in ("start", "processing", "received", "created")):
+        return ANSI_CYAN
+    return ANSI_DIM
 
 
 def _event_line(line: str, color: bool) -> str:
-    lowered = line.lower()
-    if any(word in lowered for word in ("failed", "error=", "reject", "unavailable")):
-        style = ANSI_RED + ANSI_BOLD
-    elif any(word in lowered for word in ("completed", "connected", "ready", "queued", "accept")):
-        style = ANSI_GREEN
-    elif any(word in lowered for word in ("start", "processing", "received", "created")):
-        style = ANSI_CYAN
-    elif "warning" in lowered or "skipped" in lowered or "retry" in lowered:
-        style = ANSI_YELLOW
-    else:
-        style = ANSI_DIM
-    return _paint(line, style, color)
+    return _paint(line, _event_style(line), color)
+
+
+def _tagged_event_line(line: str, color: bool, width: int | None = None) -> str:
+    return tagged_event(line, _event_style(line), color=color, width=width)
 
 
 def render(
@@ -432,16 +464,20 @@ def render(
     )
     error_style = ANSI_GREEN if last_error == "none" else ANSI_RED + ANSI_BOLD
 
+    width = terminal_width()
+    media_style = ANSI_BOLD + (
+        ANSI_BLUE if snapshot.media_type == "VIDEO" else ANSI_CYAN
+    )
     lines = [
         _paint(
-            "MIRROR SOUL - REALTIME CALL MONITOR",
+            "MIRROR SOUL - REALTIME CALL MONITOR  (signaling / STT / RAG / LLM / TTS / video)",
             ANSI_BOLD + ANSI_BRIGHT_CYAN,
             color,
         ),
         f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "=" * 78,
+        "=" * min(width, 100),
         "",
-        _paint("CONNECTIONS / SERVICES", ANSI_BOLD, color),
+        section("CONNECTIONS / SERVICES", color, width),
         f"Call server  : {_colored_status(server_connection, color)}",
         f"Call service : {_colored_status(call_service, color)}",
         f"Call API     : {_colored_status(api_status, color)}",
@@ -455,12 +491,12 @@ def render(
         f"last={last_render_text}",
         f"Last error   : {_paint(str(last_error), error_style, color)}",
         "",
-        _paint("LATEST CALL", ANSI_BOLD, color),
-        f"Call ID      : {snapshot.call_id}",
+        section("LATEST CALL", color, width),
+        f"Call ID      : {_paint(snapshot.call_id, ANSI_BOLD, color)}",
         f"Clone user   : {snapshot.user_uuid}",
-        f"Media type   : {snapshot.media_type}",
+        f"Media type   : {_paint(snapshot.media_type, media_style, color)}",
         "",
-        _paint("CALL PIPELINE", ANSI_BOLD, color),
+        section("CALL PIPELINE (latest turn)", color, width),
         _stage_line("SIGNAL", snapshot.signal, color),
         _stage_line("WEBRTC", snapshot.webrtc, color),
         _stage_line("STT", snapshot.stt, color),
@@ -469,24 +505,37 @@ def render(
         _stage_line("TTS", snapshot.tts, color),
         _stage_line("VIDEO", snapshot.video, color),
         "",
-        _paint("LATEST TURN SUMMARY", ANSI_BOLD, color),
-        _event_line(snapshot.trace_summary, color),
+        section("LATEST TURN SUMMARY", color, width),
+        _tagged_event_line(snapshot.trace_summary, color, width)
+        if snapshot.trace_summary.startswith("[")
+        else _paint(snapshot.trace_summary, ANSI_DIM, color),
         "",
-        _paint("RECENT CLOSED CALLS", ANSI_BOLD, color),
+        section("RECENT CLOSED CALLS", color, width),
     ]
     lines.extend(
-        [_event_line(line, color) for line in snapshot.recent_call_summaries]
+        [
+            _tagged_event_line(line, color, width)
+            for line in snapshot.recent_call_summaries
+        ]
         or [_paint("No closed call summary yet", ANSI_DIM, color)]
     )
     lines.extend([
         "",
-        _paint("RECENT CALL EVENTS", ANSI_BOLD, color),
+        section("RECENT CALL EVENTS (oldest -> newest)", color, width),
     ])
     lines.extend(
-        [_event_line(line, color) for line in snapshot.events]
+        [_tagged_event_line(line, color, width) for line in snapshot.events]
         or [_paint("Waiting for a new call...", ANSI_DIM, color)]
     )
-    lines.extend(["", "Ctrl+C to stop. Status refreshes automatically."])
+    lines.extend([
+        "",
+        _paint(
+            "Colors: green=done  cyan=running  yellow=warning  red=failed  gray=waiting"
+            "   |  Ctrl+C to stop",
+            ANSI_DIM,
+            color,
+        ),
+    ])
     return "\n".join(lines)
 
 

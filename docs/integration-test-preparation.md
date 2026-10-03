@@ -78,6 +78,8 @@ ssh -i "E:\Mirror_Soul_AI\mirrorsoul-call-key.pem" ec2-user@43.202.181.134 "sudo
 
 ### 0.4 로컬 VS Code에 모니터 두 개 실행
 
+모니터 화면 읽는 법과 원본 로그 확인 방법은 [log-monitoring-guide.md](log-monitoring-guide.md)를 참고합니다.
+
 GPU Remote-SSH 창이 아니라 **로컬 Windows VS Code 새 창**에서
 `E:\Mirror_Soul_AI` 폴더를 엽니다. 터미널을 분할해 다음 두 명령을 각각 실행합니다.
 
