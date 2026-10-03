@@ -7,10 +7,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from dotenv import load_dotenv
 
-from model_calling.clone_similarity.scorer import calculate_clone_similarity
 from model_calling.clone_similarity.speaker_embedding import (
     SpeakerSimilarityAudio,
     SpeakerSimilarityUnavailable,
@@ -23,20 +23,14 @@ from model_calling.voice_training.audio_quality import (
     VoiceTrainingInputQualityError,
     normalize_and_validate_voice_samples,
 )
-from model_calling.repository.clone_repository import (
-    CloneRepositoryError,
-    complete_voice_training_job,
-    find_clone_by_user_uuid,
-    find_voice_training_job_files,
-    find_voice_training_job_status,
-    mark_voice_training_job_failed,
-    mark_voice_training_job_processing,
-)
-from model_calling.repository.clone_similarity_repository import (
-    load_clone_similarity_snapshot,
-    save_clone_similarity_score,
-)
 from model_calling.services import clone_user_voice_from_files
+from model_calling.voice_training.result_message import (
+    VoiceTrainingResultMessage,
+    VoiceTrainingStatus,
+    failure_detail,
+    publish_voice_training_result,
+)
+from shared.clone_similarity import CLONE_SIMILARITY_CALCULATION_VERSION
 
 load_dotenv()
 
@@ -47,10 +41,12 @@ class VoiceTrainingWorkerError(Exception):
 
 @dataclass(frozen=True)
 class VoiceTrainingMessage:
+    schema_version: int
     job_type: str
     source: str
     job_id: int
     user_uuid: str
+    clone_id: int
     bucket: str
     audio_object_keys: list[str]
     requested_at: str | None = None
@@ -82,6 +78,11 @@ def run_worker(*, once: bool = False) -> None:
         raise VoiceTrainingWorkerError(
             "AWS_SQS_VOICE_TRAINING_QUEUE_URL is not configured."
         )
+    result_queue_url = os.getenv("AWS_SQS_VOICE_TRAINING_RESULT_QUEUE_URL")
+    if not result_queue_url:
+        raise VoiceTrainingWorkerError(
+            "AWS_SQS_VOICE_TRAINING_RESULT_QUEUE_URL is not configured."
+        )
 
     sqs_client = _boto3_client("sqs")
     s3_client = _boto3_client("s3")
@@ -95,6 +96,7 @@ def run_worker(*, once: bool = False) -> None:
             MaxNumberOfMessages=1,
             WaitTimeSeconds=wait_seconds,
             VisibilityTimeout=visibility_timeout,
+            MessageSystemAttributeNames=["ApproximateReceiveCount"],
         )
         messages = response.get("Messages", [])
 
@@ -105,7 +107,12 @@ def run_worker(*, once: bool = False) -> None:
             continue
 
         for sqs_message in messages:
-            should_delete = _handle_sqs_message(s3_client, sqs_message)
+            should_delete = _handle_sqs_message(
+                s3_client,
+                sqs_client,
+                sqs_message,
+                result_queue_url=result_queue_url,
+            )
             if should_delete:
                 sqs_client.delete_message(
                     QueueUrl=queue_url,
@@ -118,67 +125,130 @@ def run_worker(*, once: bool = False) -> None:
         time.sleep(_env_float("VOICE_TRAINING_POLL_INTERVAL_SECONDS", 0.0))
 
 
-def _handle_sqs_message(s3_client: Any, sqs_message: dict[str, Any]) -> bool:
+def _handle_sqs_message(
+    s3_client: Any,
+    sqs_client: Any,
+    sqs_message: dict[str, Any],
+    *,
+    result_queue_url: str,
+) -> bool:
     try:
         message = _parse_message(sqs_message.get("Body", ""))
     except Exception as exc:
-        print(f"[VOICE_TRAINING] invalid message skipped: {exc}", flush=True)
-        return True
+        print(f"[VOICE_TRAINING] invalid message retained: {exc}", flush=True)
+        return False
+
+    attempt_number = int(
+        (sqs_message.get("Attributes") or {}).get("ApproximateReceiveCount", 1)
+    )
+    try:
+        _publish_status(
+            sqs_client,
+            result_queue_url=result_queue_url,
+            message=message,
+            status="PROCESSING",
+            attempt_number=attempt_number,
+        )
+    except Exception as exc:
+        print(
+            "[VOICE_TRAINING] processing status publish failed; request retained: "
+            f"job_id={message.job_id} error={exc}",
+            flush=True,
+        )
+        return False
 
     try:
-        _process_voice_training_message(s3_client, message)
-        return True
+        result = _process_voice_training_message(s3_client, message)
     except Exception as exc:
         print(
             f"[VOICE_TRAINING] job failed: job_id={message.job_id} error={exc}",
             flush=True,
         )
         try:
-            mark_voice_training_job_failed(message.job_id, str(exc))
-        except CloneRepositoryError as db_exc:
+            _publish_status(
+                sqs_client,
+                result_queue_url=result_queue_url,
+                message=message,
+                status="FAILED",
+                attempt_number=attempt_number,
+                error=failure_detail(exc),
+            )
+        except Exception as publish_exc:
             print(
-                "[VOICE_TRAINING] failed to update job failure status: "
-                f"job_id={message.job_id} error={db_exc}",
+                "[VOICE_TRAINING] failure status publish failed; request retained: "
+                f"job_id={message.job_id} error={publish_exc}",
                 flush=True,
             )
-        return _env_bool("VOICE_TRAINING_DELETE_FAILED_MESSAGES", True)
+            return False
+        return True
+
+    try:
+        _publish_status(
+            sqs_client,
+            result_queue_url=result_queue_url,
+            message=message,
+            status="COMPLETED",
+            attempt_number=attempt_number,
+            result=result,
+        )
+    except Exception as exc:
+        print(
+            "[VOICE_TRAINING] completion status publish failed; request retained: "
+            f"job_id={message.job_id} error={exc}",
+            flush=True,
+        )
+        return False
+    return True
+
+
+def _publish_status(
+    sqs_client: Any,
+    *,
+    result_queue_url: str,
+    message: VoiceTrainingMessage,
+    status: VoiceTrainingStatus,
+    attempt_number: int,
+    result: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+) -> None:
+    message_id = publish_voice_training_result(
+        sqs_client,
+        queue_url=result_queue_url,
+        message=VoiceTrainingResultMessage(
+            job_id=message.job_id,
+            user_uuid=message.user_uuid,
+            clone_id=message.clone_id,
+            status=status,
+            attempt_number=attempt_number,
+            result=result,
+            error=error,
+        ),
+    )
+    print(
+        "[VOICE_TRAINING] status published: "
+        f"job_id={message.job_id} status={status} message_id={message_id}",
+        flush=True,
+    )
 
 
 def _process_voice_training_message(
     s3_client: Any,
     message: VoiceTrainingMessage,
-) -> None:
-    if message.job_type != "VOICE_TRAINING":
-        raise VoiceTrainingWorkerError(f"Unsupported jobType: {message.job_type}")
-
-    current_status = find_voice_training_job_status(message.job_id)
-    if current_status == "COMPLETED":
-        print(
-            f"[VOICE_TRAINING] job already completed: job_id={message.job_id}",
-            flush=True,
-        )
-        return
-    if current_status is None:
-        raise VoiceTrainingWorkerError(f"voice_training_job not found: {message.job_id}")
-
-    clone = find_clone_by_user_uuid(message.user_uuid)
-    audio_sources = _resolve_audio_sources(message)
-    if not audio_sources:
-        raise VoiceTrainingWorkerError(
-            f"No audio files found for job_id={message.job_id}"
-        )
-
-    mark_voice_training_job_processing(message.job_id)
+) -> dict[str, Any]:
     print(
         "[VOICE_TRAINING] processing: "
         f"job_id={message.job_id} user_uuid={message.user_uuid} "
-        f"clone_id={clone.clone_id} files={len(audio_sources)}",
+        f"clone_id={message.clone_id} files={len(message.audio_object_keys)}",
         flush=True,
     )
 
     downloaded_files = [
-        _download_audio(s3_client, bucket=bucket, object_key=object_key)
-        for bucket, object_key in audio_sources
+        _download_audio(
+            s3_client,
+            bucket=message.bucket,
+            object_key=object_key,
+        )
+        for object_key in message.audio_object_keys
     ]
     training_files = _prepare_voice_training_audio(
         downloaded_files,
@@ -203,29 +273,40 @@ def _process_voice_training_message(
         user_uuid=message.user_uuid,
         job_id=message.job_id,
     )
-    complete_voice_training_job(
-        job_id=message.job_id,
-        clone_id=clone.clone_id,
-        elevenlabs_voice_id=voice_id,
+    voice_score = (
+        round(max(0.0, min(actual_voice_score, 100.0)), 2)
+        if actual_voice_score is not None
+        else _fallback_voice_score(len(training_files))
     )
-    try:
-        _update_clone_similarity_score(
-            user_uuid=message.user_uuid,
-            voice_training_job_id=message.job_id,
-            actual_voice_score=actual_voice_score,
-        )
-    except Exception as exc:
-        print(
-            "[CLONE_SIMILARITY] update failed after voice clone completion: "
-            f"job_id={message.job_id} user_uuid={message.user_uuid} error={exc}",
-            flush=True,
-        )
     print(
         "[VOICE_TRAINING] completed: "
-        f"job_id={message.job_id} clone_id={clone.clone_id} "
-        f"voice_id={_mask_voice_id(voice_id)}",
+        f"job_id={message.job_id} clone_id={message.clone_id} "
+        f"voice_id={_mask_voice_id(voice_id)} voice_score={voice_score}",
         flush=True,
     )
+    return {
+        "elevenlabsVoiceId": voice_id,
+        "voiceScore": voice_score,
+        "voiceScoreMethod": (
+            "speaker_embedding"
+            if actual_voice_score is not None
+            else "sample_coverage_proxy"
+        ),
+        "acceptedSampleCount": len(training_files),
+        "calculationVersion": CLONE_SIMILARITY_CALCULATION_VERSION,
+    }
+
+
+def _fallback_voice_score(sample_count: int) -> float:
+    expected = max(_env_int("CLONE_SIMILARITY_EXPECTED_VOICE_SAMPLES", 5), 1)
+    excellent = max(
+        _env_int("CLONE_SIMILARITY_EXCELLENT_VOICE_SAMPLES", 20),
+        expected + 1,
+    )
+    if sample_count <= expected:
+        return round(30.0 + 32.0 * sample_count / expected, 2)
+    extra_ratio = (sample_count - expected) / (excellent - expected)
+    return round(62.0 + 33.0 * min(extra_ratio, 1.0), 2)
 
 
 def _prepare_voice_training_audio(
@@ -304,39 +385,6 @@ def _log_voice_training_quality(
         f"job_id={job_id} status={'PASSED' if passed else 'FAILED'} "
         f"accepted={len(batch.accepted)} rejected={len(batch.rejected)} "
         f"duration={batch.total_duration_seconds:.2f}s",
-        flush=True,
-    )
-
-
-def _update_clone_similarity_score(
-    *,
-    user_uuid: str,
-    voice_training_job_id: int,
-    actual_voice_score: float | None = None,
-) -> None:
-    snapshot = load_clone_similarity_snapshot(
-        user_uuid=user_uuid,
-        voice_training_job_id=voice_training_job_id,
-    )
-    score = calculate_clone_similarity(
-        snapshot,
-        actual_voice_score=actual_voice_score,
-    )
-    save_result = save_clone_similarity_score(score)
-    print(
-        "[CLONE_SIMILARITY] updated: "
-        f"user_uuid={user_uuid} clone_id={score.clone_id} "
-        f"overall={save_result.aggregate.total_score} "
-        f"face={save_result.aggregate.face_score} "
-        f"voice={save_result.aggregate.voice_score} "
-        f"personality={save_result.aggregate.profile_score} "
-        f"data_reliability={save_result.aggregate.data_reliability_score} "
-        f"penalty={save_result.aggregate.penalty_score} "
-        f"interview_coverage={score.interview_score} "
-        f"basic_profile={score.profile_score} "
-        f"complete={save_result.aggregate.complete} "
-        f"component_columns={save_result.component_columns_available} "
-        f"detail_saved={save_result.detail_saved}",
         flush=True,
     )
 
@@ -423,14 +471,19 @@ def _build_clone_reference_audio_path(*, user_uuid: str, job_id: int) -> Path:
 
 
 def _parse_message(message_body: str) -> VoiceTrainingMessage:
-    data = json.loads(message_body)
-    audio_object_keys = data.get("audioObjectKeys") or []
-    if not isinstance(audio_object_keys, list):
-        raise VoiceTrainingWorkerError("audioObjectKeys must be a list.")
+    try:
+        data = json.loads(message_body)
+    except json.JSONDecodeError as exc:
+        raise VoiceTrainingWorkerError(f"Invalid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise VoiceTrainingWorkerError("Message body must be a JSON object.")
 
     missing_fields = [
         field
-        for field in ("jobType", "source", "jobId", "userUuid", "bucket")
+        for field in (
+            "schemaVersion", "jobType", "source", "jobId", "userUuid",
+            "cloneId", "bucket", "audioObjectKeys",
+        )
         if data.get(field) in (None, "")
     ]
     if missing_fields:
@@ -438,25 +491,46 @@ def _parse_message(message_body: str) -> VoiceTrainingMessage:
             f"Missing required field(s): {', '.join(missing_fields)}"
         )
 
+    try:
+        schema_version = int(data["schemaVersion"])
+        job_id = int(data["jobId"])
+        clone_id = int(data["cloneId"])
+    except (TypeError, ValueError) as exc:
+        raise VoiceTrainingWorkerError(
+            "schemaVersion, jobId, and cloneId must be integers."
+        ) from exc
+    if schema_version != 1 or str(data["jobType"]) != "VOICE_TRAINING":
+        raise VoiceTrainingWorkerError("Unsupported voice training message version or type.")
+    if job_id <= 0 or clone_id <= 0:
+        raise VoiceTrainingWorkerError("jobId and cloneId must be positive.")
+    user_uuid = str(data["userUuid"])
+    try:
+        UUID(user_uuid)
+    except ValueError as exc:
+        raise VoiceTrainingWorkerError("userUuid must be a valid UUID.") from exc
+    audio_object_keys = data["audioObjectKeys"]
+    if not isinstance(audio_object_keys, list) or not audio_object_keys:
+        raise VoiceTrainingWorkerError("audioObjectKeys must be a non-empty list.")
+    normalized_keys = []
+    for object_key in audio_object_keys:
+        if not isinstance(object_key, str):
+            raise VoiceTrainingWorkerError("audioObjectKeys must contain strings.")
+        normalized = object_key.strip().replace("\\", "/")
+        if not normalized or normalized.startswith("/") or ".." in normalized.split("/"):
+            raise VoiceTrainingWorkerError(f"Invalid audioObjectKey: {object_key}")
+        normalized_keys.append(normalized)
+
     return VoiceTrainingMessage(
-        job_type=str(data["jobType"]),
+        schema_version=schema_version,
+        job_type="VOICE_TRAINING",
         source=str(data["source"]),
-        job_id=int(data["jobId"]),
-        user_uuid=str(data["userUuid"]),
+        job_id=job_id,
+        user_uuid=user_uuid,
+        clone_id=clone_id,
         bucket=str(data["bucket"]),
-        audio_object_keys=[str(object_key) for object_key in audio_object_keys],
+        audio_object_keys=normalized_keys,
         requested_at=data.get("requestedAt"),
     )
-
-
-def _resolve_audio_sources(message: VoiceTrainingMessage) -> list[tuple[str, str]]:
-    if message.audio_object_keys:
-        return [(message.bucket, object_key) for object_key in message.audio_object_keys]
-
-    return [
-        (job_file.bucket, job_file.object_key)
-        for job_file in find_voice_training_job_files(message.job_id)
-    ]
 
 
 def _download_audio(

@@ -108,18 +108,21 @@ DB_PASSWORD=
 ## Voice training worker
 
 Backend publishes voice clone requests to SQS after onboarding interview audio
-or voice update audio is uploaded to S3. The AI worker consumes that message,
-downloads the audio files, creates an ElevenLabs voice clone, and stores the
-active voice profile in RDS.
+or voice update audio is uploaded to S3. The AI worker downloads the files,
+creates an ElevenLabs voice clone, and publishes status to a separate result
+queue. Backend owns job state, active voice profile storage, and aggregate
+similarity score updates.
 
 Expected SQS message contract:
 
 ```json
 {
+  "schemaVersion": 1,
   "jobType": "VOICE_TRAINING",
   "source": "ONBOARDING_INTERVIEW",
   "jobId": 1,
   "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
+  "cloneId": 1,
   "bucket": "mirrorsoul-bucket",
   "audioObjectKeys": [
     "interviews/d6bfd311-3c88-40b5-992c-31f12b4f06fd/sample.wav"
@@ -133,9 +136,9 @@ Additional environment variables:
 ```env
 AWS_REGION=ap-northeast-2
 AWS_SQS_VOICE_TRAINING_QUEUE_URL=
+AWS_SQS_VOICE_TRAINING_RESULT_QUEUE_URL=https://sqs.ap-northeast-2.amazonaws.com/447343943160/mirrorsoul-voice-training-result-queue
 VOICE_TRAINING_WAIT_SECONDS=20
 VOICE_TRAINING_VISIBILITY_TIMEOUT=600
-VOICE_TRAINING_DELETE_FAILED_MESSAGES=true
 VOICE_TRAINING_AUDIO_QUALITY_ENABLED=true
 VOICE_TRAINING_FFMPEG_BINARY=ffmpeg
 VOICE_TRAINING_MIN_ACCEPTED_SAMPLES=3
@@ -174,22 +177,55 @@ Successful worker flow:
 
 ```text
 SQS message
+-> PROCESSING result event
 -> S3 audio download
 -> input normalization and quality gate
 -> ElevenLabs /v1/voices/add
--> ai_voice_profiles active row
--> clone similarity score update
--> voice_training_jobs COMPLETED
+-> COMPLETED result event with voice ID and voice score
+-> backend stores active profile, job status, and aggregate score
 ```
+
+The worker requires `schemaVersion`, `cloneId`, and non-empty `audioObjectKeys`
+in every request. Legacy requests without them remain on the request queue and
+must not be sent after switching workers. The worker deletes a request only
+after publishing `COMPLETED` or `FAILED`. Result delivery failure retains the
+request; retrying a completed ElevenLabs call can currently create another
+voice, so the backend consumer must ignore stale/duplicate results by `jobId`.
+
+Result event contract (`PROCESSING` and `FAILED` omit `result`):
+
+```json
+{
+  "schemaVersion": 1,
+  "eventType": "VOICE_PROFILE_BUILD_STATUS",
+  "jobId": 1,
+  "userUuid": "d6bfd311-3c88-40b5-992c-31f12b4f06fd",
+  "cloneId": 1,
+  "status": "COMPLETED",
+  "attemptNumber": 1,
+  "occurredAt": "2026-10-03T06:30:00+00:00",
+  "result": {
+    "elevenlabsVoiceId": "example-voice-id",
+    "voiceScore": 62.0,
+    "voiceScoreMethod": "sample_coverage_proxy",
+    "acceptedSampleCount": 5,
+    "calculationVersion": "clone-similarity-v1"
+  }
+}
+```
+
+On failure, `error` has `code`, `message`, and `retryable: false`.
+Backend should validate job/member/clone identity, ignore stale or duplicate
+events, activate the returned voice ID on `COMPLETED`, and recompute the total
+score with the supplied `voiceScore`. `sample_coverage_proxy` is a fallback
+when speaker embedding cannot be computed; it is not a measured voice match.
 
 ## Clone similarity score
 
-After a voice clone is created, the worker calculates an internal clone
-similarity score from the member's active voice clone, onboarding interview
-coverage, basic profile completeness, completed call count, and user-side talk
-log count. Frontend can show the total score as the clone similarity. If the
-user taps the score, show the generated explanation text instead of exposing the
-full formula.
+After a voice clone is created, the worker computes only the voice component.
+The backend stores that component from the result event and recalculates the
+user-facing clone completeness score in the same transaction. The worker does
+not read or write RDS while processing voice training jobs.
 
 After each voice clone is created, the worker generates and saves a fixed
 reference sentence with the newly created ElevenLabs voice:
@@ -212,34 +248,11 @@ Optional speaker similarity dependencies:
 pip install -r requirements-voice-similarity.txt
 ```
 
-The voice score is written to `clones.voice_similarity_score` when the component
-columns exist. The worker also supplies an initial personality/memory score and
-data-reliability score when those values have not yet been written by the RAG
-profile flow. It then combines face 30%, voice 30%, personality/memory 30%, and
-data reliability 10%, subtracts the explicit data penalty, multiplies by 0.95,
-and writes the one-decimal result to `clones.sync_rate`. The value is capped at
-95.0 and is a clone completeness indicator, not a biometric probability.
-
-Before the backend migration adds the component columns, the worker safely
-falls back to the existing onboarding score. If the optional detail table
-exists, the worker also stores voice score history and explanation there:
-
-```sql
-CREATE TABLE ai_clone_similarity_scores (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    clone_id BIGINT NOT NULL,
-    voice_profile_id BIGINT NULL,
-    voice_training_job_id BIGINT NULL,
-    voice_score DECIMAL(5,2) NULL,
-    interview_score DECIMAL(5,2) NULL,
-    profile_score DECIMAL(5,2) NULL,
-    total_score DECIMAL(5,2) NOT NULL,
-    explanation TEXT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'COMPLETED',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-```
+If embedding evaluation is unavailable, the worker uses accepted audio sample
+count as a readiness proxy and marks the result `sample_coverage_proxy`. The
+backend stores `voiceScore` in `clones.voice_similarity_score` and combines it
+with face, profile, and reliability components. The displayed aggregate is
+capped at 95.0 and is not a biometric probability.
 
 Optional tuning:
 
@@ -247,19 +260,6 @@ Optional tuning:
 CLONE_SIMILARITY_ENABLE_SPEAKER_EMBEDDING=false
 CLONE_SIMILARITY_EXPECTED_VOICE_SAMPLES=5
 CLONE_SIMILARITY_EXCELLENT_VOICE_SAMPLES=20
-CLONE_SIMILARITY_EXPECTED_INTERVIEWS=5
-CLONE_SIMILARITY_EXCELLENT_INTERVIEWS=15
-CLONE_SIMILARITY_EXPECTED_CALLS=3
-CLONE_SIMILARITY_EXCELLENT_CALLS=12
-CLONE_SIMILARITY_EXPECTED_TALK_LOGS=10
-CLONE_SIMILARITY_EXCELLENT_TALK_LOGS=40
-CLONE_SIMILARITY_VOICE_WEIGHT=0.60
-CLONE_SIMILARITY_INTERVIEW_WEIGHT=0.25
-CLONE_SIMILARITY_PROFILE_WEIGHT=0.15
-CLONE_SIMILARITY_SCORE_FLOOR=55
-CLONE_SIMILARITY_ONBOARDING_CAP=64
-CLONE_SIMILARITY_SCORE_MAX=92
-CLONE_SIMILARITY_SCORING_CEILING=96
 CLONE_SIMILARITY_SPEAKER_MODEL=speechbrain/spkrec-ecapa-voxceleb
 CLONE_SIMILARITY_COSINE_LOW=0.20
 CLONE_SIMILARITY_COSINE_HIGH=0.70
@@ -272,12 +272,8 @@ FFMPEG_BIN=ffmpeg
 Overall score calculation and the backend migration contract are documented in
 `docs/clone-similarity-score-contract.md`.
 
-A normal complete onboarding clone is expected to start around the low 60s.
-More distinct interviews, voice samples, completed calls, and user-side talk
-logs raise the personality and reliability components over time. Repeated or
-verified irrelevant data does not add credit and may add an explicit penalty.
-Scores above 90 should feel exceptional, and the displayed score can never
-exceed 95.0.
+The final aggregate score is owned by the backend; see the score contract for
+its weighting, penalties, and display range.
 
 Optional realtime response and voice activity detection settings:
 
