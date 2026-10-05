@@ -33,6 +33,68 @@ class DittoRuntime:
     gpu_name: Callable[[], str]
 
 
+FADE_TYPES = frozenset({"s", "d0"})
+FADE_KEYS = frozenset({"exp", "pitch", "yaw", "roll", "t", "scale"})
+DEFAULT_FADE_KEYS = ("exp", "pitch", "yaw", "roll", "t")
+MAX_FADE_FRAMES = 250
+
+
+@dataclass(frozen=True)
+class DittoMotionOptions:
+    """Optional motion controls passed to Ditto for one render.
+
+    ``fade_type="s"`` blends the first ``fade_in_frames`` and the last
+    ``fade_out_frames`` toward the source portrait's own pose and
+    expression, so a clip starts and ends on the same neutral frame. That
+    lets the call server join clips and idle footage without visible jumps.
+    """
+
+    fade_in_frames: int = 0
+    fade_out_frames: int = 0
+    fade_type: str = "s"
+    fade_keys: tuple[str, ...] = DEFAULT_FADE_KEYS
+
+    @property
+    def active(self) -> bool:
+        return self.fade_in_frames > 0 or self.fade_out_frames > 0
+
+    def validate(self) -> None:
+        for value in (self.fade_in_frames, self.fade_out_frames):
+            if value < 0 or value > MAX_FADE_FRAMES:
+                raise DittoEngineError(
+                    f"Ditto fade frames must be between 0 and {MAX_FADE_FRAMES}."
+                )
+        if self.fade_type not in FADE_TYPES:
+            raise DittoEngineError("Ditto fade type must be 's' or 'd0'.")
+        if not self.fade_keys or not set(self.fade_keys) <= FADE_KEYS:
+            raise DittoEngineError(
+                "Ditto fade keys must be a non-empty subset of "
+                f"{sorted(FADE_KEYS)}."
+            )
+
+
+def build_ditto_more_kwargs(
+    settings: DittoRenderSettings,
+    motion: DittoMotionOptions | None = None,
+) -> dict[str, dict[str, Any]]:
+    setup_kwargs: dict[str, Any] = {
+        "crop_scale": settings.crop_scale,
+        "smo_k_d": settings.smoothing_kernel,
+        "sampling_timesteps": settings.sampling_timesteps,
+    }
+    more_kwargs: dict[str, dict[str, Any]] = {"setup_kwargs": setup_kwargs}
+    if motion is not None and motion.active:
+        setup_kwargs["fade_type"] = motion.fade_type
+        setup_kwargs["fade_out_keys"] = tuple(motion.fade_keys)
+        more_kwargs["run_kwargs"] = {
+            "fade_in": motion.fade_in_frames or -1,
+            "fade_out": motion.fade_out_frames or -1,
+            # A fresh dict per render: Ditto mutates ctrl_info in place.
+            "ctrl_info": {},
+        }
+    return more_kwargs
+
+
 @dataclass(frozen=True)
 class DittoRenderMetrics:
     duration_seconds: float
@@ -101,8 +163,11 @@ class DittoEngine:
         *,
         settings: DittoRenderSettings,
         seed: int = 1024,
+        motion: DittoMotionOptions | None = None,
     ) -> DittoRenderMetrics:
         validate_ditto_render_settings(settings)
+        if motion is not None:
+            motion.validate()
         source_path = source_path.resolve()
         audio_path = audio_path.resolve()
         output_path = output_path.resolve()
@@ -136,13 +201,7 @@ class DittoEngine:
                 str(audio_path),
                 str(source_path),
                 str(output_path),
-                more_kwargs={
-                    "setup_kwargs": {
-                        "crop_scale": settings.crop_scale,
-                        "smo_k_d": settings.smoothing_kernel,
-                        "sampling_timesteps": settings.sampling_timesteps,
-                    }
-                },
+                more_kwargs=build_ditto_more_kwargs(settings, motion),
             )
             if not output_path.is_file() or output_path.stat().st_size <= 0:
                 raise DittoEngineError("Ditto did not produce a final MP4 file.")

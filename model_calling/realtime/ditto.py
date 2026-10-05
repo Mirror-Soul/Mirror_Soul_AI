@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
 import mimetypes
 import os
 import time
+import wave
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
+import numpy as np
 
 from model_calling.realtime.trace import trace_fields
 from model_calling.realtime.video_integrity import (
@@ -100,6 +105,52 @@ class _DittoRenderPool:
             self._available.put_nowait(worker)
 
 
+DEFAULT_FADE_KEYS = "exp,pitch,yaw,roll,t"
+IDLE_LOOP_SAMPLE_RATE = 16_000
+IDLE_LOOP_CACHE_MAX_ENTRIES = 8
+_idle_loop_cache: OrderedDict[str, bytes] = OrderedDict()
+
+
+@dataclass(frozen=True)
+class DittoMotionConfig:
+    """Frames at the start/end of a clip that blend back to the portrait pose.
+
+    Sent to the GPU service as ``fade_*`` form fields. A GPU service that
+    predates these fields ignores them and renders exactly as before.
+    """
+
+    fade_in_frames: int = 0
+    fade_out_frames: int = 0
+    fade_keys: str = DEFAULT_FADE_KEYS
+
+    @property
+    def active(self) -> bool:
+        return self.fade_in_frames > 0 or self.fade_out_frames > 0
+
+    def form_fields(self) -> dict[str, str]:
+        if not self.active:
+            return {}
+        return {
+            "fade_in_frames": str(self.fade_in_frames),
+            "fade_out_frames": str(self.fade_out_frames),
+            "fade_type": "s",
+            "fade_keys": self.fade_keys,
+        }
+
+
+@dataclass(frozen=True)
+class DittoIdleLoopConfig:
+    enabled: bool = False
+    duration_seconds: float = 6.0
+    fade_frames: int = 12
+
+    def motion(self) -> DittoMotionConfig:
+        return DittoMotionConfig(
+            fade_in_frames=self.fade_frames,
+            fade_out_frames=self.fade_frames,
+        )
+
+
 @dataclass(frozen=True)
 class DittoCallConfig:
     service_url: str
@@ -112,6 +163,8 @@ class DittoCallConfig:
     queue_timeout_seconds: float = 90.0
     parallel_max_audio_seconds: float = 8.0
     video_integrity: VideoIntegrityConfig = VideoIntegrityConfig()
+    reply_motion: DittoMotionConfig = DittoMotionConfig()
+    idle_loop: DittoIdleLoopConfig = DittoIdleLoopConfig()
 
     @property
     def worker_urls(self) -> tuple[str, ...]:
@@ -167,6 +220,27 @@ class DittoCallConfig:
             raise DittoRealtimeError(
                 "Ditto call limits and retry settings are invalid."
             )
+        reply_motion = DittoMotionConfig(
+            fade_in_frames=_env_int("DITTO_CALL_REPLY_FADE_IN_FRAMES", 2),
+            fade_out_frames=_env_int("DITTO_CALL_REPLY_FADE_OUT_FRAMES", 8),
+            fade_keys=os.getenv("DITTO_CALL_FADE_KEYS", DEFAULT_FADE_KEYS).strip()
+            or DEFAULT_FADE_KEYS,
+        )
+        idle_loop = DittoIdleLoopConfig(
+            enabled=_env_bool("DITTO_CALL_IDLE_LOOP_ENABLED", True),
+            duration_seconds=_env_float("DITTO_CALL_IDLE_LOOP_SECONDS", 6.0),
+            fade_frames=_env_int("DITTO_CALL_IDLE_LOOP_FADE_FRAMES", 12),
+        )
+        if (
+            not 0 <= reply_motion.fade_in_frames <= 50
+            or not 0 <= reply_motion.fade_out_frames <= 50
+            or not 2.0 <= idle_loop.duration_seconds <= 20.0
+            or not 0 <= idle_loop.fade_frames <= 50
+            or idle_loop.fade_frames * 2 >= idle_loop.duration_seconds * 25
+        ):
+            raise DittoRealtimeError(
+                "Ditto fade or idle loop settings are invalid."
+            )
         return cls(
             service_url=service_urls[0],
             api_key=api_key,
@@ -178,6 +252,8 @@ class DittoCallConfig:
             queue_timeout_seconds=queue_timeout_seconds,
             parallel_max_audio_seconds=parallel_max_audio_seconds,
             video_integrity=VideoIntegrityConfig.from_env(),
+            reply_motion=reply_motion,
+            idle_loop=idle_loop,
         )
 
 
@@ -206,16 +282,21 @@ class DittoRenderClient:
         *,
         call_id: int | None = None,
         turn_id: int | None = None,
+        audio_filename: str = "reply.mp3",
+        audio_content_type: str = "audio/mpeg",
+        motion: DittoMotionConfig | None = None,
     ) -> bytes:
         if not audio_bytes:
             raise DittoRealtimeError("Ditto reply audio must not be empty.")
+        motion = self.config.reply_motion if motion is None else motion
+        form_data = motion.form_fields()
         files = {
             "portrait": (
                 profile.portrait_filename,
                 profile.portrait_bytes,
                 profile.portrait_content_type,
             ),
-            "audio": ("reply.mp3", audio_bytes, "audio/mpeg"),
+            "audio": (audio_filename, audio_bytes, audio_content_type),
         }
         if profile.profile_bytes is not None:
             files["profile"] = (
@@ -263,7 +344,9 @@ class DittoRenderClient:
                 f"worker={worker_index + 1}/{render_pool.worker_count} "
                 f"reserved_slots={reserved_slots} "
                 f"audio_seconds={expected_audio_duration:.3f} "
-                f"queue_wait_ms={round(queue_wait_seconds * 1000)}",
+                f"queue_wait_ms={round(queue_wait_seconds * 1000)} "
+                f"fade_in={motion.fade_in_frames} "
+                f"fade_out={motion.fade_out_frames}",
                 flush=True,
             )
             try:
@@ -272,6 +355,7 @@ class DittoRenderClient:
                         self._http_client,
                         service_url,
                         files,
+                        form_data,
                     )
                 else:
                     async with httpx.AsyncClient(
@@ -281,6 +365,7 @@ class DittoRenderClient:
                             client,
                             service_url,
                             files,
+                            form_data,
                         )
                 last_transport_error = None
             except httpx.HTTPError as exc:
@@ -370,11 +455,13 @@ class DittoRenderClient:
         client: httpx.AsyncClient,
         service_url: str,
         files: dict[str, tuple[str, bytes, str]],
+        form_data: dict[str, str] | None = None,
     ) -> httpx.Response:
         return await client.post(
             f"{service_url}/api/v1/render",
             headers={"X-Ditto-Api-Key": self.config.api_key},
             files=files,
+            data=form_data or None,
         )
 
 
@@ -527,7 +614,9 @@ class DittoVideoSession:
         client: DittoRenderClient,
         profile_loader: FaceProfileLoader,
         call_id: int | None = None,
+        idle_loop: DittoIdleLoopConfig | None = None,
     ) -> None:
+        self.idle_loop = idle_loop or DittoIdleLoopConfig()
         self.user_id = user_id
         self.clone_id = clone_id
         self.track = track
@@ -554,6 +643,76 @@ class DittoVideoSession:
                     f"clone_id={self.clone_id}",
                     flush=True,
                 )
+
+    async def prepare_idle_loop(self) -> bool:
+        """Render a silent Ditto clip and loop it while the clone is idle.
+
+        The clip starts and ends on the portrait's own pose (fade to source),
+        so every reply, which also starts and ends there, joins it smoothly.
+        Failure keeps the still portrait; the call itself is unaffected.
+        """
+        if not self.idle_loop.enabled:
+            return False
+        set_idle_video = getattr(self.track, "set_idle_video", None)
+        if set_idle_video is None:
+            return False
+        await self.prepare()
+        assert self._profile is not None
+        cache_key = _idle_loop_cache_key(self._profile, self.idle_loop)
+        started = time.monotonic()
+        video_bytes = _idle_loop_cache.get(cache_key)
+        source = "cache"
+        if video_bytes is None:
+            source = "render"
+            print(
+                "[DITTO_CALL] idle loop render started: "
+                f"{trace_fields(self.call_id)} clone_id={self.clone_id} "
+                f"seconds={self.idle_loop.duration_seconds:.1f} "
+                f"fade_frames={self.idle_loop.fade_frames}",
+                flush=True,
+            )
+            try:
+                video_bytes = await self.client.render(
+                    self._profile,
+                    silent_wav_bytes(self.idle_loop.duration_seconds),
+                    call_id=self.call_id,
+                    audio_filename="idle.wav",
+                    audio_content_type="audio/wav",
+                    motion=self.idle_loop.motion(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    "[DITTO_CALL] idle loop unavailable; keeping still portrait: "
+                    f"{trace_fields(self.call_id)} "
+                    f"error_code={getattr(exc, 'code', 'IDLE_LOOP_FAILED')} "
+                    f"error={exc!r}",
+                    flush=True,
+                )
+                return False
+        try:
+            set_idle_video(video_bytes)
+        except Exception as exc:
+            print(
+                "[DITTO_CALL] idle loop rejected; keeping still portrait: "
+                f"{trace_fields(self.call_id)} error={exc!r}",
+                flush=True,
+            )
+            _idle_loop_cache.pop(cache_key, None)
+            return False
+        _idle_loop_cache[cache_key] = video_bytes
+        _idle_loop_cache.move_to_end(cache_key)
+        while len(_idle_loop_cache) > IDLE_LOOP_CACHE_MAX_ENTRIES:
+            _idle_loop_cache.popitem(last=False)
+        print(
+            "[DITTO_CALL] idle loop ready: "
+            f"{trace_fields(self.call_id)} clone_id={self.clone_id} "
+            f"source={source} bytes={len(video_bytes)} "
+            f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            flush=True,
+        )
+        return True
 
     async def enqueue_reply(
         self,
@@ -594,7 +753,43 @@ def create_ditto_video_session(
         client=DittoRenderClient(config),
         profile_loader=FaceProfileLoader(),
         call_id=call_id,
+        idle_loop=config.idle_loop,
     )
+
+
+def silent_wav_bytes(duration_seconds: float, *, seed: int = 7) -> bytes:
+    """16 kHz mono PCM with a very low noise floor (about -66 dBFS).
+
+    Pure digital silence can give speech-feature extractors degenerate
+    input; a faint, deterministic noise floor keeps the mouth closed while
+    Ditto still produces natural blinks and small head motion.
+    """
+    if duration_seconds <= 0:
+        raise ValueError("Silent audio duration must be positive.")
+    samples = max(1, round(duration_seconds * IDLE_LOOP_SAMPLE_RATE))
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0.0, 16.0, samples).clip(-64, 64).astype("<i2")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(IDLE_LOOP_SAMPLE_RATE)
+        wav_file.writeframes(noise.tobytes())
+    return output.getvalue()
+
+
+def _idle_loop_cache_key(
+    profile: FaceRenderProfile,
+    config: DittoIdleLoopConfig,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(profile.portrait_bytes)
+    digest.update(b"\0")
+    digest.update(profile.profile_bytes or b"")
+    digest.update(
+        f"\0{config.duration_seconds:.3f}:{config.fade_frames}".encode()
+    )
+    return digest.hexdigest()
 
 
 def _validate_profile(

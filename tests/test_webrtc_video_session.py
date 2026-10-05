@@ -60,9 +60,15 @@ class _Renderer:
     def __init__(self) -> None:
         self.name = "renderer"
         self.prepared = False
+        self.idle_loop_prepared = False
 
     async def prepare(self) -> None:
         self.prepared = True
+
+    async def prepare_idle_loop(self) -> bool:
+        assert self.prepared
+        self.idle_loop_prepared = True
+        return True
 
 
 class WebRTCVideoSessionTests(unittest.TestCase):
@@ -130,6 +136,7 @@ class WebRTCVideoSessionTests(unittest.TestCase):
         self.assertEqual(kinds, ["audio", "video"])
         self.assertEqual(renderer.name, "renderer")
         self.assertTrue(renderer.prepared)
+        self.assertTrue(renderer.idle_loop_prepared)
         self.assertTrue(closed)
 
     def test_voice_call_keeps_audio_only(self) -> None:

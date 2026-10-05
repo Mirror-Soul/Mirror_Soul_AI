@@ -56,6 +56,19 @@ samplingTimesteps=50
 seed=1024
 ```
 
+선택 필드로 클립의 앞뒤를 원래 초상화 자세로 되돌릴 수 있다. 통화 서버는 답변과
+대기 클립을 이어 붙일 때 얼굴이 튀지 않도록 이 값을 보낸다
+(`docs/realtime-video-transitions.md`).
+
+```text
+fade_in_frames=2      # 시작 N프레임을 초상화 자세에서 출발 (0~250)
+fade_out_frames=8     # 마지막 N프레임 동안 초상화 자세로 복귀 (0~250)
+fade_type=s           # s=초상화 자세, d0=첫 생성 프레임
+fade_keys=exp,pitch,yaw,roll,t
+```
+
+두 프레임 값이 모두 없거나 0이면 기존과 똑같이 렌더한다. 범위를 벗어나면 `422`를 반환한다.
+
 GPU 렌더는 한 번에 한 요청만 처리한다. 이미 렌더 중이면 HTTP `429`를 반환하므로
 호출 측에서 지수 백오프로 재시도해야 한다.
 
