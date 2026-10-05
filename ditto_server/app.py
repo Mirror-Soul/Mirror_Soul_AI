@@ -17,9 +17,11 @@ from starlette.background import BackgroundTask
 
 from ditto_server.config import DittoServiceConfig
 from ditto_server.engine import (
+    DEFAULT_FADE_KEYS,
     DittoEngine,
     DittoEngineBusyError,
     DittoEngineError,
+    DittoMotionOptions,
 )
 from model_training.face_training.ditto_runner import (
     DittoRenderSettings,
@@ -98,12 +100,22 @@ def create_app(
         smoothing_kernel: int | None = Form(None),
         sampling_timesteps: int | None = Form(None),
         seed: int = Form(1024),
+        fade_in_frames: int | None = Form(None),
+        fade_out_frames: int | None = Form(None),
+        fade_type: str | None = Form(None),
+        fade_keys: str | None = Form(None),
         x_ditto_api_key: str | None = Header(
             None,
             alias="X-Ditto-Api-Key",
         ),
     ):
         _require_api_key(x_ditto_api_key, config.api_key)
+        motion = _motion_options(
+            fade_in_frames=fade_in_frames,
+            fade_out_frames=fade_out_frames,
+            fade_type=fade_type,
+            fade_keys=fade_keys,
+        )
         if render_guard.locked():
             raise HTTPException(
                 status_code=429,
@@ -122,6 +134,7 @@ def create_app(
                 smoothing_kernel=smoothing_kernel,
                 sampling_timesteps=sampling_timesteps,
                 seed=seed,
+                motion=motion,
             )
 
     return app
@@ -139,6 +152,7 @@ async def _render_response(
     smoothing_kernel: int | None,
     sampling_timesteps: int | None,
     seed: int,
+    motion: DittoMotionOptions | None = None,
 ):
     request_id = uuid4().hex
     workspace = tempfile.TemporaryDirectory(
@@ -179,6 +193,9 @@ async def _render_response(
             sampling_timesteps=sampling_timesteps,
         )
         output_path = workspace_path / "render.mp4"
+        render_kwargs: dict[str, object] = {"settings": settings, "seed": seed}
+        if motion is not None:
+            render_kwargs["motion"] = motion
         loop = asyncio.get_running_loop()
         metrics = await loop.run_in_executor(
             gpu_executor,
@@ -187,8 +204,7 @@ async def _render_response(
                 portrait_path,
                 audio_path,
                 output_path,
-                settings=settings,
-                seed=seed,
+                **render_kwargs,
             ),
         )
     except HTTPException:
@@ -218,6 +234,33 @@ async def _render_response(
         },
         background=BackgroundTask(workspace.cleanup),
     )
+
+
+def _motion_options(
+    *,
+    fade_in_frames: int | None,
+    fade_out_frames: int | None,
+    fade_type: str | None,
+    fade_keys: str | None,
+) -> DittoMotionOptions | None:
+    if fade_in_frames is None and fade_out_frames is None:
+        return None
+    keys = DEFAULT_FADE_KEYS
+    if fade_keys is not None and fade_keys.strip():
+        keys = tuple(
+            key.strip() for key in fade_keys.split(",") if key.strip()
+        )
+    motion = DittoMotionOptions(
+        fade_in_frames=fade_in_frames or 0,
+        fade_out_frames=fade_out_frames or 0,
+        fade_type=(fade_type or "s").strip(),
+        fade_keys=keys,
+    )
+    try:
+        motion.validate()
+    except DittoEngineError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return motion if motion.active else None
 
 
 def _require_api_key(provided: str | None, expected: str) -> None:

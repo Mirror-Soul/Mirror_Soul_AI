@@ -89,6 +89,7 @@ class CallSnapshot:
     llm: Stage = field(default_factory=Stage)
     tts: Stage = field(default_factory=Stage)
     video: Stage = field(default_factory=Stage)
+    idle: Stage = field(default_factory=Stage)
     trace_summary: str = "No completed turn yet"
     recent_call_summaries: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
@@ -251,6 +252,19 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             snapshot.video = Stage("PROCESSING", "Ditto profile readying")
         if "idle portrait ready" in lowered:
             snapshot.video = Stage("READY", "Idle portrait ready")
+        if "idle loop render started" in lowered:
+            snapshot.idle = Stage("PROCESSING", "Silent idle clip rendering")
+        if "[ditto_call] idle loop ready" in lowered:
+            snapshot.idle = Stage("READY", "Ditto idle loop playing")
+        if (
+            "idle loop unavailable" in lowered
+            or "idle loop rejected" in lowered
+            or "idle loop preparation failed" in lowered
+        ):
+            snapshot.idle = Stage(
+                "WARNING",
+                "Still portrait (idle loop failed): " + line,
+            )
         if "ditto reply render started" in lowered:
             snapshot.video = Stage("PROCESSING", "Reply video rendering")
         if "[ditto_call] render completed" in lowered:
@@ -521,6 +535,7 @@ def render(
         _stage_line("LLM", snapshot.llm, color),
         _stage_line("TTS", snapshot.tts, color),
         _stage_line("VIDEO", snapshot.video, color),
+        _stage_line("IDLE", snapshot.idle, color),
         "",
         section("LATEST TURN SUMMARY", color, width),
         _tagged_event_line(snapshot.trace_summary, color, width)

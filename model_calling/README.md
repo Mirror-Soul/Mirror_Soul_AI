@@ -39,9 +39,15 @@ DITTO_CALL_FACE_RESULT_PREFIX=face-results
 DITTO_CALL_RETRY_ATTEMPTS=6
 DITTO_CALL_RETRY_BASE_SECONDS=1.0
 DITTO_CALL_AUDIO_ONLY_FALLBACK=false
-REALTIME_IDLE_MOTION_ENABLED=true
+REALTIME_IDLE_MOTION_ENABLED=false
 REALTIME_IDLE_MOTION_SCALE=0.012
 REALTIME_IDLE_MOTION_PERIOD_SECONDS=6.0
+REALTIME_VIDEO_TRANSITION_FRAMES=6
+DITTO_CALL_REPLY_FADE_IN_FRAMES=2
+DITTO_CALL_REPLY_FADE_OUT_FRAMES=8
+DITTO_CALL_IDLE_LOOP_ENABLED=true
+DITTO_CALL_IDLE_LOOP_SECONDS=6
+DITTO_CALL_IDLE_LOOP_FADE_FRAMES=12
 REALTIME_VIDEO_WIDTH=540
 REALTIME_VIDEO_HEIGHT=960
 REALTIME_VIDEO_FPS=25
@@ -76,6 +82,14 @@ removed and the singular URL is used as the first worker.
 reserves every worker slot and renders alone because long Ditto sequences can
 consume most of a 24 GB GPU. Set it to `0` only after a GPU-specific benchmark
 has shown that unrestricted parallel renders are safe.
+
+Idle and transitions (see `docs/realtime-video-transitions.md`): every reply
+clip is rendered with its last frames easing back to the portrait's own pose,
+and a silent Ditto clip rendered the same way loops while the clone is idle.
+Because both start and end on the same neutral frame, the track can switch
+between them without the face jumping; a short crossfade
+(`REALTIME_VIDEO_TRANSITION_FRAMES`) covers the remaining difference when a
+reply starts in the middle of the idle loop.
 
 The current implementation is turn-based: it waits for the complete TTS audio
 and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the

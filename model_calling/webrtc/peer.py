@@ -191,15 +191,20 @@ async def create_answer_from_offer(
                 width=int(os.getenv("REALTIME_VIDEO_WIDTH", "540")),
                 height=int(os.getenv("REALTIME_VIDEO_HEIGHT", "960")),
                 fps=int(os.getenv("REALTIME_VIDEO_FPS", "25")),
+                # The zoom/pan on the still portrait drifts away from the
+                # frame Ditto replies start on, which reads as a jump.
                 idle_motion_enabled=os.getenv(
                     "REALTIME_IDLE_MOTION_ENABLED",
-                    "true",
+                    "false",
                 ).strip().lower() in {"1", "true", "yes", "on"},
                 idle_motion_scale=float(
                     os.getenv("REALTIME_IDLE_MOTION_SCALE", "0.012")
                 ),
                 idle_motion_period_seconds=float(
                     os.getenv("REALTIME_IDLE_MOTION_PERIOD_SECONDS", "6.0")
+                ),
+                transition_frames=int(
+                    os.getenv("REALTIME_VIDEO_TRANSITION_FRAMES", "6")
                 ),
             )
             pc.addTrack(output_video_track)
@@ -247,6 +252,22 @@ async def create_answer_from_offer(
                 except Exception as exc:
                     print(
                         "[WEBRTC] idle portrait preparation failed: "
+                        f"callId={call_id} error={exc!r}",
+                        flush=True,
+                    )
+                    return
+                prepare_idle_loop = getattr(
+                    video_renderer,
+                    "prepare_idle_loop",
+                    None,
+                )
+                if prepare_idle_loop is None:
+                    return
+                try:
+                    await prepare_idle_loop()
+                except Exception as exc:
+                    print(
+                        "[WEBRTC] idle loop preparation failed: "
                         f"callId={call_id} error={exc!r}",
                         flush=True,
                     )

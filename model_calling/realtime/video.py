@@ -26,9 +26,36 @@ class QueuedVideoTrackError(RuntimeError):
 class _VideoSegment:
     container: Any
     frames: Iterator[av.VideoFrame]
+    segment_id: int = 0
 
     def close(self) -> None:
         self.container.close()
+
+
+def _open_segment(video_bytes: bytes, *, segment_id: int = 0) -> _VideoSegment:
+    container = None
+    try:
+        container = av.open(io.BytesIO(video_bytes))
+        if not any(stream.type == "video" for stream in container.streams):
+            raise QueuedVideoTrackError(
+                "Rendered response does not contain a video stream."
+            )
+        decoded_frames = iter(container.decode(video=0))
+        try:
+            first_frame = next(decoded_frames)
+        except StopIteration as exc:
+            raise QueuedVideoTrackError(
+                "Rendered response contains no decodable video frames."
+            ) from exc
+        return _VideoSegment(
+            container=container,
+            frames=iter(chain((first_frame,), decoded_frames)),
+            segment_id=segment_id,
+        )
+    except Exception:
+        if container is not None:
+            container.close()
+        raise
 
 
 class QueuedVideoTrack(MediaStreamTrack):
@@ -43,6 +70,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         idle_motion_enabled: bool = True,
         idle_motion_scale: float = 0.012,
         idle_motion_period_seconds: float = 6.0,
+        transition_frames: int = 0,
     ) -> None:
         super().__init__()
         if width <= 0 or height <= 0 or width % 2 or height % 2:
@@ -53,6 +81,8 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise ValueError("Idle motion scale must be between 0 and 0.05.")
         if idle_motion_period_seconds <= 0:
             raise ValueError("Idle motion period must be positive.")
+        if transition_frames < 0 or transition_frames > 50:
+            raise ValueError("Transition frames must be between 0 and 50.")
 
         self.width = width
         self.height = height
@@ -66,10 +96,32 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._frame_number = 0
         self._started_at: float | None = None
         self._sent_video_frames = 0
+        self.transition_frames = transition_frames
+        self._next_segment_id = 1
+        # Idle loop: a Ditto clip rendered from silence that starts and ends
+        # on the neutral portrait pose, replayed from its first frame
+        # whenever the track returns to idle.
+        self._idle_video_bytes: bytes | None = None
+        self._idle_loop: _VideoSegment | None = None
+        self._idle_loop_generation = 0
+        # Crossfade state: the last frame sent and the frame being faded out.
+        self._last_source: tuple[str, int] | None = None
+        self._last_output: av.VideoFrame | None = None
+        self._blend_from: np.ndarray | None = None
+        self._blend_step = 0
+        self._transitions = 0
 
     @property
     def is_playing(self) -> bool:
         return self._active_segment is not None or bool(self._segments)
+
+    @property
+    def has_idle_video(self) -> bool:
+        return self._idle_video_bytes is not None
+
+    @property
+    def transition_count(self) -> int:
+        return self._transitions
 
     def set_idle_image(self, image_bytes: bytes) -> None:
         if not image_bytes:
@@ -91,32 +143,27 @@ class QueuedVideoTrack(MediaStreamTrack):
             if container is not None:
                 container.close()
 
+    def set_idle_video(self, video_bytes: bytes) -> None:
+        """Use a rendered idle clip instead of the still portrait while idle."""
+        if not video_bytes:
+            raise QueuedVideoTrackError("Idle video must not be empty.")
+        probe = _open_segment(video_bytes)
+        probe.close()
+        self._close_idle_loop()
+        self._idle_video_bytes = video_bytes
+        self._idle_loop_generation += 1
+        print(
+            "[VIDEO_OUT] idle loop video ready: "
+            f"encoded_bytes={len(video_bytes)}",
+            flush=True,
+        )
+
     def enqueue_encoded_video(self, video_bytes: bytes) -> None:
         if not video_bytes:
             raise QueuedVideoTrackError("Rendered video must not be empty.")
-        container = None
-        try:
-            container = av.open(io.BytesIO(video_bytes))
-            if not any(stream.type == "video" for stream in container.streams):
-                raise QueuedVideoTrackError(
-                    "Rendered response does not contain a video stream."
-                )
-            decoded_frames = iter(container.decode(video=0))
-            try:
-                first_frame = next(decoded_frames)
-            except StopIteration as exc:
-                raise QueuedVideoTrackError(
-                    "Rendered response contains no decodable video frames."
-                ) from exc
-            segment = _VideoSegment(
-                container=container,
-                frames=iter(chain((first_frame,), decoded_frames)),
-            )
-            self._segments.append(segment)
-        except Exception:
-            if container is not None:
-                container.close()
-            raise
+        segment = _open_segment(video_bytes, segment_id=self._next_segment_id)
+        self._next_segment_id += 1
+        self._segments.append(segment)
 
         print(
             "[VIDEO_OUT] queued Ditto video: "
@@ -132,13 +179,22 @@ class QueuedVideoTrack(MediaStreamTrack):
             await asyncio.sleep(max(0.0, target_time - time.monotonic()))
 
         frame = self._next_rendered_frame()
-        if frame is None:
-            frame = self._idle_frame()
+        if frame is not None:
+            assert self._active_segment is not None
+            source = ("reply", self._active_segment.segment_id)
+        else:
+            if self._last_source is not None and self._last_source[0] == "reply":
+                # Replies end on the neutral pose, and so does the idle
+                # loop's first frame: restart the loop there.
+                self._close_idle_loop()
+            frame, source = self._next_idle_frame()
+        frame = self._apply_transition(frame, source)
         frame = frame.reformat(
             width=self.width,
             height=self.height,
             format="yuv420p",
         )
+        self._last_output = frame
         frame.pts = round(self._frame_number * VIDEO_CLOCK_RATE / self.fps)
         frame.time_base = Fraction(1, VIDEO_CLOCK_RATE)
         self._frame_number += 1
@@ -153,6 +209,7 @@ class QueuedVideoTrack(MediaStreamTrack):
 
     def stop(self) -> None:
         self._close_active_segment()
+        self._close_idle_loop()
         while self._segments:
             self._segments.popleft().close()
         super().stop()
@@ -176,6 +233,86 @@ class QueuedVideoTrack(MediaStreamTrack):
                     flush=True,
                 )
                 return None
+
+    def _next_idle_frame(self) -> tuple[av.VideoFrame, tuple[str, int]]:
+        if self._idle_video_bytes is not None:
+            for _ in range(2):
+                if self._idle_loop is None:
+                    try:
+                        self._idle_loop = _open_segment(self._idle_video_bytes)
+                    except Exception as exc:
+                        self._disable_idle_video(exc)
+                        break
+                    self._idle_loop_generation += 1
+                try:
+                    frame = next(self._idle_loop.frames)
+                    return frame, ("idle-loop", self._idle_loop_generation)
+                except StopIteration:
+                    self._close_idle_loop()
+                except Exception as exc:
+                    self._disable_idle_video(exc)
+                    break
+        return self._idle_frame(), ("idle-portrait", 0)
+
+    def _disable_idle_video(self, exc: Exception) -> None:
+        self._close_idle_loop()
+        self._idle_video_bytes = None
+        print(
+            "[VIDEO_OUT] idle loop video failed; using still portrait: "
+            f"error={exc!r}",
+            flush=True,
+        )
+
+    def _apply_transition(
+        self,
+        frame: av.VideoFrame,
+        source: tuple[str, int],
+    ) -> av.VideoFrame:
+        previous_source = self._last_source
+        self._last_source = source
+        if self.transition_frames <= 0:
+            return frame
+        if (
+            previous_source is not None
+            and source != previous_source
+            and self._last_output is not None
+        ):
+            self._blend_from = self._last_output.to_ndarray(format="rgb24")
+            self._blend_step = 0
+            if previous_source[0] != source[0]:
+                # Idle-loop wraps also blend, but are not worth a log line.
+                self._transitions += 1
+                print(
+                    "[VIDEO_OUT] crossfade started: "
+                    f"from={previous_source[0]} to={source[0]} "
+                    f"frames={self.transition_frames}",
+                    flush=True,
+                )
+        if self._blend_from is None:
+            return frame
+
+        self._blend_step += 1
+        alpha = self._blend_step / (self.transition_frames + 1)
+        current = frame.reformat(
+            width=self.width,
+            height=self.height,
+            format="rgb24",
+        ).to_ndarray()
+        blended = (
+            current.astype(np.float32) * alpha
+            + self._blend_from.astype(np.float32) * (1.0 - alpha)
+        )
+        if self._blend_step >= self.transition_frames:
+            self._blend_from = None
+        return av.VideoFrame.from_ndarray(
+            np.clip(blended + 0.5, 0, 255).astype(np.uint8),
+            format="rgb24",
+        )
+
+    def _close_idle_loop(self) -> None:
+        if self._idle_loop is not None:
+            self._idle_loop.close()
+            self._idle_loop = None
 
     def _idle_frame(self) -> av.VideoFrame:
         if not self.idle_motion_enabled or self.idle_motion_scale == 0:
