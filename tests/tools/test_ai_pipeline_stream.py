@@ -12,7 +12,8 @@ class AiPipelineStreamTest(unittest.TestCase):
         )
 
         self.assertIn("[AI ]", output)
-        self.assertIn("user_uuid=user-1", output)
+        self.assertIn("성격·기억(RAG) 학습 완료", output)
+        self.assertIn("회원 user-1", output)
 
     def test_stream_commands_follow_only_ai_pipeline_events(self) -> None:
         ai_command = _ai_command(history=20, scan_lines=800)

@@ -81,7 +81,7 @@ class Stage:
     job_id: str = "-"
     clone_id: str = "-"
     score: str = "-"
-    detail: str = "No matching event yet"
+    detail: str = "아직 기록 없음"
 
 
 @dataclass
@@ -91,7 +91,7 @@ class PipelineSnapshot:
     voice: Stage = field(default_factory=Stage)
     face: Stage = field(default_factory=Stage)
     overall_score: str = "-"
-    overall_note: str = "No complete score set yet"
+    overall_note: str = "아직 점수가 모두 나오지 않음"
     score_components: str = "-"
     data_reliability_score: str = "-"
     penalty_score: str = "-"
@@ -252,7 +252,7 @@ def parse_pipeline_logs(
 
         if "[CLONE_SIMILARITY] updated:" in line:
             snapshot.overall_score = values.get("overall", "-")
-            snapshot.overall_note = "last AI score event"
+            snapshot.overall_note = "마지막 점수 로그 기준"
             snapshot.voice.score = values.get("voice", snapshot.voice.score)
             if snapshot.rag.score == "-":
                 snapshot.rag.score = values.get("personality", "-")
@@ -293,7 +293,7 @@ def parse_pipeline_logs(
     estimated = _estimate_overall(snapshot)
     if estimated is not None:
         snapshot.overall_score = estimated
-        snapshot.overall_note = "estimated from complete AI component logs"
+        snapshot.overall_note = "AI 로그로 계산한 예상값"
         snapshot.score_components = (
             f"face={snapshot.face.score} voice={snapshot.voice.score} "
             f"profile={snapshot.rag.score} "
@@ -585,7 +585,7 @@ def render(
         "=" * min(width, 100),
         f"Target user : {_paint(snapshot.user_uuid or 'Waiting for a new AI job...', ANSI_BOLD, color)}",
         "",
-        section("CONNECTIONS / PROCESSES", color, width),
+        section("연결 상태 (CONNECTIONS / PROCESSES)", color, width),
         f"AI server   : {_colored_status(ai_connection, color)}",
         f"AI API      : {_colored_status(ai_api, color)}",
         f"Voice worker: {_colored_status(voice_worker, color)}",
@@ -593,7 +593,7 @@ def render(
         f"Face worker : {_colored_status(face_worker, color)}",
         f"GPU         : {gpu_value}  (used MiB, total MiB, utilization %)",
         "",
-        section("PIPELINE (this member)", color, width),
+        section("학습 단계 - 이 회원 (PIPELINE)", color, width),
         _stage_line("RAG", snapshot.rag, color),
         _detail_lines(snapshot.rag.detail, width, color),
         _stage_line("VOICE", snapshot.voice, color),
@@ -605,22 +605,27 @@ def render(
         f"({snapshot.overall_note})",
         f"COMPONENTS: {snapshot.score_components}",
         _paint(
-            "            Official clone score is calculated and stored by the backend.",
+            "            공식 클론 점수는 백엔드가 계산해서 저장합니다.",
             ANSI_DIM,
             color,
         ),
         "",
-        section("RECENT AI EVENTS (oldest -> newest)", color, width),
+        section("최근 이벤트 - 위가 오래된 것 (RECENT AI EVENTS)", color, width),
     ]
     lines.extend(
-        [_tagged_event_line(line, color, width) for line in snapshot.events]
-        or [_paint("No matching events yet.", ANSI_DIM, color)]
+        [
+            text
+            for text in (_tagged_event_line(line, color, width) for line in snapshot.events)
+            if text
+        ]
+        or [_paint("아직 이벤트 없음", ANSI_DIM, color)]
     )
     lines.extend([
         "",
         _paint(
-            "Colors: green=done  cyan=running  yellow=warning  red=failed  gray=waiting"
-            "   |  Ctrl+C to stop",
+            "색상: 초록=완료  청록=진행 중  노랑=주의  빨강=실패  회색=대기"
+            "   |  종료: Ctrl+C\n"
+            "전체 학습 기록 보기: tools\\monitor-ai-events.cmd --color always --gpu-port 40053",
             ANSI_DIM,
             color,
         ),

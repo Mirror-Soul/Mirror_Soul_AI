@@ -44,6 +44,11 @@ def _paint(text: str, style: str, enabled: bool) -> str:
     return f"{style}{text}{ANSI_RESET}" if enabled else text
 
 
+def strip_prefix_only(text: str) -> bool:
+    """True when the event was hidden (only the time/source prefix is left)."""
+    return not _ANSI.sub("", text).split("]", 1)[-1].strip()
+
+
 def format_event(
     source: str,
     line: str,
@@ -294,7 +299,10 @@ def main() -> int:
                     )
                 )
                 continue
-            emit(format_event(source, line, color=color, width=terminal_width()))
+            text = format_event(source, line, color=color, width=terminal_width())
+            if strip_prefix_only(text):
+                continue
+            emit(text)
     except KeyboardInterrupt:
         pass
     finally:

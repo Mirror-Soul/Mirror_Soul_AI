@@ -65,9 +65,11 @@ class WrapTests(unittest.TestCase):
             timing_summary(TRACE_LINE),
             "total 16.7s | STT 1.0s | RAG 0.2s | LLM 1.3s | TTS 1.6s | VIDEO 12.5s",
         )
-        text = tagged_event(TRACE_LINE, "", color=False)
-        self.assertIn("-> total 16.7s", text)
-        self.assertNotIn("video_ms=", text)
+        raw = tagged_event(TRACE_LINE, "", color=False, korean=False)
+        self.assertIn("-> total 16.7s", raw)
+        self.assertNotIn("video_ms=", raw)
+        korean = tagged_event(TRACE_LINE, "", color=False)
+        self.assertIn("[턴    ] 대화 완료: 총 16.7초 | 음성 인식 1.0", korean)
 
 
 class DashboardTests(unittest.TestCase):
@@ -123,17 +125,44 @@ class CallStreamTests(unittest.TestCase):
         ):
             lines += formatter.format(raw)
         text = "\n".join(lines)
-        self.assertIn("CALL 106", text)
-        self.assertIn("call 106 · turn 3", text)
-        self.assertIn("[USER  ] 너 원래 그런 사람이야?", text)
-        self.assertIn("[CLONE ]", text)
+        self.assertIn("통화 106", text)
+        self.assertIn("통화 수락: 영상 통화, 클론 회원 524a1300…", text)
+        self.assertIn("통화 106 · 3번째 대화", text)
+        self.assertIn("[사용자] 너 원래 그런 사람이야?", text)
+        self.assertIn("[클론  ]", text)
         self.assertIn(ANSWER.replace(" ", ""), text.replace(" ", "").replace("\n", ""))
-        self.assertIn("[TURN  ] completed: total 16.7s", text)
-        self.assertIn("CALL 106 closed", text)
-        self.assertEqual(text.count("call 106 · turn 3"), 1)
+        self.assertIn("[턴    ] 대화 완료: 총 16.7초", text)
+        self.assertIn("통화 106 끝", text)
+        self.assertEqual(text.count("3번째 대화"), 1)
+
+    def test_history_marker_repeats_and_dates(self) -> None:
+        formatter = CallLogFormatter(color=False, width=90)
+        lines = []
+        for raw in (
+            "2026-10-06T08:51:33+0000 ip python[9]: [SIGNALING] disconnected: server rejected WebSocket connection: HTTP 502",
+            "2026-10-06T08:51:33+0000 ip python[9]: [SIGNALING] reconnecting in 3 seconds...",
+            "2026-10-06T08:51:33+0000 ip python[9]: [SIGNALING] connecting...",
+            "2026-10-06T08:51:34+0000 ip python[9]: [SIGNALING] disconnected: server rejected WebSocket connection: HTTP 502",
+            "2026-10-06T08:51:34+0000 ip python[9]: [SIGNALING] reconnecting in 3 seconds...",
+            "2026-10-06T08:51:34+0000 ip python[9]: [SIGNALING] connecting...",
+            "2026-10-06T08:51:35+0000 ip python[9]: [SIGNALING] connected",
+            "2026-10-06T08:51:35+0000 ip python[9]: [SIGNALING] received: {'type': 'OFFER', 'data': {'callId': 7, 'sdp': {'sdp': 'v=0 a=rtpmap:111 opus'}}}",
+            "__MIRROR_SOUL_LIVE__",
+        ):
+            lines += formatter.format(raw)
+        text = "\n".join(lines)
+        self.assertIn("2026-10-06 (이전 기록)", text)
+        self.assertEqual(text.count("시그널링 서버 연결 끊김 (HTTP 502)"), 1)
+        self.assertIn("(같은 내용 3줄 더 반복)", text)
+        self.assertIn("시그널링 서버 연결됨", text)
+        self.assertIn("앱의 연결 정보(SDP offer) 받음", text)
+        self.assertNotIn("rtpmap", text)
+        self.assertIn("여기부터 실시간 로그", text)
 
     def test_remote_command_drops_frame_noise(self) -> None:
-        command = remote_command(100, 2000)
+        command = remote_command(60, 2000)
+        self.assertIn("--since '-60 minutes'", command)
+        self.assertIn("echo __MIRROR_SOUL_LIVE__", command)
         self.assertIn("-o short-iso", command)
         self.assertIn("grep --line-buffered -v 'sending video frame'", command)
         self.assertIn("Traceback", command)
@@ -141,9 +170,45 @@ class CallStreamTests(unittest.TestCase):
     def test_ai_stream_event_is_not_cut(self) -> None:
         line = "[FACE_TRAINING] completed: job_id=16 user_uuid=1e7b3b01-1a84-4cd4-a1ea-4792f1143d55 clone_id=30 face_score=85.21 quality_tier=NORMAL profile=s3://bucket/face-results/x/job-16/face-profile.json"
         text = format_event("GPU", line, color=False, width=70)
-        self.assertIn("face-profile.json", _joined(text))
-        self.assertNotIn("face-pro…", text)
+        self.assertIn("얼굴 학습 완료: 얼굴 점수 85.21", _joined(text))
+        self.assertNotIn("…", text.replace("1e7b3b01…", ""))
+        raw = tagged_event(line, "", color=False, width=70, korean=False)
+        self.assertIn("face-profile.json", _joined(raw))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KoreanEventTextTests(unittest.TestCase):
+    def test_call_events_in_korean(self) -> None:
+        from tools.call_event_text import describe
+
+        cases = {
+            "[SIGNALING] disconnected: server rejected WebSocket connection: HTTP 502": "시그널링 서버 연결 끊김 (HTTP 502)",
+            "[WEBRTC] connection: callId=1 state=connected": "WebRTC 연결: 연결됨",
+            "[DITTO_CALL] render completed: callId=1 turn=2 bytes=1 seconds=10.208": "Ditto 렌더 완료 (10.2초 걸림)",
+            "[REALTIME] utterance enqueued: callId=1 user=u queue_size=1 wav_bytes=32044": "사용자 말 감지 (약 1.0초)",
+            "[CALL_TRACE] call closed: callId=1 user=u status=COMPLETED_WITH_ERRORS reason=PEER_CLOSED duration_ms=89592 turns_started=3 turns_completed=2 turns_failed=1 last_error=VIDEO_FAILED": "통화 종료: 일부 오류 후 종료, 앱 연결이 끊김, 통화 시간 1분 29초, 턴 2/3 완료, 실패 1, 마지막 오류 VIDEO_FAILED",
+        }
+        for line, expected in cases.items():
+            self.assertEqual(describe(line).text, expected, line)
+        self.assertEqual(describe("[VIDEO_OUT] queued Ditto video: encoded_bytes=1").text, "")
+        self.assertIsNone(describe("[REALTIME] something new: x=1"))
+
+    def test_training_events_in_korean(self) -> None:
+        from tools.training_event_text import describe
+
+        self.assertEqual(
+            describe("[VOICE_TRAINING] completed: job_id=30 voice_id=AJqu…iyfQ voice_score=96.4").text,
+            "음성 학습 완료: 음성 점수 96.4 (job 30)",
+        )
+        self.assertEqual(
+            describe("[FACE_TRAINING] frame analysis completed: accepted=43 rejected=11 quality_gate=False source=/a").text,
+            "얼굴 프레임 분석: 사용 43장, 제외 11장, 품질 기준 미달",
+        )
+        self.assertEqual(describe("[FACE_TRAINING] request visibility extended").text, "")
+
+    def test_unknown_line_keeps_original_text(self) -> None:
+        text = tagged_event("[REALTIME] brand new event: a=1", "", color=False)
+        self.assertIn("brand new event: a=1", text)

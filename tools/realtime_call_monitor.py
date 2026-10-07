@@ -84,7 +84,7 @@ REASON_PATTERN = re.compile(r"reason['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
 @dataclass
 class Stage:
     status: str = "WAITING"
-    detail: str = "No matching event yet"
+    detail: str = "아직 기록 없음"
 
 
 @dataclass
@@ -101,7 +101,7 @@ class CallSnapshot:
     tts: Stage = field(default_factory=Stage)
     video: Stage = field(default_factory=Stage)
     idle: Stage = field(default_factory=Stage)
-    trace_summary: str = "No completed turn yet"
+    trace_summary: str = "아직 완료된 대화 없음"
     recent_call_summaries: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
@@ -198,51 +198,51 @@ def parse_call_logs(logs: str) -> CallSnapshot:
     snapshot.media_type = _last_value(MEDIA_PATTERN, block).upper()
 
     if snapshot.media_type == "VOICE":
-        snapshot.video = Stage("SKIPPED", "Voice-only call")
+        snapshot.video = Stage("SKIPPED", "음성 통화라 영상 없음")
 
     for line in block:
         lowered = line.lower()
 
         if "'type': 'call_invite'" in lowered or '"type": "call_invite"' in lowered:
-            snapshot.signal = Stage("PROCESSING", "Call invite received")
+            snapshot.signal = Stage("PROCESSING", "통화 요청 받음")
         if "call_accept sent" in lowered:
-            snapshot.signal = Stage("COMPLETED", "Call accepted")
+            snapshot.signal = Stage("COMPLETED", "통화 수락")
         if "call_accept sent" in lowered and "mediatype=" in lowered:
             snapshot.signal = Stage(
-                "COMPLETED", "Call accepted (context loaded from backend API)"
+                "COMPLETED", "통화 수락 (백엔드에서 통화 정보 받음)"
             )
         if "call_reject sent" in lowered:
             reason = REASON_PATTERN.search(line)
             snapshot.signal = Stage(
                 "FAILED",
-                f"Call rejected: {reason.group(1) if reason else line}",
+                f"통화 거절: {reason.group(1) if reason else line}",
             )
 
         if "[webrtc] peer connection created" in lowered:
-            snapshot.webrtc = Stage("PROCESSING", "Peer connection created")
+            snapshot.webrtc = Stage("PROCESSING", "WebRTC 연결 생성")
         if "[webrtc] connection: connected" in lowered or (
             "[webrtc] connection:" in lowered and "state=connected" in lowered
         ):
-            snapshot.webrtc = Stage("CONNECTED", "WebRTC connected")
+            snapshot.webrtc = Stage("CONNECTED", "WebRTC 연결됨")
         if "[webrtc] connection: failed" in lowered or (
             "[webrtc] connection:" in lowered and "state=failed" in lowered
         ):
             snapshot.webrtc = Stage("FAILED", line)
         if "[signaling] call_end handled" in lowered:
-            snapshot.webrtc = Stage("ENDED", "Call ended normally")
+            snapshot.webrtc = Stage("ENDED", "통화 정상 종료")
 
         if "[realtime] stt start" in lowered:
-            snapshot.stt = Stage("PROCESSING", "Speech recognition started")
+            snapshot.stt = Stage("PROCESSING", "음성 인식 중")
         if "[realtime] stt user=" in lowered:
             snapshot.stt = Stage("COMPLETED", line.split(":", 1)[-1].strip())
         if "[realtime] stt empty result" in lowered:
-            snapshot.stt = Stage("WARNING", "No speech recognized")
+            snapshot.stt = Stage("WARNING", "인식된 말 없음")
 
         if "[realtime] rag lookup complete" in lowered:
             if " count=0 " in f"{lowered} ":
                 snapshot.rag = Stage(
                     "WARNING",
-                    "No member memories found (count=0) - check RAG search mode/data",
+                    "검색된 회원 기억 없음 (count=0) - RAG 검색 설정과 데이터 확인",
                 )
             else:
                 snapshot.rag = Stage("COMPLETED", line)
@@ -250,23 +250,23 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             snapshot.rag = Stage("WARNING", line)
 
         if "[realtime] llm start" in lowered:
-            snapshot.llm = Stage("PROCESSING", "Reply generation started")
+            snapshot.llm = Stage("PROCESSING", "답변 생성 중")
         if "[realtime] llm user=" in lowered:
             snapshot.llm = Stage("COMPLETED", line.split(":", 1)[-1].strip())
 
         if "[realtime] tts start" in lowered:
-            snapshot.tts = Stage("PROCESSING", "Voice synthesis started")
+            snapshot.tts = Stage("PROCESSING", "음성 합성 중")
         if "[realtime] tts complete" in lowered:
             snapshot.tts = Stage("COMPLETED", line)
 
         if "renderer=enabled" in lowered or "face profile loaded" in lowered:
-            snapshot.video = Stage("PROCESSING", "Ditto profile readying")
+            snapshot.video = Stage("PROCESSING", "Ditto 얼굴 준비 중")
         if "idle portrait ready" in lowered:
-            snapshot.video = Stage("READY", "Idle portrait ready")
+            snapshot.video = Stage("READY", "대기 사진 준비 완료")
         if "idle loop render started" in lowered:
-            snapshot.idle = Stage("PROCESSING", "Silent idle clip rendering")
+            snapshot.idle = Stage("PROCESSING", "Ditto 대기 영상 렌더 중")
         if "[ditto_call] idle loop ready" in lowered:
-            snapshot.idle = Stage("READY", "Ditto idle loop playing")
+            snapshot.idle = Stage("READY", "Ditto 대기 영상 재생 중")
         if (
             "idle loop unavailable" in lowered
             or "idle loop rejected" in lowered
@@ -274,14 +274,14 @@ def parse_call_logs(logs: str) -> CallSnapshot:
         ):
             snapshot.idle = Stage(
                 "WARNING",
-                "Still portrait (idle loop failed): " + line,
+                "정지 사진으로 진행 (대기 영상 실패): " + line,
             )
         if "ditto reply render started" in lowered:
-            snapshot.video = Stage("PROCESSING", "Reply video rendering")
+            snapshot.video = Stage("PROCESSING", "Ditto 답변 영상 렌더 중")
         if "[ditto_call] render completed" in lowered:
             snapshot.video = Stage("COMPLETED", line)
         if "ditto reply video queued" in lowered:
-            snapshot.video = Stage("COMPLETED", "Reply video queued")
+            snapshot.video = Stage("COMPLETED", "답변 영상 재생")
         if (
             "ditto reply render failed" in lowered
             or "ditto video renderer unavailable" in lowered
@@ -519,7 +519,7 @@ def render(
         f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "=" * min(width, 100),
         "",
-        section("CONNECTIONS / SERVICES", color, width),
+        section("연결 상태 (CONNECTIONS / SERVICES)", color, width),
         f"Call server  : {_colored_status(server_connection, color)}",
         f"Call service : {_colored_status(call_service, color)}",
         f"Call API     : {_colored_status(api_status, color)}",
@@ -534,12 +534,12 @@ def render(
         f"last={last_render_text}",
         f"Last error   : {_paint(str(last_error), error_style, color)}",
         "",
-        section("LATEST CALL", color, width),
+        section("최근 통화 (LATEST CALL)", color, width),
         f"Call ID      : {_paint(snapshot.call_id, ANSI_BOLD, color)}",
         f"Clone user   : {snapshot.user_uuid}",
         f"Media type   : {_paint(snapshot.media_type, media_style, color)}",
         "",
-        section("CALL PIPELINE (latest turn)", color, width),
+        section("처리 단계 - 최근 대화 (CALL PIPELINE)", color, width),
         _stage_line("SIGNAL", snapshot.signal, color),
         _stage_line("WEBRTC", snapshot.webrtc, color),
         _stage_line("STT", snapshot.stt, color),
@@ -549,34 +549,38 @@ def render(
         _stage_line("VIDEO", snapshot.video, color),
         _stage_line("IDLE", snapshot.idle, color),
         "",
-        section("LATEST TURN SUMMARY", color, width),
+        section("최근 대화 소요 시간 (LATEST TURN)", color, width),
         _tagged_event_line(snapshot.trace_summary, color, width)
         if snapshot.trace_summary.startswith("[")
         else _paint(snapshot.trace_summary, ANSI_DIM, color),
         "",
-        section("RECENT CLOSED CALLS", color, width),
+        section("최근 종료된 통화 (RECENT CLOSED CALLS)", color, width),
     ]
     lines.extend(
         [
             _tagged_event_line(line, color, width)
             for line in snapshot.recent_call_summaries
         ]
-        or [_paint("No closed call summary yet", ANSI_DIM, color)]
+        or [_paint("아직 종료된 통화 없음", ANSI_DIM, color)]
     )
     lines.extend([
         "",
-        section("RECENT CALL EVENTS (oldest -> newest)", color, width),
+        section("최근 이벤트 - 위가 오래된 것 (RECENT CALL EVENTS)", color, width),
     ])
     lines.extend(
-        [_tagged_event_line(line, color, width) for line in snapshot.events]
-        or [_paint("Waiting for a new call...", ANSI_DIM, color)]
+        [
+            text
+            for text in (_tagged_event_line(line, color, width) for line in snapshot.events)
+            if text
+        ]
+        or [_paint("새 통화를 기다리는 중...", ANSI_DIM, color)]
     )
     lines.extend([
         "",
         _paint(
-            "Colors: green=done  cyan=running  yellow=warning  red=failed  gray=waiting"
-            "   |  Ctrl+C to stop\n"
-            "Full conversation history: tools\\monitor-call-events.cmd --color always",
+            "색상: 초록=완료  청록=진행 중  노랑=주의  빨강=실패  회색=대기"
+            "   |  종료: Ctrl+C\n"
+            "전체 대화 기록 보기: tools\\monitor-call-events.cmd --color always",
             ANSI_DIM,
             color,
         ),

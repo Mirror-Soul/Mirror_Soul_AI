@@ -44,7 +44,7 @@ class AiPipelineMonitorTest(unittest.TestCase):
         self.assertEqual(snapshot.overall_score, "67.9")
         self.assertEqual(
             snapshot.overall_note,
-            "estimated from complete AI component logs",
+            "AI 로그로 계산한 예상값",
         )
 
     def test_uses_latest_ai_user_when_uuid_is_omitted(self) -> None:

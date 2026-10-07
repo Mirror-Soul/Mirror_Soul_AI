@@ -177,6 +177,46 @@ def pretty_timings(text: str) -> str:
     return f"{stripped.rstrip()}  -> {summary}"
 
 
+TAG_STYLES.update({"사용자": ANSI_WHITE, "클론": ANSI_GREEN, "턴": ANSI_BRIGHT_CYAN})
+
+
+def tag_label(tag: str) -> str:
+    """``[TAG   ]`` padded by display width so Korean tags line up too."""
+    return f"[{tag}{' ' * max(0, 6 - display_width(tag))}]"
+
+
+def korean_event(line: str):
+    """Korean (tag, text, style) for a known log line, else None.
+
+    ``text`` is empty for lines that only repeat another line; callers
+    skip those.
+    """
+    try:
+        from tools import call_event_text, training_event_text
+    except ModuleNotFoundError:
+        import call_event_text
+        import training_event_text
+
+    stripped = line.strip()
+    speech = call_event_text.speech_text(stripped)
+    if speech is not None and stripped.startswith("[REALTIME] STT user="):
+        return "사용자", speech, ANSI_BOLD + ANSI_WHITE
+    if speech is not None and stripped.startswith("[REALTIME] LLM user="):
+        return "클론", speech, ANSI_BOLD + ANSI_GREEN
+    if stripped.startswith("[CALL_TRACE] turn"):
+        summary = call_event_text.turn_summary_ko(stripped)
+        if summary:
+            done = "turn completed" in stripped
+            status = "대화 완료" if done else "대화 실패" if "turn failed" in stripped else "대화 건너뜀"
+            error = re.search(r"\berror=(\S+)", stripped)
+            text = f"{status}: {summary}" + (f"  오류={error.group(1)}" if error else "")
+            return "턴", text, ANSI_BOLD + (ANSI_GREEN if done else ANSI_RED)
+    described = call_event_text.describe(stripped) or training_event_text.describe(stripped)
+    if described is None:
+        return None
+    return described.tag, described.text, described.style
+
+
 def tagged_event(
     line: str,
     message_style: str,
@@ -185,15 +225,24 @@ def tagged_event(
     width: int | None = None,
     prefix: str = "",
     prefix_width: int = 0,
+    korean: bool = True,
 ) -> str:
     """Tag label + full message, wrapped under the message column.
 
     Nothing is cut off: long questions and answers continue on the next
-    lines, aligned after the tag so the tag column stays readable.
+    lines, aligned after the tag so the tag column stays readable. Known
+    events are shown as short Korean sentences; an empty string means the
+    line only repeats another one and should be skipped.
     """
-    tag = event_tag(line)
-    label = paint(f"[{tag:<6}]", ANSI_BOLD + TAG_STYLES.get(tag, ""), color)
-    text = pretty_timings(compact_event(line))
+    translated = korean_event(line) if korean else None
+    if translated is not None:
+        tag, text, message_style = translated
+        if not text:
+            return ""
+    else:
+        tag = event_tag(line)
+        text = pretty_timings(compact_event(line))
+    label = paint(tag_label(tag), ANSI_BOLD + TAG_STYLES.get(tag, ""), color)
     indent = prefix_width + 9
     if width is None:
         wrapped = [text]
@@ -205,7 +254,14 @@ def tagged_event(
 
 
 def wrap_detail(text: str, width: int, indent: int) -> list[str]:
-    """Wrap a stage detail so its continuation lines start at ``indent``."""
+    """Wrap a stage detail so its continuation lines start at ``indent``.
+
+    A detail that is a raw log line is shown in Korean when known.
+    """
+    if text.lstrip().startswith("["):
+        translated = korean_event(text)
+        if translated is not None and translated[1]:
+            text = translated[1]
     return wrap_text(compact_event(text), max(20, width - indent - 1))
 
 
