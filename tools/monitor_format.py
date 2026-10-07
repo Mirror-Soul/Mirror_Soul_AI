@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import unicodedata
 
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -106,19 +108,142 @@ def compact_event(line: str, width: int | None = None) -> str:
     return text
 
 
+def display_width(text: str) -> int:
+    """Terminal columns used by text: Korean and other wide glyphs take two."""
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def wrap_text(text: str, width: int) -> list[str]:
+    """Wrap on spaces by display width; never drop characters."""
+    width = max(10, width)
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = word if not current else f"{current} {word}"
+        if display_width(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        while display_width(word) > width:
+            piece = ""
+            for char in word:
+                if display_width(piece + char) > width:
+                    break
+                piece += char
+            lines.append(piece)
+            word = word[len(piece):]
+        current = word
+    lines.append(current)
+    return lines
+
+
+_TIMING = re.compile(r"\b(total|stt|context|rag|llm|tts|video)_ms=(\d+)")
+_TIMING_LABELS = (
+    ("stt", "STT"),
+    ("rag", "RAG"),
+    ("llm", "LLM"),
+    ("tts", "TTS"),
+    ("video", "VIDEO"),
+)
+
+
+def timing_summary(line: str) -> str | None:
+    """'total_ms=16690 stt_ms=1032 ...' -> 'total 16.7s | STT 1.0s | ...'."""
+    values = {name: int(value) for name, value in _TIMING.findall(line)}
+    if "total" not in values:
+        return None
+    parts = [f"total {values['total'] / 1000:.1f}s"]
+    parts.extend(
+        f"{label} {values[key] / 1000:.1f}s"
+        for key, label in _TIMING_LABELS
+        if key in values
+    )
+    return " | ".join(parts)
+
+
+def pretty_timings(text: str) -> str:
+    """Replace raw ``*_ms=`` fields with one readable seconds summary."""
+    summary = timing_summary(text)
+    if summary is None:
+        return text
+    stripped = re.sub(r"\s*\b(total|stt|context|rag|llm|tts|video)_ms=\d+", "", text)
+    return f"{stripped.rstrip()}  -> {summary}"
+
+
 def tagged_event(
     line: str,
     message_style: str,
     *,
     color: bool,
     width: int | None = None,
+    prefix: str = "",
+    prefix_width: int = 0,
 ) -> str:
+    """Tag label + full message, wrapped under the message column.
+
+    Nothing is cut off: long questions and answers continue on the next
+    lines, aligned after the tag so the tag column stays readable.
+    """
     tag = event_tag(line)
     label = paint(f"[{tag:<6}]", ANSI_BOLD + TAG_STYLES.get(tag, ""), color)
-    available = None if width is None else max(20, width - 9)
-    return f"{label} {paint(compact_event(line, available), message_style, color)}"
+    text = pretty_timings(compact_event(line))
+    indent = prefix_width + 9
+    if width is None:
+        wrapped = [text]
+    else:
+        wrapped = wrap_text(text, width - indent - 1)
+    body = paint(wrapped[0], message_style, color)
+    rest = [" " * indent + paint(part, message_style, color) for part in wrapped[1:]]
+    return "\n".join([f"{prefix}{label} {body}", *rest])
+
+
+def wrap_detail(text: str, width: int, indent: int) -> list[str]:
+    """Wrap a stage detail so its continuation lines start at ``indent``."""
+    return wrap_text(compact_event(text), max(20, width - indent - 1))
 
 
 def section(title: str, color: bool, width: int) -> str:
     bar = "-" * max(0, min(width, 100) - len(title) - 4)
     return paint(f"-- {title} {bar}", ANSI_BOLD, color)
+
+
+def enable_windows_ansi() -> None:
+    """Let the classic Windows console (CMD) interpret ANSI colors."""
+    if os.name == "nt":
+        os.system("")
+
+
+class ScreenRefresher:
+    """Redraw a dashboard without stacking copies in the scrollback.
+
+    The previous ``ESC[H ESC[J`` only cleared the visible screen, so a frame
+    taller than the window left older copies above it and the view looked
+    like it was overwritten mid-way. This clears the scrollback as well and
+    skips redraws when nothing but the clock changed, so the screen stays
+    still while you read it.
+    """
+
+    def __init__(self, *, color: bool) -> None:
+        self.color = color
+        self._last_key: str | None = None
+
+    def show(self, frame: str, *, ignore_prefix: str = "Updated:") -> bool:
+        key = "\n".join(
+            line for line in frame.splitlines() if not line.startswith(ignore_prefix)
+        )
+        if key == self._last_key:
+            return False
+        self._last_key = key
+        if self.color:
+            print("\033[H\033[2J\033[3J", end="", flush=True)
+        else:
+            os.system("cls" if os.name == "nt" else "clear")
+        print(frame, flush=True)
+        return True
