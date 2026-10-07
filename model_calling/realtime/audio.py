@@ -179,6 +179,15 @@ async def receive_utterances(
     silence_seconds = float(os.getenv("REALTIME_VAD_SILENCE_SECONDS", "0.8"))
     min_speech_seconds = float(os.getenv("REALTIME_VAD_MIN_SPEECH_SECONDS", "0.7"))
     max_speech_seconds = float(os.getenv("REALTIME_VAD_MAX_SPEECH_SECONDS", "15"))
+    # Total length including pauses. Without it, a short noise that opened an
+    # utterance kept collecting silence (or a muted mic) until real speech
+    # arrived, producing 50+ second clips and STT hallucinations.
+    max_utterance_seconds = float(
+        os.getenv(
+            "REALTIME_VAD_MAX_UTTERANCE_SECONDS",
+            str(max_speech_seconds + 5),
+        )
+    )
     startup_grace_seconds = float(
         os.getenv("REALTIME_VAD_STARTUP_GRACE_SECONDS", "1.5")
     )
@@ -192,6 +201,7 @@ async def receive_utterances(
     utterance = bytearray()
     speech_seconds = 0.0
     silence_accumulated = 0.0
+    utterance_seconds = 0.0
     speaking = False
     received_frames = 0
     last_input_log_at = 0.0
@@ -203,6 +213,7 @@ async def receive_utterances(
         "[AUDIO_IN] VAD config: "
         f"threshold={energy_threshold} silence={silence_seconds}s "
         f"min_speech={min_speech_seconds}s max_speech={max_speech_seconds}s "
+        f"max_utterance={max_utterance_seconds}s "
         f"startup_grace={startup_grace_seconds}s",
         flush=True,
     )
@@ -235,6 +246,7 @@ async def receive_utterances(
             utterance.clear()
             speech_seconds = 0.0
             silence_accumulated = 0.0
+            utterance_seconds = 0.0
             speaking = False
             continue
 
@@ -249,6 +261,7 @@ async def receive_utterances(
             utterance.clear()
             speech_seconds = 0.0
             silence_accumulated = 0.0
+            utterance_seconds = 0.0
             speaking = False
             continue
 
@@ -279,6 +292,7 @@ async def receive_utterances(
                 pre_roll.clear()
             else:
                 utterance.extend(pcm)
+            utterance_seconds += duration
 
             if has_voice:
                 speech_seconds += duration
@@ -286,11 +300,33 @@ async def receive_utterances(
             else:
                 silence_accumulated += duration
 
+            too_short_then_quiet = (
+                speech_seconds < min_speech_seconds
+                and silence_accumulated >= silence_seconds
+            )
+            if too_short_then_quiet:
+                # A cough, click or mic bump: drop it instead of waiting
+                # (possibly for minutes) for enough speech to accumulate.
+                print(
+                    "[AUDIO_IN] short noise discarded: "
+                    f"speech={speech_seconds:.2f}s silence={silence_accumulated:.2f}s",
+                    flush=True,
+                )
+                utterance.clear()
+                speech_seconds = 0.0
+                silence_accumulated = 0.0
+                utterance_seconds = 0.0
+                speaking = False
+                continue
+
             reached_silence = (
                 speech_seconds >= min_speech_seconds
                 and silence_accumulated >= silence_seconds
             )
-            reached_limit = speech_seconds >= max_speech_seconds
+            reached_limit = (
+                speech_seconds >= max_speech_seconds
+                or utterance_seconds >= max_utterance_seconds
+            )
             if reached_silence or reached_limit:
                 utterance_pcm = bytes(utterance)
                 quality = analyze_pcm_quality(utterance_pcm)
@@ -311,4 +347,5 @@ async def receive_utterances(
                 utterance.clear()
                 speech_seconds = 0.0
                 silence_accumulated = 0.0
+                utterance_seconds = 0.0
                 speaking = False
