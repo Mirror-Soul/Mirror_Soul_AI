@@ -44,7 +44,7 @@ class AiPipelineMonitorTest(unittest.TestCase):
         self.assertEqual(snapshot.overall_score, "67.9")
         self.assertEqual(
             snapshot.overall_note,
-            "estimated from complete AI component logs",
+            "AI 로그로 계산한 예상값",
         )
 
     def test_uses_latest_ai_user_when_uuid_is_omitted(self) -> None:
@@ -144,9 +144,35 @@ class AiPipelineMonitorTest(unittest.TestCase):
             ai_cached=True,
         )
 
-        self.assertIn("WARNING (SSH query timed out; showing last data)", output)
+        self.assertIn("WARNING (SSH query timed out; 마지막으로 받은 데이터 표시)", output)
         self.assertIn("STALE (OK)", output)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecentMembersTest(unittest.TestCase):
+    def test_shows_three_most_recent_members_newest_first(self) -> None:
+        from tools.ai_pipeline_monitor import recent_users
+
+        ai_logs = "\n".join(
+            f"[RAG_PROFILE] processing: user_uuid=user-{index} clone_id={index} samples=6"
+            for index in range(1, 5)
+        )
+        gpu_logs = "[FACE_TRAINING] preprocessing: job_id=1 user_uuid=user-1 clone_id=1 files=1"
+        self.assertEqual(recent_users(ai_logs, gpu_logs, 3), ["user-4", "user-3", "user-2"])
+
+        members = [parse_pipeline_logs(ai_logs, gpu_logs, user) for user in ["user-4", "user-3", "user-2"]]
+        output = render(
+            members[0],
+            RemoteResult(True, ""),
+            {"AI_API": "active", "VOICE_WORKER": "active"},
+            RemoteResult(True, ""),
+            {"FACE_WORKER": "active", "GPU": "1, 2, 0"},
+            members=members,
+        )
+        self.assertIn("회원 1/3 (가장 최근): user-4", output)
+        self.assertIn("회원 3/3 (3번째 최근): user-2", output)
+        self.assertIn("인터뷰 답변 6개로 학습 중", output)
+        self.assertNotIn("user-1…", output)

@@ -54,7 +54,7 @@ class AiPipelineMonitorRefreshTests(unittest.TestCase):
             RemoteResult(True, ""),
             {"FACE_WORKER": "active"},
         )
-        self.assertIn("Voice worker: WARNING (restarting", output)
+        self.assertIn("음성 워커     : WARNING (재시작 반복 중", output)
 
 
 class RealtimeCallMonitorRefreshTests(unittest.TestCase):
@@ -134,7 +134,9 @@ class MonitorFormatTests(unittest.TestCase):
 
     def test_tagged_event_plain_and_colored(self) -> None:
         plain = tagged_event("[RAG_PROFILE] completed: a=1", "", color=False)
-        self.assertTrue(plain.startswith("[RAG   ] completed"))
+        self.assertTrue(plain.startswith("[RAG   ] 성격·기억(RAG) 학습 완료"))
+        raw = tagged_event("[RAG_PROFILE] completed: a=1", "", color=False, korean=False)
+        self.assertTrue(raw.startswith("[RAG   ] completed"))
         colored = tagged_event("[RAG_PROFILE] completed: a=1", "\033[32m", color=True)
         self.assertIn("\033[", colored)
 
