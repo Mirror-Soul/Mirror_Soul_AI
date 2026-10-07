@@ -15,6 +15,7 @@ from pathlib import Path
 
 try:
     from tools.monitor_format import (
+        display_width,
         ScreenRefresher,
         enable_windows_ansi,
         wrap_detail,
@@ -25,6 +26,7 @@ try:
     )
 except ModuleNotFoundError:
     from monitor_format import (
+        display_width,
         ScreenRefresher,
         compact_event,
         enable_windows_ansi,
@@ -126,6 +128,20 @@ def _latest_user(ai_logs: str, gpu_logs: str) -> str | None:
         return ai_users[-1]
     gpu_users = USER_PATTERN.findall(gpu_logs)
     return gpu_users[-1] if gpu_users else None
+
+
+def recent_users(ai_logs: str, gpu_logs: str, limit: int = 3) -> list[str]:
+    """Members whose sign-up started most recently, newest first.
+
+    The AI server log (RAG/voice) is ordered by when each member's training
+    started; members only seen in the GPU log are added after them.
+    """
+    ordered: list[str] = []
+    for text in (ai_logs, gpu_logs):
+        for user in reversed(USER_PATTERN.findall(text)):
+            if user not in ordered:
+                ordered.append(user)
+    return ordered[: max(1, limit)]
 
 
 def _face_block(gpu_lines: list[str], user_uuid: str) -> list[str]:
@@ -440,8 +456,59 @@ def _service(value: str | None) -> str:
         return "OK"
     if value in {"activating", "reloading"}:
         # systemd shows "activating" while a crashing service is restarting.
-        return "WARNING (restarting - check journalctl)"
+        return "WARNING (재시작 반복 중 - journalctl 확인)"
     return (value or "UNKNOWN").upper()
+
+
+def _kv(label: str, value: str, width: int = 14) -> str:
+    """``label : value`` with the label padded by display width (Korean-safe)."""
+    return f"{label}{' ' * max(0, width - display_width(label))}: {value}"
+
+
+def _detail_ko(name: str, stage: Stage) -> str:
+    """Show a stage's raw ``key=value`` detail as a short Korean sentence."""
+    detail = stage.detail
+    values = dict(FIELD_PATTERN.findall(detail))
+    if stage.status == "FAILED" and not values:
+        return f"실패: {detail}"
+    if name == "RAG":
+        if "reliability" in values:
+            parts = [
+                f"데이터 신뢰도 {values['reliability']}",
+                f"감점 {values.get('penalty', '-')}",
+            ]
+            if "docs" in values:
+                parts.append(f"저장 문서 {values['docs']}개 (정리 {values.get('removed', '0')}개)")
+            callback = values.get("callback", "-").lower()
+            parts.append(
+                "백엔드 전달 완료" if callback == "true"
+                else "백엔드 전달 실패" if callback == "false"
+                else "백엔드 전달 확인 안 됨"
+            )
+            return " · ".join(parts)
+        if "samples" in values:
+            return f"인터뷰 답변 {values['samples']}개로 학습 중"
+    if name == "VOICE":
+        if "voice_score" in values:
+            return f"음성 점수 {values['voice_score']} · 음성 ID {values.get('voice_id', '있음')}"
+        if "input_quality" in values:
+            result = {"PASSED": "통과", "FAILED": "실패"}.get(values["input_quality"], values["input_quality"])
+            return (
+                f"음성 샘플 품질 {result} · 사용 {values.get('accepted', '-')}개 · "
+                f"제외 {values.get('rejected', '-')}개"
+            )
+        if "files" in values:
+            return f"음성 파일 {values['files']}개로 학습 중"
+    if name == "FACE":
+        if "quality" in values:
+            job = re.search(r"job-(\d+)", detail)
+            saved = f"얼굴 프로필 저장됨 (job {job.group(1)})" if job else "얼굴 프로필 저장됨"
+            return f"품질 등급 {values['quality']} · {saved}"
+        if "files" in values:
+            return f"얼굴 영상 {values['files']}개 처리 중"
+    if detail == "아직 기록 없음":
+        return "아직 시작 안 됨"
+    return detail
 
 
 def _paint(text: str, style: str, enabled: bool) -> str:
@@ -461,8 +528,13 @@ def _colored_status(value: str, enabled: bool) -> str:
     return _paint(value, _status_color(value), enabled)
 
 
+STAGE_KO = {"RAG": "성격·기억", "VOICE": "음성", "FACE": "얼굴"}
+
+
 def _stage_line(name: str, stage: Stage, color: bool = False) -> str:
-    name_text = _paint(f"{name:<8}", STAGE_COLORS.get(name, ""), color)
+    name_text = _paint(f"{name:<6}", STAGE_COLORS.get(name, ""), color)
+    korean = STAGE_KO.get(name, "")
+    korean_text = korean + " " * max(0, 10 - display_width(korean))
     status_text = _paint(
         f"{stage.status:<10}", _status_color(stage.status), color
     )
@@ -470,8 +542,8 @@ def _stage_line(name: str, stage: Stage, color: bool = False) -> str:
     if score != "-":
         score = _paint(score, ANSI_BOLD + ANSI_BRIGHT_CYAN, color)
     return (
-        f"{name_text} [{status_text}] job={stage.job_id:<5} "
-        f"clone={stage.clone_id:<5} score={score}"
+        f"{name_text}{korean_text}[{status_text}] 점수 {score}"
+        + (f"   (job {stage.job_id})" if stage.job_id != "-" else "")
     )
 
 
@@ -531,6 +603,62 @@ def _detail_lines(detail: str, width: int, color: bool) -> str:
     return "\n".join(_paint(line, ANSI_DIM, color) for line in lines)
 
 
+def _components_ko(snapshot: PipelineSnapshot) -> str:
+    return (
+        f"얼굴 {snapshot.face.score} · 음성 {snapshot.voice.score} · "
+        f"성격 {snapshot.rag.score} · 신뢰도 {snapshot.data_reliability_score} · "
+        f"감점 {snapshot.penalty_score}"
+    )
+
+
+def _member_block(
+    snapshot: PipelineSnapshot,
+    *,
+    index: int,
+    total: int,
+    width: int,
+    color: bool,
+    event_limit: int,
+) -> list[str]:
+    clone = next(
+        (
+            stage.clone_id
+            for stage in (snapshot.rag, snapshot.face, snapshot.voice)
+            if stage.clone_id not in {"-", "None"}
+        ),
+        "-",
+    )
+    user = snapshot.user_uuid or "-"
+    order = "가장 최근" if index == 0 else f"{index + 1}번째 최근"
+    title = f"회원 {index + 1}/{total} ({order}): {user[:8]}… · clone {clone}"
+    overall = snapshot.overall_score
+    if overall != "-":
+        overall = _paint(overall, ANSI_BOLD + ANSI_BRIGHT_CYAN, color)
+    lines = [
+        section(title, color, width),
+        _stage_line("RAG", snapshot.rag, color),
+        _detail_lines(_detail_ko("RAG", snapshot.rag), width, color),
+        _stage_line("VOICE", snapshot.voice, color),
+        _detail_lines(_detail_ko("VOICE", snapshot.voice), width, color),
+        _stage_line("FACE", snapshot.face, color),
+        _detail_lines(_detail_ko("FACE", snapshot.face), width, color),
+        _kv("예상 종합점수", f"{overall}  ({snapshot.overall_note})"),
+        _kv("구성 점수", _components_ko(snapshot)),
+    ]
+    events = [
+        text
+        for text in (
+            _tagged_event_line(line, color, width)
+            for line in snapshot.events[-event_limit:]
+        )
+        if text
+    ]
+    if events:
+        lines.append(_paint("최근 이벤트 (위가 오래된 것)", ANSI_DIM, color))
+        lines.extend(events)
+    return lines
+
+
 def _tagged_event_line(line: str, color: bool, width: int | None = None) -> str:
     return tagged_event(line, _event_style(line), color=color, width=width)
 
@@ -544,19 +672,20 @@ def render(
     color: bool = False,
     ai_cached: bool = False,
     gpu_cached: bool = False,
+    members: list[PipelineSnapshot] | None = None,
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ai_connection = (
         "OK"
         if ai_result.ok
-        else f"WARNING ({ai_result.error}; showing last data)"
+        else f"WARNING ({ai_result.error}; 마지막으로 받은 데이터 표시)"
         if ai_cached
         else f"ERROR ({ai_result.error})"
     )
     gpu_connection = (
         "OK"
         if gpu_result.ok
-        else f"WARNING ({gpu_result.error}; showing last data)"
+        else f"WARNING ({gpu_result.error}; 마지막으로 받은 데이터 표시)"
         if gpu_cached
         else f"ERROR ({gpu_result.error})"
     )
@@ -569,60 +698,50 @@ def render(
         voice_worker = f"STALE ({voice_worker})"
     if gpu_cached:
         face_worker = f"STALE ({face_worker})"
-    overall_score = snapshot.overall_score
-    if overall_score != "-":
-        overall_score = _paint(
-            overall_score, ANSI_BOLD + ANSI_BRIGHT_CYAN, color
-        )
+    members = members or [snapshot]
     width = terminal_width()
+    target = (
+        f"최근 가입한 회원 {len(members)}명 (최신 순)"
+        if snapshot.user_uuid
+        else "새 학습 작업을 기다리는 중..."
+    )
     lines = [
         _paint(
-            "MIRROR SOUL - AI PIPELINE MONITOR  (sign-up / RAG / voice / face)",
+            "MIRROR SOUL - AI 학습 모니터  (회원가입: RAG 성격·기억 / 음성 / 얼굴)",
             ANSI_BOLD + ANSI_BRIGHT_CYAN,
             color,
         ),
         f"Updated: {now}",
         "=" * min(width, 100),
-        f"Target user : {_paint(snapshot.user_uuid or 'Waiting for a new AI job...', ANSI_BOLD, color)}",
+        _kv("표시 대상", _paint(target, ANSI_BOLD, color)),
         "",
         section("연결 상태 (CONNECTIONS / PROCESSES)", color, width),
-        f"AI server   : {_colored_status(ai_connection, color)}",
-        f"AI API      : {_colored_status(ai_api, color)}",
-        f"Voice worker: {_colored_status(voice_worker, color)}",
-        f"GPU server  : {_colored_status(gpu_connection, color)}",
-        f"Face worker : {_colored_status(face_worker, color)}",
-        f"GPU         : {gpu_value}  (used MiB, total MiB, utilization %)",
-        "",
-        section("학습 단계 - 이 회원 (PIPELINE)", color, width),
-        _stage_line("RAG", snapshot.rag, color),
-        _detail_lines(snapshot.rag.detail, width, color),
-        _stage_line("VOICE", snapshot.voice, color),
-        _detail_lines(snapshot.voice.detail, width, color),
-        _stage_line("FACE", snapshot.face, color),
-        _detail_lines(snapshot.face.detail, width, color),
-        "",
-        f"{_paint('OVERALL', ANSI_BOLD, color)}  : {overall_score}  "
-        f"({snapshot.overall_note})",
-        f"COMPONENTS: {snapshot.score_components}",
-        _paint(
-            "            공식 클론 점수는 백엔드가 계산해서 저장합니다.",
-            ANSI_DIM,
-            color,
-        ),
-        "",
-        section("최근 이벤트 - 위가 오래된 것 (RECENT AI EVENTS)", color, width),
+        _kv("AI 서버", _colored_status(ai_connection, color)),
+        _kv("AI API", _colored_status(ai_api, color)),
+        _kv("음성 워커", _colored_status(voice_worker, color)),
+        _kv("GPU 서버", _colored_status(gpu_connection, color)),
+        _kv("얼굴 워커", _colored_status(face_worker, color)),
+        _kv("GPU 사용량", f"{gpu_value}  (사용 MiB, 전체 MiB, 사용률 %)"),
     ]
-    lines.extend(
-        [
-            text
-            for text in (_tagged_event_line(line, color, width) for line in snapshot.events)
-            if text
-        ]
-        or [_paint("아직 이벤트 없음", ANSI_DIM, color)]
-    )
+    if not snapshot.user_uuid:
+        lines += ["", _paint("아직 학습 기록이 없습니다.", ANSI_DIM, color)]
+    else:
+        for index, member in enumerate(members):
+            lines.append("")
+            lines.extend(
+                _member_block(
+                    member,
+                    index=index,
+                    total=len(members),
+                    width=width,
+                    color=color,
+                    event_limit=6 if index == 0 else 3,
+                )
+            )
     lines.extend([
         "",
         _paint(
+            "예상 종합점수는 AI 로그로 계산한 값이고, 공식 클론 점수는 백엔드가 계산해서 저장합니다.\n"
             "색상: 초록=완료  청록=진행 중  노랑=주의  빨강=실패  회색=대기"
             "   |  종료: Ctrl+C\n"
             "전체 학습 기록 보기: tools\\monitor-ai-events.cmd --color always --gpu-port 40053",
@@ -638,7 +757,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Show only Mirror Soul AI pipeline health and job progress."
     )
-    parser.add_argument("--user-uuid", help="Track one member. Defaults to latest AI job.")
+    parser.add_argument("--user-uuid", help="Track one member. Defaults to the most recent members.")
+    parser.add_argument(
+        "--members",
+        type=int,
+        default=3,
+        help="how many recent members to show (default 3)",
+    )
     parser.add_argument("--once", action="store_true", help="Print one snapshot and exit.")
     parser.add_argument(
         "--color",
@@ -648,7 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--refresh", type=float, default=5.0)
     parser.add_argument("--since-minutes", type=int, default=180)
-    parser.add_argument("--lines", type=int, default=800)
+    parser.add_argument("--lines", type=int, default=2000)
     parser.add_argument("--ai-host", default="13.209.220.154")
     parser.add_argument("--ai-user", default="ec2-user")
     parser.add_argument("--ai-key", type=Path, default=repo_root / "mirrorsoul-ai-key.pem")
@@ -707,7 +832,14 @@ def main() -> int:
                 gpu_meta = last_gpu_meta.copy()
                 gpu_logs = last_gpu_logs
                 gpu_cached = True
-            snapshot = parse_pipeline_logs(ai_logs, gpu_logs, args.user_uuid)
+            if args.user_uuid:
+                users = [args.user_uuid]
+            else:
+                users = recent_users(ai_logs, gpu_logs, args.members)
+            members = [
+                parse_pipeline_logs(ai_logs, gpu_logs, user) for user in users
+            ] or [parse_pipeline_logs(ai_logs, gpu_logs, args.user_uuid)]
+            snapshot = members[0]
             frame = render(
                 snapshot,
                 ai_result,
@@ -717,6 +849,7 @@ def main() -> int:
                 color=color,
                 ai_cached=ai_cached,
                 gpu_cached=gpu_cached,
+                members=members,
             )
             if args.once:
                 print(frame)

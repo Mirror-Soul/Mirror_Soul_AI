@@ -111,23 +111,26 @@ CMD 터미널이라면 `cd /d E:\Mirror_Soul_AI` 후 `.\` 없이 `tools\monitor-
 | 빨강 | 실패 (`FAILED`, `ERROR`, 거절) |
 | 회색 | 대기 (`WAITING`) |
 
-### 3.1 왼쪽: AI PIPELINE MONITOR (회원가입)
+### 3.1 왼쪽: AI 학습 모니터 (회원가입)
+
+최근에 가입을 시작한 회원 **3명**을 최신 순으로 함께 보여 줍니다. 새 회원이 생겨도 이전 회원이 바로 사라지지 않고 아래로 밀려납니다. `--members 5`처럼 표시할 회원 수를 바꿀 수 있고, `--user-uuid <회원UUID>`를 주면 그 회원만 봅니다.
 
 | 영역 | 내용 |
 | --- | --- |
-| `CONNECTIONS / PROCESSES` | AI 서버·AI API·음성 워커·GPU·얼굴 워커 상태. `WARNING (restarting ...)`이면 서비스가 시작 직후 계속 죽는 중입니다 (5절 참고). |
-| `PIPELINE (this member)` | 회원 한 명의 RAG·VOICE·FACE 단계, 작업 ID, 점수. `└` 줄은 세부 정보입니다. |
-| `RAG └ docs= removed=` | RAG에 저장된 문서 수와 재학습으로 정리된 이전 문서 수 |
-| `VOICE └ voice_score=` | 음성 학습 완료 시 계산된 음성 점수 |
-| `OVERALL` | AI 로그만으로 계산한 **예상** 종합점수. 공식 점수는 백엔드가 계산·저장합니다. |
-| `RECENT AI EVENTS` | `[RAG ]`, `[VOICE ]`, `[FACE ]` 태그가 붙은 최근 이벤트 (위가 오래된 것) |
+| `연결 상태` | AI 서버·AI API·음성 워커·GPU 서버·얼굴 워커 상태. `WARNING (재시작 반복 중 ...)`이면 서비스가 시작 직후 계속 죽는 중입니다 (5절 참고). |
+| `회원 1/3 (가장 최근)` | 회원 한 명의 RAG(성격·기억)·VOICE(음성)·FACE(얼굴) 단계와 점수. `└` 줄은 세부 내용입니다. |
+| `RAG └` | 데이터 신뢰도, 감점, 저장된 문서 수, 백엔드 전달 여부 |
+| `VOICE └` | 음성 샘플 품질 검사 결과, 학습이 끝나면 음성 점수 |
+| `FACE └` | 품질 등급, 얼굴 프로필 저장 여부 |
+| `예상 종합점수` | AI 로그만으로 계산한 **예상** 점수. 공식 점수는 백엔드가 계산·저장합니다. |
+| `최근 이벤트` | 그 회원의 최근 로그 (가장 최근 회원 6개, 나머지 3개). 한국어 문장으로 표시합니다. |
 
 정상 흐름 예시 (처리 순서는 비동기라 섞여서 나올 수 있습니다):
 
 ```
-[RAG   ] processing → completed (profile_score, docs)
-[VOICE ] processing → batch status=PASSED → completed (voice_score) → status published status=COMPLETED
-[FACE  ] preprocessing → video preprocessed → completed (face_score)
+[RAG   ] 성격·기억(RAG) 학습 시작 → 성격·기억(RAG) 학습 완료 (성격 점수, 저장 문서)
+[VOICE ] 음성 학습 시작 → 음성 샘플 품질 검사 통과 → 음성 학습 완료 (음성 점수) → 백엔드에 음성 학습 상태 전달: 완료
+[FACE  ] 얼굴 학습 시작 → 얼굴 영상 전처리 완료 → 얼굴 프레임 분석 → 얼굴 점수 계산 → 얼굴 학습 완료
 ```
 
 ### 3.2 오른쪽: REALTIME CALL MONITOR (통화)

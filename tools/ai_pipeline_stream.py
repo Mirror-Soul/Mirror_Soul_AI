@@ -272,14 +272,14 @@ def main() -> int:
 
     print(
         _paint(
-            "MIRROR SOUL - LIVE AI TRAINING EVENTS",
+            "MIRROR SOUL - 학습 전체 로그 (모든 회원)",
             ANSI_BOLD + ANSI_BRIGHT_CYAN,
             color,
         )
     )
-    print("All members are shown in one continuous log. Ctrl+C to stop.")
+    print("모든 회원의 RAG·음성·얼굴 학습 과정을 이어서 보여 줍니다. 종료: Ctrl+C")
     if save_file is not None:
-        print(_paint(f"Saved to: {save_file.name}", ANSI_DIM, color))
+        print(_paint(f"저장 위치: {save_file.name}", ANSI_DIM, color))
     print("=" * 90, flush=True)
     for worker in workers:
         worker.start()
@@ -311,7 +311,7 @@ def main() -> int:
             worker.terminate()
         if save_file is not None:
             save_file.close()
-    print("\nLive AI event stream stopped.")
+    print("\n학습 전체 로그를 종료했습니다.")
     return 0
 
 

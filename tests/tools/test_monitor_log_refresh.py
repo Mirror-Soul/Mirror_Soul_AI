@@ -54,7 +54,7 @@ class AiPipelineMonitorRefreshTests(unittest.TestCase):
             RemoteResult(True, ""),
             {"FACE_WORKER": "active"},
         )
-        self.assertIn("Voice worker: WARNING (restarting", output)
+        self.assertIn("음성 워커     : WARNING (재시작 반복 중", output)
 
 
 class RealtimeCallMonitorRefreshTests(unittest.TestCase):
