@@ -416,7 +416,29 @@ def mux_audio(video: Path, timeline: Timeline, output: Path, *, skipped_frames: 
 # --------------------------------------------------------------------------
 
 
+NUMPY2_ALIASES = {
+    "atan2": "arctan2",
+    "atan": "arctan",
+    "asin": "arcsin",
+    "acos": "arccos",
+    "pow": "power",
+    "concat": "concatenate",
+}
+
+
+def add_numpy2_aliases() -> None:
+    """Ditto's TensorRT helpers call NumPy 2 names (np.atan2 ...).
+
+    The shared conda env pins NumPy 1.26 for the running services, so add
+    the aliases in this process instead of upgrading NumPy.
+    """
+    for new, old in NUMPY2_ALIASES.items():
+        if not hasattr(np, new):
+            setattr(np, new, getattr(np, old))
+
+
 def load_ditto(ditto_dir: Path, cfg: Path | None, data_root: Path | None) -> tuple[Any, Callable[[str], Any], str]:
+    add_numpy2_aliases()
     sys.path.insert(0, str(ditto_dir))
     os.chdir(ditto_dir)
     try:
@@ -497,6 +519,12 @@ def download_member_portrait(member_uuid: str, env_file: Path, out_dir: Path) ->
 def _summary_lines(report: dict[str, Any]) -> list[str]:
     if report.get("verdict") == "NO_FRAMES":
         return [f"[{report['label']}] 프레임이 나오지 않았습니다. 로그를 확인하세요."]
+    if report.get("verdict") == "CAPACITY":
+        return [
+            f"[{report['label']}] 최대 속도 측정: {report['fps']} fps = 실시간의 {report['realtimeMultiple']}배"
+            f" (이 GPU에서 이 설정으로 동시에 돌릴 수 있는 세션 수의 상한)",
+            f"  프레임 {report['framesProduced']}/{report['framesExpected']} · 해상도 {report['frameSize']}",
+        ]
     latency = report["latencySeconds"]
     verdict = {
         "REALTIME_OK": "실시간 가능, 튀는 프레임 없음",
@@ -541,6 +569,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-scale", type=float, default=2.3)
     parser.add_argument("--smoothing-kernel", type=int, default=5)
     parser.add_argument("--instances", type=int, default=1, help="run N sessions at the same time")
+    parser.add_argument(
+        "--max-speed",
+        action="store_true",
+        help="feed audio as fast as possible to measure the GPU's top frame rate (capacity)",
+    )
     parser.add_argument("--ditto-dir", type=Path, default=DEFAULT_DITTO_DIR)
     parser.add_argument("--cfg", type=Path)
     parser.add_argument("--data-root", type=Path, help="default: TensorRT engines if usable, else checkpoints/ditto_pytorch")
@@ -597,8 +630,12 @@ def main() -> int:
                 label=label,
                 setup_kwargs=setup_kwargs,
                 speech_arrival=args.speech_arrival,
+                realtime=not args.max_speed,
             )
         report = analyze(result, timeline)
+        if args.max_speed:
+            report["verdict"] = "CAPACITY"
+            report["realtimeMultiple"] = round((report.get("fps") or 0) / FPS, 2)
         report["gpu"] = gpu.summary()
         report["speechArrival"] = args.speech_arrival
         reports.append(report)
@@ -650,6 +687,8 @@ def _run_parallel(args: argparse.Namespace) -> int:
         "--out-dir", str(args.out_dir),
         "--speech-arrival", args.speech_arrival,
     ]
+    if args.max_speed:
+        passthrough.append("--max-speed")
     if args.data_root:
         passthrough += ["--data-root", str(args.data_root)]
     if args.speech:
