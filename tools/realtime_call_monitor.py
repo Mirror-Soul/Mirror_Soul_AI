@@ -14,13 +14,24 @@ from datetime import datetime
 
 try:
     from tools.monitor_format import (
+        ScreenRefresher,
         compact_event,
+        enable_windows_ansi,
         section,
         tagged_event,
         terminal_width,
+        wrap_detail,
     )
 except ModuleNotFoundError:
-    from monitor_format import compact_event, section, tagged_event, terminal_width
+    from monitor_format import (
+        ScreenRefresher,
+        compact_event,
+        enable_windows_ansi,
+        section,
+        tagged_event,
+        terminal_width,
+        wrap_detail,
+    )
 
 
 ANSI_RESET = "\033[0m"
@@ -292,7 +303,7 @@ def parse_call_logs(logs: str) -> CallSnapshot:
         if "[call_trace] turn skipped:" in lowered:
             snapshot.trace_summary = line
 
-    snapshot.events = [line for line in block if line.startswith(CALL_MARKERS)][-20:]
+    snapshot.events = [line for line in block if line.startswith(CALL_MARKERS)][-30:]
     return snapshot
 
 
@@ -398,8 +409,9 @@ def _json_object(value: str | None) -> dict:
 def _stage_line(name: str, stage: Stage, color: bool) -> str:
     label = _paint(f"{name:<8}", ANSI_BLUE, color)
     status = _paint(f"{stage.status:<10}", _status_color(stage.status), color)
-    detail = compact_event(stage.detail, max(20, terminal_width() - 23))
-    return f"{label} [{status}] {detail}"
+    detail = wrap_detail(stage.detail, terminal_width(), 22)
+    rest = [" " * 22 + part for part in detail[1:]]
+    return "\n".join([f"{label} [{status}] {detail[0]}", *rest])
 
 
 def _event_style(line: str) -> str:
@@ -563,7 +575,8 @@ def render(
         "",
         _paint(
             "Colors: green=done  cyan=running  yellow=warning  red=failed  gray=waiting"
-            "   |  Ctrl+C to stop",
+            "   |  Ctrl+C to stop\n"
+            "Full conversation history: tools\\monitor-call-events.cmd --color always",
             ANSI_DIM,
             color,
         ),
@@ -606,6 +619,8 @@ def main() -> int:
         and sys.stdout.isatty()
         and "NO_COLOR" not in os.environ
     )
+    enable_windows_ansi()
+    screen = ScreenRefresher(color=color)
     try:
         last_metadata: dict[str, str] = {}
         last_logs = ""
@@ -620,12 +635,11 @@ def main() -> int:
                 logs = last_logs
                 cached = True
             snapshot = parse_call_logs(logs)
-            if not args.once:
-                if color:
-                    print("\033[H\033[J", end="", flush=True)
-                else:
-                    os.system("cls" if os.name == "nt" else "clear")
-            print(render(snapshot, remote, metadata, color=color, cached=cached))
+            frame = render(snapshot, remote, metadata, color=color, cached=cached)
+            if args.once:
+                print(frame)
+            else:
+                screen.show(frame)
             if args.once:
                 return 0 if remote.ok else 1
             time.sleep(max(1.0, args.refresh))

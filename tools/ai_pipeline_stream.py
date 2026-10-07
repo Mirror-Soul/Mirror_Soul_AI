@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -19,8 +20,9 @@ try:
         ANSI_MAGENTA,
         ANSI_RED,
         ANSI_RESET,
-        _tagged_event_line,
+        _event_style,
     )
+    from tools.monitor_format import enable_windows_ansi, tagged_event, terminal_width
 except ModuleNotFoundError:
     from ai_pipeline_monitor import (
         ANSI_BLUE,
@@ -30,21 +32,39 @@ except ModuleNotFoundError:
         ANSI_MAGENTA,
         ANSI_RED,
         ANSI_RESET,
-        _tagged_event_line,
+        _event_style,
     )
+    from monitor_format import enable_windows_ansi, tagged_event, terminal_width
+
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 def _paint(text: str, style: str, enabled: bool) -> str:
     return f"{style}{text}{ANSI_RESET}" if enabled else text
 
 
-def format_event(source: str, line: str, *, color: bool) -> str:
+def format_event(
+    source: str,
+    line: str,
+    *,
+    color: bool,
+    width: int | None = None,
+) -> str:
+    """One event, full text, wrapped under the message column."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     source_style = ANSI_MAGENTA if source == "AI" else ANSI_BLUE
-    return (
+    prefix = (
         f"{_paint(timestamp, ANSI_DIM, color)} "
         f"{_paint(f'[{source:<3}]', ANSI_BOLD + source_style, color)} "
-        f"{_tagged_event_line(line, color)}"
+    )
+    return tagged_event(
+        line,
+        _event_style(line),
+        color=color,
+        width=width,
+        prefix=prefix,
+        prefix_width=len(timestamp) + 7,
     )
 
 
@@ -199,9 +219,23 @@ def main() -> int:
         print("ERROR: history must be non-negative and scan-lines must be positive.")
         return 2
 
+    enable_windows_ansi()
     color = args.color == "always" or (
         args.color == "auto" and sys.stdout.isatty() and "NO_COLOR" not in os.environ
     )
+    save_file = None
+    if not args.no_save:
+        args.save_dir.mkdir(parents=True, exist_ok=True)
+        save_file = (
+            args.save_dir / f"ai-events-{datetime.now():%Y%m%d}.log"
+        ).open("a", encoding="utf-8")
+
+    def emit(text: str) -> None:
+        print(text, flush=True)
+        if save_file is not None:
+            save_file.write(_ANSI.sub("", text) + "\n")
+            save_file.flush()
+
     events: queue.Queue[tuple[str, str]] = queue.Queue()
     stop = threading.Event()
     workers = [
@@ -239,6 +273,8 @@ def main() -> int:
         )
     )
     print("All members are shown in one continuous log. Ctrl+C to stop.")
+    if save_file is not None:
+        print(_paint(f"Saved to: {save_file.name}", ANSI_DIM, color))
     print("=" * 90, flush=True)
     for worker in workers:
         worker.start()
@@ -250,22 +286,23 @@ def main() -> int:
             except queue.Empty:
                 continue
             if source == "SYSTEM":
-                print(
+                emit(
                     _paint(
                         f"{datetime.now():%H:%M:%S} [SYSTEM] {line}",
                         ANSI_RED,
                         color,
-                    ),
-                    flush=True,
+                    )
                 )
                 continue
-            print(format_event(source, line, color=color), flush=True)
+            emit(format_event(source, line, color=color, width=terminal_width()))
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
         for worker in workers:
             worker.terminate()
+        if save_file is not None:
+            save_file.close()
     print("\nLive AI event stream stopped.")
     return 0
 

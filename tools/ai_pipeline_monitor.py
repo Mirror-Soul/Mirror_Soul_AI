@@ -15,13 +15,24 @@ from pathlib import Path
 
 try:
     from tools.monitor_format import (
+        ScreenRefresher,
+        enable_windows_ansi,
+        wrap_detail,
         compact_event,
         section,
         tagged_event,
         terminal_width,
     )
 except ModuleNotFoundError:
-    from monitor_format import compact_event, section, tagged_event, terminal_width
+    from monitor_format import (
+        ScreenRefresher,
+        compact_event,
+        enable_windows_ansi,
+        section,
+        tagged_event,
+        terminal_width,
+        wrap_detail,
+    )
 
 
 USER_PATTERN = re.compile(r"user_uuid=([^\s]+)")
@@ -514,6 +525,12 @@ def _event_style(line: str) -> str:
     return ANSI_DIM
 
 
+def _detail_lines(detail: str, width: int, color: bool) -> str:
+    parts = wrap_detail(detail, width, 11)
+    lines = [f"         └ {parts[0]}", *(" " * 11 + part for part in parts[1:])]
+    return "\n".join(_paint(line, ANSI_DIM, color) for line in lines)
+
+
 def _tagged_event_line(line: str, color: bool, width: int | None = None) -> str:
     return tagged_event(line, _event_style(line), color=color, width=width)
 
@@ -578,11 +595,11 @@ def render(
         "",
         section("PIPELINE (this member)", color, width),
         _stage_line("RAG", snapshot.rag, color),
-        _paint(f"         └ {compact_event(snapshot.rag.detail, width - 12)}", ANSI_DIM, color),
+        _detail_lines(snapshot.rag.detail, width, color),
         _stage_line("VOICE", snapshot.voice, color),
-        _paint(f"         └ {compact_event(snapshot.voice.detail, width - 12)}", ANSI_DIM, color),
+        _detail_lines(snapshot.voice.detail, width, color),
         _stage_line("FACE", snapshot.face, color),
-        _paint(f"         └ {compact_event(snapshot.face.detail, width - 12)}", ANSI_DIM, color),
+        _detail_lines(snapshot.face.detail, width, color),
         "",
         f"{_paint('OVERALL', ANSI_BOLD, color)}  : {overall_score}  "
         f"({snapshot.overall_note})",
@@ -651,12 +668,14 @@ def main() -> int:
         print("ERROR: OpenSSH client (ssh) was not found.", file=sys.stderr)
         return 2
 
+    enable_windows_ansi()
     try:
         color = args.color == "always" or (
             args.color == "auto"
             and sys.stdout.isatty()
             and "NO_COLOR" not in os.environ
         )
+        screen = ScreenRefresher(color=color)
         last_ai_meta: dict[str, str] = {}
         last_ai_logs = ""
         last_gpu_meta: dict[str, str] = {}
@@ -684,23 +703,20 @@ def main() -> int:
                 gpu_logs = last_gpu_logs
                 gpu_cached = True
             snapshot = parse_pipeline_logs(ai_logs, gpu_logs, args.user_uuid)
-            if not args.once:
-                if color:
-                    print("\033[H\033[J", end="", flush=True)
-                else:
-                    os.system("cls" if os.name == "nt" else "clear")
-            print(
-                render(
-                    snapshot,
-                    ai_result,
-                    ai_meta,
-                    gpu_result,
-                    gpu_meta,
-                    color=color,
-                    ai_cached=ai_cached,
-                    gpu_cached=gpu_cached,
-                )
+            frame = render(
+                snapshot,
+                ai_result,
+                ai_meta,
+                gpu_result,
+                gpu_meta,
+                color=color,
+                ai_cached=ai_cached,
+                gpu_cached=gpu_cached,
             )
+            if args.once:
+                print(frame)
+            else:
+                screen.show(frame)
             if args.once:
                 return 0 if ai_result.ok and gpu_result.ok else 1
             time.sleep(max(1.0, args.refresh))

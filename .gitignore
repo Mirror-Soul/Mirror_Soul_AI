@@ -26,6 +26,7 @@ data/*
 outputs/*
 !outputs/.gitkeep
 tmp/face_training/
+tmp/monitor-logs/
 contact-sheet*.jpg
 
 # RAG / vector DB local files
