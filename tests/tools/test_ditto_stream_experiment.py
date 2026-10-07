@@ -90,3 +90,45 @@ class ExperimentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _SkippingSdk(_FakeSdk):
+    """Drops the first 10 frames like Ditto's online warm-up window."""
+
+    def run_chunk(self, chunk, chunksize):
+        start = self.index
+        self.index += chunksize[1]
+        for k in range(start, start + chunksize[1]):
+            if k >= 10:
+                self.writer(np.full((32, 32, 3), 100 + (k % 2), dtype=np.uint8), fmt="rgb")
+
+
+class OnsetTests(unittest.TestCase):
+    def test_instant_speech_arrival_and_skipped_frames(self) -> None:
+        timeline = build_timeline("silence:0.4,speech:0.4,silence:0.2", np.ones(SAMPLE_RATE, dtype=np.float32) * 0.1)
+        clock = [0.0]
+        fed_at = []
+
+        def fake_clock():
+            return clock[0]
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        sdk = _SkippingSdk(delay=0.0)
+        original = sdk.run_chunk
+
+        def record(chunk, chunksize):
+            fed_at.append(clock[0])
+            original(chunk, chunksize)
+
+        sdk.run_chunk = record
+        result = run_session(
+            sdk, timeline, Path("p.jpg"), Path("o.mp4"), label="t",
+            setup_kwargs={}, clock=fake_clock, sleep=fake_sleep,
+        )
+        # speech (0.4 s .. 0.8 s) is available at 0.4 s, so feeding never waits past it
+        self.assertLessEqual(max(fed_at[:6]), 0.4 + 1e-6)
+        report = analyze(result, timeline)
+        self.assertEqual(report["leadingFramesSkipped"], timeline.frames - len(result.frame_times))
+        self.assertEqual(len(report["speechOnset"]), 1)

@@ -203,6 +203,7 @@ def run_session(
     setup_kwargs: dict[str, Any],
     chunksize: tuple[int, int, int] = (3, 5, 2),
     realtime: bool = True,
+    speech_arrival: str = "instant",
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> SessionResult:
@@ -224,8 +225,17 @@ def run_session(
         if len(chunk) < split_len:
             chunk = np.pad(chunk, (0, split_len - len(chunk)))
         # In a call a chunk can only be sent once all of its samples
-        # (including the look-ahead) have actually arrived.
-        arrival = started + max(0, index + split_len - pre * SAMPLES_PER_FRAME) / SAMPLE_RATE
+        # (including the look-ahead) have actually arrived. Silence (the
+        # user talking, the clone listening) arrives in real time; a reply
+        # comes from TTS all at once, so its audio is available from the
+        # moment the reply starts.
+        end_sample = max(0, index + split_len - pre * SAMPLES_PER_FRAME)
+        arrival = started + end_sample / SAMPLE_RATE
+        if speech_arrival == "instant":
+            end_second = end_sample / SAMPLE_RATE
+            for segment in timeline.segments:
+                if segment.kind == "speech" and segment.start < end_second <= segment.end + 0.5:
+                    arrival = min(arrival, started + segment.start)
         if realtime:
             wait = arrival - clock()
             if wait > 0:
@@ -269,11 +279,29 @@ def analyze(result: SessionResult, timeline: Timeline) -> dict[str, Any]:
         report["verdict"] = "NO_FRAMES"
         return report
 
+    # Ditto's online mode spends its first audio window on warm-up and does
+    # not emit those frames, so the first produced frame belongs to a later
+    # point of the timeline.
+    offset = max(0, timeline.frames - produced)
+    report["leadingFramesSkipped"] = offset
     # Latency: frame k shows audio up to (k+1)/25 s; compare with when that
     # audio arrived in real time.
     latency = [
-        times[k] - (result.started_at + (k + 1) / FPS) for k in range(produced)
+        times[k] - (result.started_at + (k + offset + 1) / FPS) for k in range(produced)
     ]
+    onsets = []
+    for segment in timeline.segments:
+        if segment.kind != "speech":
+            continue
+        first = int(math.ceil(segment.start * FPS)) - offset
+        if 0 <= first < produced:
+            onsets.append(
+                {
+                    "speechStart": round(segment.start, 2),
+                    "firstFrameAfterSeconds": round(times[first] - (result.started_at + segment.start), 3),
+                }
+            )
+    report["speechOnset"] = onsets
     quarter = max(1, produced // 4)
     span = times[-1] - times[0]
     report["fps"] = round((produced - 1) / span, 2) if span > 0 else None
@@ -295,7 +323,7 @@ def analyze(result: SessionResult, timeline: Timeline) -> dict[str, Any]:
     median = float(np.median(diffs[1:])) if len(diffs) > 1 else 0.0
     threshold = max(4.0 * median, median + 3.0)
     spikes = [
-        {"second": round(i / FPS, 2), "diff": round(float(diffs[i]), 2)}
+        {"second": round((i + offset) / FPS, 2), "diff": round(float(diffs[i]), 2)}
         for i in range(1, len(diffs))
         if diffs[i] > threshold and diffs[i] > 2.0 * max(diffs[i - 1], diffs[min(i + 1, len(diffs) - 1)], 0.3)
     ]
@@ -306,7 +334,8 @@ def analyze(result: SessionResult, timeline: Timeline) -> dict[str, Any]:
     }
     per_segment = []
     for segment in timeline.segments:
-        start, end = int(segment.start * FPS), min(len(diffs), int(segment.end * FPS))
+        start = int(segment.start * FPS) - offset
+        end = min(len(diffs), int(segment.end * FPS) - offset)
         values = diffs[max(start, 1) : end]
         per_segment.append(
             {
@@ -321,7 +350,7 @@ def analyze(result: SessionResult, timeline: Timeline) -> dict[str, Any]:
 
     boundaries = []
     for previous, current in zip(timeline.segments, timeline.segments[1:]):
-        frame = int(current.start * FPS)
+        frame = int(current.start * FPS) - offset
         window = diffs[max(1, frame - 12) : min(len(diffs), frame + 13)]
         boundaries.append(
             {
@@ -342,16 +371,36 @@ def analyze(result: SessionResult, timeline: Timeline) -> dict[str, Any]:
     return report
 
 
-def mux_audio(video: Path, timeline: Timeline, output: Path) -> Path | None:
+def find_ffmpeg() -> str | None:
+    candidates = [
+        os.environ.get("FFMPEG_BINARY"),
+        str(Path(sys.executable).with_name("ffmpeg")),
+        "/shareHost/C084003-ditto/conda-env/bin/ffmpeg",
+        "/opt/conda/bin/ffmpeg",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    from shutil import which
+
+    return which("ffmpeg")
+
+
+def mux_audio(video: Path, timeline: Timeline, output: Path, *, skipped_frames: int = 0) -> Path | None:
+    """Attach the timeline audio, aligned to the first frame Ditto produced."""
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is None:
+        print("  [WARN] ffmpeg를 찾지 못해 소리 없는 원본만 남깁니다 (FFMPEG_BINARY로 지정 가능).")
+        return None
     wav = output.with_suffix(".wav")
     import wave
 
+    audio = timeline.audio[skipped_frames * SAMPLES_PER_FRAME :]
     with wave.open(str(wav), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(SAMPLE_RATE)
-        handle.writeframes((np.clip(timeline.audio, -1, 1) * 32767).astype("<i2").tobytes())
-    ffmpeg = os.environ.get("FFMPEG_BINARY", "ffmpeg")
+        handle.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
     completed = subprocess.run(
         [ffmpeg, "-loglevel", "error", "-y", "-i", str(video), "-i", str(wav),
          "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(output)],
@@ -367,7 +416,7 @@ def mux_audio(video: Path, timeline: Timeline, output: Path) -> Path | None:
 # --------------------------------------------------------------------------
 
 
-def load_ditto(ditto_dir: Path, cfg: Path | None, data_root: Path) -> tuple[Any, Callable[[str], Any], str]:
+def load_ditto(ditto_dir: Path, cfg: Path | None, data_root: Path | None) -> tuple[Any, Callable[[str], Any], str]:
     sys.path.insert(0, str(ditto_dir))
     os.chdir(ditto_dir)
     try:
@@ -376,9 +425,24 @@ def load_ditto(ditto_dir: Path, cfg: Path | None, data_root: Path) -> tuple[Any,
     except ModuleNotFoundError:
         module = importlib.import_module("stream_pipeline_offline")
         module_name = "stream_pipeline_offline"
-    if cfg is None:
-        online = ditto_dir / "checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
-        cfg = online if online.is_file() else ditto_dir / "checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
+    if cfg is None or data_root is None:
+        cfg_dir = ditto_dir / "checkpoints/ditto_cfg"
+        trt_root = ditto_dir / "checkpoints/ditto_trt_Ampere_Plus"
+        try:
+            importlib.import_module("tensorrt")
+            has_trt = trt_root.is_dir()
+        except ModuleNotFoundError:
+            has_trt = False
+        trt_cfg = next(
+            (path for path in (cfg_dir / "v0.4_hubert_cfg_trt_online.pkl", cfg_dir / "v0.4_hubert_cfg_trt.pkl") if path.is_file()),
+            None,
+        )
+        if has_trt and trt_cfg is not None:
+            cfg = cfg or trt_cfg
+            data_root = data_root or trt_root
+        else:
+            cfg = cfg or cfg_dir / "v0.4_hubert_cfg_pytorch.pkl"
+            data_root = data_root or ditto_dir / "checkpoints/ditto_pytorch"
     librosa = importlib.import_module("librosa")
 
     def load_audio(path: str) -> np.ndarray:
@@ -386,7 +450,7 @@ def load_ditto(ditto_dir: Path, cfg: Path | None, data_root: Path) -> tuple[Any,
         return audio.astype(np.float32)
 
     sdk = module.StreamSDK(str(cfg), str(data_root if data_root.is_absolute() else ditto_dir / data_root))
-    return sdk, load_audio, f"{module_name} cfg={cfg.name}"
+    return sdk, load_audio, f"{module_name} cfg={Path(cfg).name} data={Path(data_root).name}"
 
 
 def download_member_portrait(member_uuid: str, env_file: Path, out_dir: Path) -> Path:
@@ -444,8 +508,13 @@ def _summary_lines(report: dict[str, Any]) -> list[str]:
         f"  속도 {report['fps']} fps (필요 25) · 프레임 {report['framesProduced']}/{report['framesExpected']} · 해상도 {report['frameSize']}",
         f"  지연: 중간값 {latency['p50']}초, 95% {latency['p95']}초, 최대 {latency['max']}초, "
         f"처음→끝 증가 {report['latencyDriftSeconds']}초",
-        f"  튀는 프레임 {len(report['motion']['singleFrameJumps'])}개 (기준 {report['motion']['seamThreshold']})",
+        f"  튀는 프레임 {len(report['motion']['singleFrameJumps'])}개 (기준 {report['motion']['seamThreshold']})"
+        f" · 시작 시 건너뛴 프레임 {report.get('leadingFramesSkipped', 0)}개",
     ]
+    for onset in report.get("speechOnset", []):
+        lines.append(
+            f"  ★ 답변 음성 도착({onset['speechStart']}s) → 첫 얼굴 프레임까지 {onset['firstFrameAfterSeconds']}초"
+        )
     for segment in report["segments"]:
         label = "무음" if segment["kind"] == "silence" else "음성"
         lines.append(
@@ -474,7 +543,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--instances", type=int, default=1, help="run N sessions at the same time")
     parser.add_argument("--ditto-dir", type=Path, default=DEFAULT_DITTO_DIR)
     parser.add_argument("--cfg", type=Path)
-    parser.add_argument("--data-root", type=Path, default=Path("checkpoints/ditto_trt_Ampere_Plus"))
+    parser.add_argument("--data-root", type=Path, help="default: TensorRT engines if usable, else checkpoints/ditto_pytorch")
+    parser.add_argument(
+        "--speech-arrival",
+        choices=("instant", "realtime"),
+        default="instant",
+        help="instant = reply audio arrives all at once like TTS (default); realtime = streamed like a live voice",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--instance-index", type=int, default=0, help=argparse.SUPPRESS)
     return parser
@@ -514,14 +589,32 @@ def main() -> int:
             "sampling_timesteps": steps,
         }
         with GpuSampler() as gpu:
-            result = run_session(sdk, timeline, args.source, output, label=label, setup_kwargs=setup_kwargs)
+            result = run_session(
+                sdk,
+                timeline,
+                args.source,
+                output,
+                label=label,
+                setup_kwargs=setup_kwargs,
+                speech_arrival=args.speech_arrival,
+            )
         report = analyze(result, timeline)
         report["gpu"] = gpu.summary()
-        final = mux_audio(result.video_path, timeline, args.out_dir / f"stream-{label}.mp4") if result.video_path else None
-        report["video"] = str(final) if final else None
+        report["speechArrival"] = args.speech_arrival
         reports.append(report)
         print("\n".join(_summary_lines(report)))
         print(f"  GPU: {report['gpu']}")
+        try:
+            final = mux_audio(
+                result.video_path,
+                timeline,
+                args.out_dir / f"stream-{label}.mp4",
+                skipped_frames=report.get("leadingFramesSkipped", 0),
+            )
+        except Exception as exc:  # the numbers above are already printed
+            print(f"  [WARN] 소리 합치기 실패: {exc!r}")
+            final = None
+        report["video"] = str(final) if final else str(result.video_path)
         print(f"  영상: {report['video']}\n")
 
     report_path = args.out_dir / (f"report-i{args.instance_index}.json" if args.instances > 1 else "report.json")
@@ -554,9 +647,11 @@ def _run_parallel(args: argparse.Namespace) -> int:
         "--smoothing-kernel", str(args.smoothing_kernel),
         "--instances", str(args.instances),
         "--ditto-dir", str(args.ditto_dir),
-        "--data-root", str(args.data_root),
         "--out-dir", str(args.out_dir),
+        "--speech-arrival", args.speech_arrival,
     ]
+    if args.data_root:
+        passthrough += ["--data-root", str(args.data_root)]
     if args.speech:
         passthrough += ["--speech", str(args.speech.resolve())]
     if args.cfg:
