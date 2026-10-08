@@ -58,6 +58,14 @@ class MemberProfileRequest(BaseModel):
         description="키워드 추출에 사용할 인터뷰 답변 샘플",
     )
     keywordLimit: int = Field(12, ge=1, le=30, description="저장할 최대 키워드 수")
+    sourceRevision: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "선택: 백엔드 RAG 프로필 작업 revision. 완료 콜백에 그대로 돌려줘서 "
+            "다시 학습한 프로필 점수가 이전 점수를 대체하게 함"
+        ),
+    )
 
 
 class MemberProfileResponse(BaseModel):

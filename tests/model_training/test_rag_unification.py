@@ -384,6 +384,36 @@ class ProfileRouterCallbackTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([call[0] for call in manager.mock_calls if call[0] in {"store", "notify"}], ["store", "notify"])
 
+    def test_backend_source_revision_is_passed_to_callback(self):
+        stored = {
+            "documentId": "member-a:profile_snapshot:default",
+            "status": "stored",
+            "keywords": [],
+            "profileSummary": "[회원 핵심 프로필]",
+            "profileQuality": {"profileScore": 70.0},
+        }
+        for payload, expected in (
+            ({**self.payload, "sourceRevision": 4}, 4),
+            (self.payload, None),
+        ):
+            with self.subTest(expected=expected):
+                with (
+                    patch.object(self.training, "add_member_profile_to_rag", return_value=stored),
+                    patch.object(self.training, "notify_personality_training_complete", return_value=True) as notify,
+                ):
+                    response = self.client.post("/api/v1/training/profiles", json=payload)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(notify.call_args.kwargs["source_revision"], expected)
+
+    def test_invalid_source_revision_is_rejected(self):
+        with patch.object(self.training, "add_member_profile_to_rag") as store:
+            response = self.client.post(
+                "/api/v1/training/profiles",
+                json={**self.payload, "sourceRevision": 0},
+            )
+        self.assertEqual(response.status_code, 422)
+        store.assert_not_called()
+
     def test_samples_endpoint_accepts_legacy_payload(self):
         with patch.object(
             self.training,

@@ -48,16 +48,19 @@ def describe(message: str) -> EventText | None:
         if "processing:" in message:
             return EventText("RAG", _with_member(f"성격·기억(RAG) 학습 시작: 인터뷰 답변 {f.get('samples', '-')}개", f), RUN)
         if "completed:" in message:
-            return EventText(
-                "RAG",
-                _with_member(
-                    f"성격·기억(RAG) 학습 완료: 성격 점수 {f.get('profile_score', '-')}, "
-                    f"데이터 신뢰도 {f.get('data_reliability', '-')}, 감점 {f.get('penalty', '0')}, "
-                    f"저장 문서 {f.get('documents', '-')}개 (정리 {f.get('removed', '0')}개)",
-                    f,
-                ),
-                OK,
+            revision = f.get("revision")
+            revision_text = (
+                f", 학습 회차 {revision}" if revision and revision != "none" else ""
             )
+            text = (
+                f"성격·기억(RAG) 학습 완료: 성격 점수 {f.get('profile_score', '-')}, "
+                f"데이터 신뢰도 {f.get('data_reliability', '-')}, 감점 {f.get('penalty', '0')}, "
+                f"저장 문서 {f.get('documents', '-')}개 (정리 {f.get('removed', '0')}개)"
+                f"{revision_text}"
+            )
+            if f.get("callback_sent") == "False":
+                text += ", 백엔드 점수 반영 안 됨(콜백 미설정)"
+            return EventText("RAG", _with_member(text, f), OK)
         if "failed:" in message:
             return EventText("RAG", _with_member(f"성격·기억(RAG) 학습 실패: {message.split('error=', 1)[-1]}", f), FAIL)
         return None

@@ -16,6 +16,7 @@ def notify_personality_training_complete(
     clone_id: int,
     *,
     score_components: Mapping[str, object] | None = None,
+    source_revision: int | None = None,
     base_url: str | None = None,
     secret: str | None = None,
     timeout_seconds: float = 10.0,
@@ -53,6 +54,13 @@ def notify_personality_training_complete(
             ),
             "penaltyScore": score_components.get("penaltyScore", 0.0),
         }
+        # The backend accepts a newer profile score only when it carries a
+        # newer revision. Without it, only the very first result is stored and
+        # every retrained (improved) profile score is ignored.
+        if source_revision is not None:
+            if source_revision <= 0:
+                raise ValueError("source_revision must be a positive integer")
+            payload["sourceRevision"] = source_revision
 
     try:
         if http_client is not None:

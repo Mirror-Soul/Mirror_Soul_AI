@@ -91,6 +91,48 @@ class CloneTrainingCallbackTest(unittest.TestCase):
             },
         )
 
+    def test_posts_source_revision_so_retrained_scores_replace_old_ones(self):
+        response = Mock(status_code=200)
+        client = Mock()
+        client.post.return_value = response
+
+        notify_personality_training_complete(
+            12,
+            score_components={
+                "profileScore": 71.0,
+                "dataReliabilityScore": 92.0,
+                "penaltyScore": 0.0,
+            },
+            source_revision=3,
+            base_url="http://backend.internal:8080",
+            secret="callback-secret",
+            http_client=client,
+        )
+
+        self.assertEqual(
+            client.post.call_args.kwargs["json"],
+            {
+                "calculationVersion": "clone-similarity-v1",
+                "profileScore": 71.0,
+                "dataReliabilityScore": 92.0,
+                "penaltyScore": 0.0,
+                "sourceRevision": 3,
+            },
+        )
+
+    def test_rejects_non_positive_source_revision(self):
+        client = Mock()
+        with self.assertRaises(ValueError):
+            notify_personality_training_complete(
+                12,
+                score_components={"profileScore": 1.0, "dataReliabilityScore": 1.0},
+                source_revision=0,
+                base_url="http://backend.internal:8080",
+                secret="callback-secret",
+                http_client=client,
+            )
+        client.post.assert_not_called()
+
     def test_rejects_partial_configuration_without_leaking_secret(self):
         with self.assertRaises(CloneTrainingCallbackError) as context:
             notify_personality_training_complete(

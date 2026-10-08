@@ -73,9 +73,17 @@ Content-Type: application/json
   "calculationVersion": "clone-similarity-v1",
   "profileScore": 64.25,
   "dataReliabilityScore": 91.5,
-  "penaltyScore": 1.5
+  "penaltyScore": 1.5,
+  "sourceRevision": 3
 }
 ```
+
+`sourceRevision` is the `RagProfileJob.requestedRevision` the backend sent in
+`POST /api/v1/training/profiles`. The AI echoes it unchanged. The backend
+accepts a profile score only when its revision is newer than the stored one,
+so without the revision only the first profile score would ever be stored and
+later retraining (more interviews, personality updates) could not raise it.
+The field is omitted when the request had no revision.
 
 For rollout compatibility the callback helper can still send the old empty
 body when no score components are available. The backend should accept both
@@ -111,3 +119,21 @@ queue. On `COMPLETED`, its `result.voiceScore` is the voice component and
 consume this event and update the voice component and aggregate atomically.
 The result contains `jobId` and `userUuid`; the backend resolves the clone and
 handles duplicate or stale events idempotently by `jobId`.
+
+## Component scores shown to members
+
+All components are delivered separately so the app can show which one is low
+and what the member can do to raise it. The backend stores each component on
+the clone row and returns them with `GET /evolve/sync-detail`
+(`faceSimilarityScore`, `voiceSimilarityScore`, `profileSimilarityScore`,
+`dataReliabilityScore`, `similarityPenalty`, `syncRate`, `calculationVersion`).
+
+| Component | Sent by | Field | Updated when |
+| --- | --- | --- | --- |
+| Face | face worker, `FACE_PROFILE_BUILD_STATUS` `COMPLETED` | `result.cloneSimilarity.faceScore` | a newer face training job completes |
+| Voice | voice worker, `VOICE_TRAINING_STATUS` `COMPLETED` | `result.voiceScore` | a newer voice training job completes |
+| Profile | RAG profile callback | `profileScore` (+ `dataReliabilityScore`, `penaltyScore`) | a newer `sourceRevision` completes |
+
+`syncRate` is only visible while the clone is `READY`; the component scores
+are returned as stored, so a component the member has not trained yet is
+`null` and contributes zero.

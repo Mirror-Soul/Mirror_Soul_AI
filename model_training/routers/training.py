@@ -82,6 +82,7 @@ def add_member_profile(request: MemberProfileRequest):
         callback_sent = notify_personality_training_complete(
             request.cloneId,
             score_components=result["profileQuality"],
+            source_revision=request.sourceRevision,
         )
     except Exception as exc:
         print(
@@ -99,6 +100,7 @@ def add_member_profile(request: MemberProfileRequest):
         f"profile_score={profile_quality.get('profileScore')} "
         f"data_reliability={profile_quality.get('dataReliabilityScore')} "
         f"penalty={profile_quality.get('penaltyScore', 0.0)} "
+        f"revision={request.sourceRevision or 'none'} "
         f"documents={result.get('documentCount')} "
         f"removed={result.get('removedDocumentCount')} "
         f"callback_sent={callback_sent}",
