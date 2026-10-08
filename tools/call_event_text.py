@@ -49,6 +49,10 @@ SOURCE_KO = {
     "member_profile_interview": "인터뷰(이전 형식)",
     "interview_answer": "인터뷰(이전 형식)",
 }
+SPEAKER_KO = {
+    "USER": "사용자",
+    "CLONE": "클론",
+}
 CLOSE_STATUS_KO = {
     "COMPLETED": "정상 종료",
     "COMPLETED_WITH_ERRORS": "일부 오류 후 종료",
@@ -319,7 +323,7 @@ def describe(message: str) -> EventText | None:
         if "reply audio queued" in message:
             return EventText("CALL", "답변 재생 시작", OK)
         if "conversation context updated" in message:
-            return EventText("CALL", f"대화 기록 저장 (지금까지 {f.get('turns', '-')}턴)", INFO)
+            return EventText("CALL", f"대화 맥락 갱신 (지금까지 {f.get('turns', '-')}턴)", INFO)
         if "incoming audio track ended" in message:
             return EventText("CALL", "사용자 음성 트랙 끝남", INFO)
         if "starting realtime audio tasks" in message:
@@ -328,6 +332,43 @@ def describe(message: str) -> EventText | None:
             return EventText("", "", "")
         if "pipeline failed" in message:
             return EventText("CALL", "대화 처리 실패: " + message.split("failed:", 1)[-1].strip(), FAIL)
+        return None
+
+    # --- call history (talk logs) ----------------------------------------
+    if message.startswith("[TALK_LOG]"):
+        who = SPEAKER_KO.get(f.get("speaker", ""), f.get("speaker", "발화"))
+        if "saved:" in message:
+            if f.get("duplicated") == "yes":
+                return EventText("기록", f"{who} 발화는 이미 저장됨 (중복 요청)", INFO)
+            return EventText(
+                "기록",
+                f"통화 기록 저장: {who} 발화 {f.get('chars', '-')}자 "
+                f"(기록 번호 {f.get('talkLogId', '-')})",
+                OK,
+            )
+        if "save failed" in message:
+            return EventText(
+                "기록",
+                f"통화 기록 저장 실패: {who} 발화, 오류 {f.get('error_code', '-')}",
+                FAIL,
+            )
+        if "saving disabled" in message:
+            reason = message.split("reason=", 1)[-1].strip() if "reason=" in message else "-"
+            return EventText("기록", f"통화 기록 저장 꺼짐 ({reason})", WARN)
+        if "entry dropped after close" in message:
+            return EventText("기록", f"통화 종료 후 도착한 {who} 발화는 저장하지 않음", WARN)
+        if "turn not recorded" in message:
+            return EventText("기록", "이번 턴을 통화 기록에 넣지 못함", WARN)
+        if "call summary" in message:
+            failed = f.get("failed", "0")
+            dropped = f.get("dropped", "0")
+            style = OK if failed == "0" and dropped == "0" else WARN
+            return EventText(
+                "기록",
+                f"통화 기록 정리: 저장 {f.get('saved', '-')}건, "
+                f"중복 {f.get('duplicated', '-')}건, 실패 {failed}건, 누락 {dropped}건",
+                style,
+            )
         return None
 
     # --- trace ------------------------------------------------------------

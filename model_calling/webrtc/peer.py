@@ -134,6 +134,7 @@ def create_peer_connection(call_id: int) -> RTCPeerConnection:
                     video_required=session.media_type == "VIDEO",
                     conversation_history=session.conversation_history,
                     call_trace=session.trace,
+                    talk_log_recorder=session.talk_log,
                 )
                 if get_session(call_id) is not session:
                     receiver_task.cancel()

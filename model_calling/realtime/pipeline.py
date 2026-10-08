@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
 
@@ -16,6 +16,12 @@ from model_calling.services import (
 from model_calling.utils import load_user_persona
 from model_calling.realtime.audio import QueuedAudioTrack, receive_utterances
 from model_calling.realtime.ditto import DittoVideoSession
+from model_calling.realtime.talk_log import (
+    CallTalkLogRecorder,
+    spoken_window,
+    utc_now,
+    wav_duration_seconds,
+)
 from model_calling.realtime.trace import CallTrace, trace_fields
 from model_calling.webrtc.session import get_call_context
 from model_training.base_profiles import get_mbti_base_profile
@@ -37,6 +43,9 @@ class RealtimePipelineError(RuntimeError):
 class QueuedUtterance:
     audio_bytes: bytes
     enqueued_at: float
+    # Wall-clock window of the user's speech, used for the call history.
+    spoken_started_at: datetime | None = None
+    spoken_ended_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -466,6 +475,48 @@ def _append_conversation_turn(
     )
 
 
+def _record_talk_log_turn(
+    recorder: CallTalkLogRecorder,
+    *,
+    turn_id: int,
+    reply: GeneratedReply,
+    user_started_at: datetime | None,
+    user_ended_at: datetime | None,
+    reply_queued_at: datetime,
+    audio_timing: Any,
+) -> None:
+    """Queue the user's words and the clone's reply for the call history."""
+    try:
+        user_ended = user_ended_at or reply_queued_at
+        user_started = user_started_at or user_ended
+        start_delay = getattr(audio_timing, "start_delay_seconds", None)
+        duration = getattr(audio_timing, "duration_seconds", None)
+        if not isinstance(start_delay, (int, float)):
+            start_delay = 0.0
+        clone_started = reply_queued_at + timedelta(seconds=max(0.0, start_delay))
+        clone_ended = (
+            clone_started + timedelta(seconds=max(0.0, duration))
+            if isinstance(duration, (int, float))
+            else None
+        )
+        recorder.record_turn(
+            turn_id=turn_id,
+            user_text=reply.user_text,
+            user_started_at=user_started,
+            user_ended_at=user_ended,
+            clone_text=reply.assistant_text,
+            clone_started_at=clone_started,
+            clone_ended_at=clone_ended,
+        )
+    except Exception as exc:  # noqa: BLE001 - history must not break the call
+        print(
+            "[TALK_LOG] turn not recorded: "
+            f"{trace_fields(recorder.call_id, turn_id)} "
+            f"error={type(exc).__name__}: {_single_line(exc)}",
+            flush=True,
+        )
+
+
 async def start_realtime_audio(
     *,
     call_id: int,
@@ -478,6 +529,7 @@ async def start_realtime_audio(
     video_required: bool = False,
     conversation_history: list[dict[str, str]] | None = None,
     call_trace: CallTrace | None = None,
+    talk_log_recorder: CallTalkLogRecorder | None = None,
 ) -> tuple[asyncio.Task, asyncio.Task]:
     trace = call_trace or CallTrace(
         call_id=call_id,
@@ -487,11 +539,17 @@ async def start_realtime_audio(
     )
 
     async def enqueue_utterance(wav_bytes: bytes) -> None:
+        spoken_started_at, spoken_ended_at = spoken_window(
+            ended_at=utc_now(),
+            duration_seconds=wav_duration_seconds(wav_bytes),
+        )
         replaced = _put_latest_utterance(
             utterance_queue,
             QueuedUtterance(
                 audio_bytes=wav_bytes,
                 enqueued_at=time.monotonic(),
+                spoken_started_at=spoken_started_at,
+                spoken_ended_at=spoken_ended_at,
             ),
         )
         if replaced:
@@ -515,9 +573,13 @@ async def start_realtime_audio(
             if isinstance(queued, QueuedUtterance):
                 wav_bytes = queued.audio_bytes
                 enqueued_at = queued.enqueued_at
+                spoken_started_at = queued.spoken_started_at
+                spoken_ended_at = queued.spoken_ended_at
             else:
                 wav_bytes = queued
                 enqueued_at = time.monotonic()
+                spoken_started_at = None
+                spoken_ended_at = None
             turn_id = trace.start_turn()
             fields = trace_fields(call_id, turn_id)
             stage = "PIPELINE"
@@ -631,7 +693,20 @@ async def start_realtime_audio(
                         )
                         continue
                     stage = "OUTPUT"
-                    output_track.enqueue_encoded_audio(reply.audio_bytes)
+                    reply_queued_at = utc_now()
+                    audio_timing = output_track.enqueue_encoded_audio(
+                        reply.audio_bytes
+                    )
+                    if talk_log_recorder is not None:
+                        _record_talk_log_turn(
+                            talk_log_recorder,
+                            turn_id=turn_id,
+                            reply=reply,
+                            user_started_at=spoken_started_at,
+                            user_ended_at=spoken_ended_at,
+                            reply_queued_at=reply_queued_at,
+                            audio_timing=audio_timing,
+                        )
                     _append_conversation_turn(
                         conversation_history,
                         user_id=user_id,

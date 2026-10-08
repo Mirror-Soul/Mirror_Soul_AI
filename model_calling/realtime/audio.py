@@ -60,6 +60,14 @@ def analyze_pcm_quality(
     )
 
 
+@dataclass(frozen=True)
+class QueuedAudioTiming:
+    """Playback position of audio added to ``QueuedAudioTrack``."""
+
+    start_delay_seconds: float
+    duration_seconds: float
+
+
 class QueuedAudioTrack(MediaStreamTrack):
     kind = "audio"
 
@@ -76,7 +84,8 @@ class QueuedAudioTrack(MediaStreamTrack):
     def is_playing(self) -> bool:
         return bool(self._pcm)
 
-    def enqueue_encoded_audio(self, audio_bytes: bytes) -> None:
+    def enqueue_encoded_audio(self, audio_bytes: bytes) -> QueuedAudioTiming:
+        """Decode and queue audio; return when it starts and how long it plays."""
         pcm_before = len(self._pcm)
         decoded_frames = 0
         resampled_frames = 0
@@ -108,6 +117,10 @@ class QueuedAudioTrack(MediaStreamTrack):
             f"resampled_frames={resampled_frames} pcm_added={added_pcm} "
             f"pcm_total={len(self._pcm)} duration={duration_seconds:.2f}s",
             flush=True,
+        )
+        return QueuedAudioTiming(
+            start_delay_seconds=pcm_before / (OUTPUT_SAMPLE_RATE * 2),
+            duration_seconds=duration_seconds,
         )
 
     async def recv(self) -> av.AudioFrame:

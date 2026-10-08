@@ -6,6 +6,7 @@ from typing import Any
 from aiortc import RTCPeerConnection
 
 from model_calling.clients.backend_call_context import CallContext
+from model_calling.realtime.talk_log import CallTalkLogRecorder
 from model_calling.realtime.trace import CallTrace
 from shared.config import settings
 
@@ -30,6 +31,7 @@ class WebRTCSession:
     pipeline_task: asyncio.Task | None = None
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     trace: CallTrace = field(init=False)
+    talk_log: CallTalkLogRecorder = field(init=False)
 
     def __post_init__(self) -> None:
         self.trace = CallTrace(
@@ -38,6 +40,7 @@ class WebRTCSession:
             clone_id=self.clone_id,
             media_type=self.media_type,
         )
+        self.talk_log = CallTalkLogRecorder(self.call_id)
 
 
 _sessions: dict[int, WebRTCSession] = {}
@@ -152,4 +155,9 @@ async def close_session(call_id: int, *, reason: str = "SESSION_CLOSED") -> None
         try:
             await session.peer_connection.close()
         finally:
-            session.trace.close(reason=reason)
+            try:
+                # Utterances already spoken are still saved to the call
+                # history, bounded by BACKEND_TALK_LOG_FLUSH_TIMEOUT_SECONDS.
+                await session.talk_log.close()
+            finally:
+                session.trace.close(reason=reason)

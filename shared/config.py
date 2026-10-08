@@ -22,6 +22,24 @@ class Settings:
     BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS: float = float(
         os.getenv("BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS", "0.2")
     )
+    # Call history: finished utterances are saved through
+    # POST /internal/ai/calls/{callId}/talk-logs on the backend.
+    BACKEND_TALK_LOG_ENABLED: bool = os.getenv(
+        "BACKEND_TALK_LOG_ENABLED",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    BACKEND_TALK_LOG_TIMEOUT_SECONDS: float = float(
+        os.getenv("BACKEND_TALK_LOG_TIMEOUT_SECONDS", "5")
+    )
+    BACKEND_TALK_LOG_MAX_ATTEMPTS: int = int(
+        os.getenv("BACKEND_TALK_LOG_MAX_ATTEMPTS", "3")
+    )
+    BACKEND_TALK_LOG_RETRY_BACKOFF_SECONDS: float = float(
+        os.getenv("BACKEND_TALK_LOG_RETRY_BACKOFF_SECONDS", "0.5")
+    )
+    BACKEND_TALK_LOG_FLUSH_TIMEOUT_SECONDS: float = float(
+        os.getenv("BACKEND_TALK_LOG_FLUSH_TIMEOUT_SECONDS", "10")
+    )
     CALL_CONTEXT_CACHE_TTL_SECONDS: float = float(
         os.getenv("CALL_CONTEXT_CACHE_TTL_SECONDS", "600")
     )
