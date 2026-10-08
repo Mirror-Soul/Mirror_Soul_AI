@@ -49,6 +49,7 @@ PROFILE_SNAPSHOT_IMPORTANCE = 1.0
 INTERVIEW_MEMORY_IMPORTANCE = 0.8
 USER_PROVIDED_CONFIDENCE = 1.0
 DESCRIPTION_MAX_CHARS = 500
+BEHAVIOR_SECTION_HEADING = "[인터뷰로 확인된 행동 성향]"
 
 MetadataValue = str | int | float | bool
 
@@ -260,6 +261,7 @@ def build_profile_snapshot_text(
     interests: Iterable[str] | None = None,
     values: Iterable[str] | None = None,
     keywords: Iterable[str] | None = None,
+    behavior_lines: Iterable[str] | None = None,
 ) -> str:
     """Build the profile snapshot using only values confirmed by the backend.
 
@@ -285,6 +287,11 @@ def build_profile_snapshot_text(
             intro = f"{intro[: DESCRIPTION_MAX_CHARS - 1].rstrip()}…"
         lines.append(f"자기소개: {intro}")
 
+    behavior = _clean_list(behavior_lines)
+    if behavior:
+        # Placed right after the basic fields so it survives prompt budgets.
+        lines.extend(["", BEHAVIOR_SECTION_HEADING, *(f"- {item}" for item in behavior)])
+
     for heading, items in (
         ("[관심사]", _clean_list(interests)),
         ("[가치관]", _clean_list(values)),
@@ -294,6 +301,23 @@ def build_profile_snapshot_text(
             lines.extend(["", heading, *(f"- {item}" for item in items)])
 
     return "\n".join(lines)
+
+
+def replace_behavior_section(text: str, behavior_lines: Iterable[str]) -> str:
+    """Replace (or insert) the behavior section of an existing snapshot text."""
+    blocks = [block for block in str(text or "").split("\n\n") if block.strip()]
+    blocks = [
+        block
+        for block in blocks
+        if not block.lstrip().startswith(BEHAVIOR_SECTION_HEADING)
+    ]
+    behavior = _clean_list(behavior_lines)
+    if behavior:
+        section = "\n".join(
+            [BEHAVIOR_SECTION_HEADING, *(f"- {item}" for item in behavior)]
+        )
+        blocks.insert(min(1, len(blocks)), section)
+    return "\n\n".join(blocks)
 
 
 def build_profile_snapshot_document(
@@ -312,9 +336,11 @@ def build_profile_snapshot_document(
     interests: Iterable[str] | None = None,
     values: Iterable[str] | None = None,
     keywords: Iterable[str] | None = None,
+    behavior_lines: Iterable[str] | None = None,
     updated_at: str | None = None,
 ) -> RagDocument:
     keyword_list = _clean_list(keywords)
+    behavior_list = _clean_list(behavior_lines)
     return RagDocument(
         user_id=user_id,
         source_type=PROFILE_SNAPSHOT,
@@ -330,6 +356,7 @@ def build_profile_snapshot_document(
             interests=interests,
             values=values,
             keywords=keyword_list,
+            behavior_lines=behavior_list,
         ),
         profile_key=profile_key,
         clone_id=clone_id,
@@ -344,6 +371,7 @@ def build_profile_snapshot_document(
             "mbti": compact_text(mbti).upper(),
             "keywordCount": len(keyword_list),
             "keywords": ", ".join(keyword_list),
+            "behaviorTraitCount": len(behavior_list),
         },
     )
 

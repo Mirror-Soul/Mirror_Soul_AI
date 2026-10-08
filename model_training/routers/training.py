@@ -101,6 +101,8 @@ def add_member_profile(request: MemberProfileRequest):
         f"data_reliability={profile_quality.get('dataReliabilityScore')} "
         f"penalty={profile_quality.get('penaltyScore', 0.0)} "
         f"revision={request.sourceRevision or 'none'} "
+        f"behavior_traits={result.get('behaviorTraitCount', 0)} "
+        f"behavior_status={result.get('behaviorProfileStatus', 'none')} "
         f"documents={result.get('documentCount')} "
         f"removed={result.get('removedDocumentCount')} "
         f"callback_sent={callback_sent}",
