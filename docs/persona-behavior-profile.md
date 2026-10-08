@@ -56,9 +56,9 @@ RAG 프로필 학습(`POST /api/v1/training/profiles`) 때 인터뷰 답변 전�
 ```bash
 cd /home/ec2-user/Mirror_Soul_AI
 # 1) 미리보기: 쓰지 않고 정리 결과만 출력
-.venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid>
+venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid>
 # 2) 적용
-.venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid> --apply
+venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid> --apply
 ```
 
 - 바뀌는 것은 `profile_snapshot` 문서의 텍스트, 임베딩, `behaviorTraitCount` 메타데이터뿐입니다. 아무것도 지우지 않습니다.
