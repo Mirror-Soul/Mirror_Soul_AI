@@ -14,9 +14,9 @@ Safe by default:
 
 Run on the AI API server (it owns the RAG store)::
 
-    .venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid>
-    .venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid> --apply
-    .venv/bin/python -m tools.backfill_behavior_profile --all --apply
+    venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid>
+    venv/bin/python -m tools.backfill_behavior_profile --user-id <member-uuid> --apply
+    venv/bin/python -m tools.backfill_behavior_profile --all --apply
 
 Back up ``RAG_DB_PATH`` before running with ``--all --apply``.
 """
