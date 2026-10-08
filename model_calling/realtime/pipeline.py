@@ -25,7 +25,11 @@ from model_calling.realtime.talk_log import (
 from model_calling.realtime.trace import CallTrace, trace_fields
 from model_calling.webrtc.session import get_call_context
 from model_training.base_profiles import get_mbti_base_profile
-from model_calling.clients.rag_search import search_mode, search_user_memories
+from model_calling.clients.rag_search import (
+    merge_memory_results,
+    search_mode,
+    search_user_memories,
+)
 from shared.config import settings
 
 
@@ -253,6 +257,48 @@ async def load_runtime_context(
     )
 
 
+def memory_search_queries(
+    transcript: str,
+    conversation_history: list[dict[str, str]] | None,
+) -> list[str]:
+    """Queries for one turn: the current question alone, then with context.
+
+    Searching only with recent turns attached lets an earlier topic dominate
+    the embedding, so a question that closely matches an interview answer can
+    miss it. The current question alone is always searched first; the
+    contextual query still helps short follow-ups such as "why?".
+    """
+    current = build_memory_search_query(transcript, None, history_turns=0)
+    contextual = build_memory_search_query(transcript, conversation_history)
+    if not contextual or contextual == current:
+        return [current]
+    return [current, contextual]
+
+
+async def _search_memories(
+    user_id: str,
+    queries: list[str],
+    top_k: int,
+) -> tuple[list[dict[str, Any]], int]:
+    results = await asyncio.gather(
+        *(
+            asyncio.to_thread(search_user_memories, user_id, query, top_k)
+            for query in queries
+        ),
+        return_exceptions=True,
+    )
+    successes: list[list[dict[str, Any]]] = []
+    errors: list[BaseException] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            errors.append(result)
+        else:
+            successes.append(result)
+    if not successes:
+        raise errors[0]
+    return merge_memory_results(successes, top_k), len(errors)
+
+
 async def generate_reply_audio(
     user_id: str,
     clone_id: int,
@@ -317,18 +363,14 @@ async def generate_reply_audio(
 
         stage = "RAG"
         stage_started = time.monotonic()
-        rag_query = build_memory_search_query(
-            transcript,
-            conversation_history,
-        )
+        rag_queries = memory_search_queries(transcript, conversation_history)
         try:
-            memories = await _run_stage(
+            memories, failed_queries = await _run_stage(
                 "RAG",
                 settings.REALTIME_RAG_TIMEOUT_SECONDS,
-                lambda: asyncio.to_thread(
-                    search_user_memories,
+                lambda: _search_memories(
                     user_id,
-                    rag_query,
+                    rag_queries,
                     max(1, settings.RAG_TOP_K),
                 ),
             )
@@ -351,7 +393,9 @@ async def generate_reply_audio(
                 "[REALTIME] RAG lookup complete: "
                 f"{fields} user={user_id} mode={search_mode()} count={len(memories)} "
                 f"best_distance={min(distances) if distances else 'none'} "
-                f"query_chars={len(rag_query)} sources={source_summary} "
+                f"queries={len(rag_queries)} failed_queries={failed_queries} "
+                f"query_chars={'/'.join(str(len(q)) for q in rag_queries)} "
+                f"sources={source_summary} "
                 f"elapsed_ms={timings['rag']}",
                 flush=True,
             )

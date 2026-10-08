@@ -296,11 +296,13 @@ def describe(message: str) -> EventText | None:
             distance_text = "" if distance == "none" else f", 가장 가까운 거리 {float(distance):.2f}"
             mode = "AI 서버 저장소" if f.get("mode") == "remote" else "로컬 저장소(주의)"
             sources = re.search(r"\bsources=(\S+)", message)
+            failed = f.get("failed_queries", "0")
+            failed_text = f", 검색 {failed}건 실패" if failed != "0" else ""
             return EventText(
                 "RAG",
                 f"기억 검색 {count}건: {_sources(sources.group(1) if sources else None)} "
-                f"({_seconds(f.get('elapsed_ms'))}, {mode}{distance_text})",
-                style,
+                f"({_seconds(f.get('elapsed_ms'))}, {mode}{distance_text}{failed_text})",
+                WARN if failed != "0" else style,
             )
         if "RAG lookup skipped" in message:
             return EventText("RAG", f"기억 검색 건너뜀 ({f.get('error_code', '-')}), 기억 없이 답변", WARN)

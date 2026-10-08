@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from model_training.rag_documents import PROFILE_SOURCE_TYPES
 from shared.config import settings
 
 INTERNAL_SEARCH_PATH = "/internal/rag/search"
@@ -102,6 +103,48 @@ def _search_remote(user_id: str, query: str, top_k: int) -> list[dict[str, Any]]
     if not isinstance(memories, list):
         raise RagSearchError("RAG search API response has no memories list.")
     return [memory for memory in memories if isinstance(memory, dict)]
+
+
+def _memory_key(memory: dict[str, Any]) -> str:
+    document_id = memory.get("documentId")
+    if isinstance(document_id, str) and document_id:
+        return f"id:{document_id}"
+    return "text:" + " ".join(str(memory.get("text") or "").split()).casefold()
+
+
+def _is_profile(memory: dict[str, Any]) -> bool:
+    metadata = memory.get("metadata") or {}
+    return str(metadata.get("sourceType", "")) in PROFILE_SOURCE_TYPES
+
+
+def merge_memory_results(
+    result_sets: list[list[dict[str, Any]]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Merge searches made with different queries for the same turn.
+
+    The profile document is kept once at the front. Other memories are
+    deduplicated (keeping the closest distance) and the ``top_k`` closest are
+    returned, so a memory found only by one of the queries is not lost.
+    """
+    profiles: dict[str, dict[str, Any]] = {}
+    memories: dict[str, dict[str, Any]] = {}
+    for results in result_sets:
+        for memory in results:
+            key = _memory_key(memory)
+            if _is_profile(memory):
+                profiles.setdefault(key, memory)
+                continue
+            current = memories.get(key)
+            if current is None or _distance(memory) < _distance(current):
+                memories[key] = memory
+    ranked = sorted(memories.values(), key=_distance)
+    return [*profiles.values(), *ranked[: max(0, int(top_k))]]
+
+
+def _distance(memory: dict[str, Any]) -> float:
+    value = memory.get("distance")
+    return float(value) if isinstance(value, (int, float)) else float("inf")
 
 
 def search_user_memories(
