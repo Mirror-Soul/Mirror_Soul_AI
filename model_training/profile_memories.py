@@ -36,6 +36,7 @@ def build_member_profile_documents(
     job: str | None = None,
     interests: list[str] | None = None,
     values: list[str] | None = None,
+    behavior_lines: list[str] | None = None,
     updated_at: str | None = None,
 ) -> list[RagDocument]:
     """Build the profile snapshot plus one interview memory per answer.
@@ -61,6 +62,7 @@ def build_member_profile_documents(
         interests=interests,
         values=values,
         keywords=keywords,
+        behavior_lines=behavior_lines,
         updated_at=timestamp,
     )
 

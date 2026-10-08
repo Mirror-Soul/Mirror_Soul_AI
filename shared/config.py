@@ -48,6 +48,16 @@ class Settings:
     )
 
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    # Behavior profile summarised from interview answers at RAG profile
+    # training time and stored in the always-included profile snapshot.
+    PERSONA_BEHAVIOR_PROFILE_ENABLED: bool = os.getenv(
+        "PERSONA_BEHAVIOR_PROFILE_ENABLED",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    PERSONA_BEHAVIOR_MODEL: str = os.getenv("PERSONA_BEHAVIOR_MODEL", "gpt-4o-mini")
+    PERSONA_BEHAVIOR_MAX_TRAITS: int = int(
+        os.getenv("PERSONA_BEHAVIOR_MAX_TRAITS", "8")
+    )
     RAG_DB_PATH: str = os.getenv("RAG_DB_PATH", "./rag_store/chroma")
     RAG_COLLECTION_NAME: str = os.getenv(
         "RAG_COLLECTION_NAME",

@@ -104,3 +104,30 @@ class LlmContextTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BehaviorProfilePromptTests(unittest.TestCase):
+    def test_prompt_tells_model_not_to_soften_member_attitudes(self):
+        from model_calling.services import build_dynamic_persona_prompt
+        from model_calling.schemas import PersonalityProfile, SpeechProfile
+
+        prompt = build_dynamic_persona_prompt(
+            {"name": "동빈"},
+            PersonalityProfile(openness=50, conscientiousness=50, extraversion=50, agreeableness=50, neuroticism=50, summary="x"),
+            SpeechProfile(user_id="u", voice_id="v", speech_speed=50, avg_pitch=50, honorific_ratio=50, summary="기본 말투"),
+            retrieved_memories=[],
+        )
+        self.assertIn("[성향 재현 원칙]", prompt)
+        self.assertIn("미화하거나", prompt)
+        self.assertIn("모범 답안", prompt)
+        self.assertIn("위협", prompt)
+
+    def test_long_profile_keeps_behavior_section(self):
+        from model_calling.services import format_retrieved_memories
+
+        profile_text = "[회원 핵심 프로필] " + "가" * 900 + " [인터뷰로 확인된 행동 성향] - 압박·스트레스: 포기하고 피한다"
+        text = format_retrieved_memories(
+            [{"text": profile_text, "metadata": {"sourceType": "profile_snapshot"}}],
+            max_chars=3000,
+        )
+        self.assertIn("포기하고 피한다", text)

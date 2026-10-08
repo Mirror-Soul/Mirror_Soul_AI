@@ -86,6 +86,8 @@ def format_mbti_base_profile(mbti_base_profile: dict[str, Any] | None) -> str:
 # Shared with the RAG store so v2 (profile_snapshot / interview_memory) and
 # legacy v1 documents are grouped the same way in the prompt.
 PROFILE_SUMMARY_SOURCE_TYPES = PROFILE_SOURCE_TYPES
+PROFILE_ITEM_MAX_CHARS = 1600
+MEMORY_ITEM_MAX_CHARS = 700
 INTERVIEW_SOURCE_TYPES = RAG_INTERVIEW_SOURCE_TYPES
 
 
@@ -174,6 +176,13 @@ def format_retrieved_memories(
     output: list[str] = []
     used = 0
     for heading, memories in _memory_groups(retrieved_memories):
+        # The profile snapshot carries the behavior profile, so it gets a
+        # larger per-item allowance than individual memories.
+        item_limit = (
+            PROFILE_ITEM_MAX_CHARS
+            if heading == "[확인된 회원 핵심 프로필]"
+            else MEMORY_ITEM_MAX_CHARS
+        )
         heading_cost = len(heading) + (2 if output else 0)
         if used + heading_cost >= budget:
             break
@@ -183,7 +192,7 @@ def format_retrieved_memories(
             remaining = budget - used - 3
             if remaining <= 0:
                 break
-            text = _compact_text(memory.get("text"), max_chars=min(700, remaining))
+            text = _compact_text(memory.get("text"), max_chars=min(item_limit, remaining))
             if not text:
                 continue
             line = f"- {text}"
@@ -353,6 +362,13 @@ def build_dynamic_persona_prompt(
 - 근거가 부족하면 일반적인 의견으로 답하거나, 모른다는 말을 반복하지 말고 자연스럽게 한 번 되묻는다.
 - 최근 assistant 답변은 대화 연결용 문맥일 뿐 회원의 확인된 사실로 취급하지 않는다.
 - 검색된 기억 중 현재 질문과 직접 관련된 내용만 답변에 사용한다.
+
+[성향 재현 원칙]
+- 프로필의 '인터뷰로 확인된 행동 성향'과 인터뷰 답변에 드러난 태도는 회원의 실제 성향이다. 관련 상황이 나오면 그 방식대로 답한다.
+- 회원의 태도가 비협조적, 회피적, 냉소적, 이기적으로 보여도 미화하거나 바람직한 방향으로 바꾸지 않는다.
+- 회원이 말하지 않은 좋은 이유, 교훈, 반성을 덧붙이지 않는다.
+- 회원의 대처 방식이 확인된 상황에서는 일반적인 모범 답안(심호흡, 소통, 긍정적인 생각 등)을 대신 말하지 않는다.
+- 단, 욕설, 혐오 표현, 상대를 위협하거나 해치라는 말, 불법 행위 권유는 하지 않는다. 이때도 태도는 유지하고 표현만 덜 거칠게 한다.
 
 [통화 답변 원칙]
 - 결론이나 직접적인 반응부터 말한다.

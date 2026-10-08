@@ -15,6 +15,10 @@ from model_training.rag_documents import (
     resolve_profile_key,
     schema_version,
 )
+from model_training.behavior_profile import (
+    behavior_profile_enabled,
+    extract_behavior_traits,
+)
 from model_training.utils import extract_keywords_from_texts
 from shared.config import settings
 
@@ -197,6 +201,11 @@ def add_member_profile_to_rag(
         limit=keyword_limit,
     )
 
+    behavior_lines, behavior_status = _behavior_profile_lines(
+        user_id,
+        interview_samples or [],
+    )
+
     documents = build_member_profile_documents(
         user_id=user_id,
         ai_profile_id=ai_profile_id,
@@ -212,6 +221,7 @@ def add_member_profile_to_rag(
         values=values or [],
         keywords=keywords,
         interview_samples=interview_samples or [],
+        behavior_lines=behavior_lines,
     )
     current_ids = set(upsert_rag_documents(documents))
 
@@ -239,7 +249,30 @@ def add_member_profile_to_rag(
         "profileQuality": profile_quality.to_dict(),
         "documentCount": len(current_ids),
         "removedDocumentCount": len(stale_ids),
+        "behaviorTraitCount": len(behavior_lines),
+        "behaviorProfileStatus": behavior_status,
     }
+
+
+def _behavior_profile_lines(
+    user_id: str,
+    interview_samples: list[dict[str, Any]],
+) -> tuple[list[str], str]:
+    """Behavior summary for the profile snapshot; never fails the training."""
+    if not behavior_profile_enabled():
+        return [], "disabled"
+    if not interview_samples:
+        return [], "no_interviews"
+    try:
+        traits = extract_behavior_traits(interview_samples, client=openai_client)
+    except Exception as exc:  # noqa: BLE001 - profile training must continue
+        print(
+            "[RAG_PROFILE] behavior profile skipped: "
+            f"user_uuid={user_id} error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return [], "failed"
+    return [trait.to_line() for trait in traits], "ok" if traits else "empty"
 
 
 def _get_user_profile_document(user_id: str) -> dict[str, Any] | None:
