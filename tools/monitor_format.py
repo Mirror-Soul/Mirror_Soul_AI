@@ -74,6 +74,8 @@ def event_tag(line: str) -> str:
         return "VIDEO"
     if marker == "CALL_TRACE":
         return "TRACE"
+    if marker == "TALK_LOG":
+        return "기록"
     if marker == "REALTIME":
         for keyword, tag in (
             ("stt", "STT"),
@@ -177,7 +179,9 @@ def pretty_timings(text: str) -> str:
     return f"{stripped.rstrip()}  -> {summary}"
 
 
-TAG_STYLES.update({"사용자": ANSI_WHITE, "클론": ANSI_GREEN, "턴": ANSI_BRIGHT_CYAN})
+TAG_STYLES.update(
+    {"사용자": ANSI_WHITE, "클론": ANSI_GREEN, "턴": ANSI_BRIGHT_CYAN, "기록": ANSI_MAGENTA}
+)
 
 
 def tag_label(tag: str) -> str:

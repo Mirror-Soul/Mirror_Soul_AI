@@ -90,6 +90,52 @@ class WebRTCSessionRegistryTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_close_flushes_talk_logs_before_finishing(self) -> None:
+        from model_calling.clients.backend_talk_log import TalkLogSaveResult
+        from model_calling.realtime.talk_log import CallTalkLogRecorder
+        from datetime import datetime, timezone
+
+        async def run() -> None:
+            call_id = 912347
+            saved = []
+
+            async def saver(saved_call_id, entry):
+                await asyncio.sleep(0.01)
+                saved.append((saved_call_id, entry.speaker))
+                return TalkLogSaveResult(talk_log_id=len(saved), duplicated=False)
+
+            peer = Mock()
+            peer.close = AsyncMock()
+            session = WebRTCSession(
+                call_id=call_id,
+                room_id="room-talk-log",
+                ai_signal_id="ai-talk-log",
+                caller_signal_id="caller-talk-log",
+                peer_connection=peer,
+                clone_user_uuid="member-talk-log",
+                clone_id=8,
+                output_track=Mock(),
+                utterance_queue=asyncio.Queue(),
+            )
+            session.talk_log = CallTalkLogRecorder(call_id, saver=saver, enabled=True)
+            save_session(session)
+            now = datetime.now(timezone.utc)
+            session.talk_log.record_turn(
+                turn_id=1,
+                user_text="잘 지냈어?",
+                user_started_at=now,
+                user_ended_at=now,
+                clone_text="응, 잘 지냈어.",
+                clone_started_at=now,
+                clone_ended_at=None,
+            )
+
+            await close_session(call_id, reason="CALL_END")
+
+            self.assertEqual(saved, [(call_id, "USER"), (call_id, "CLONE")])
+
+        asyncio.run(run())
+
     def test_registers_and_clears_member_and_clone_together(self) -> None:
         call_id = 912345
         context = _context(

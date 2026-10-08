@@ -70,6 +70,7 @@ CALL_MARKERS = (
     "[REALTIME]",
     "[DITTO_CALL]",
     "[CALL_TRACE]",
+    "[TALK_LOG]",
 )
 CALL_ID_PATTERN = re.compile(r"callId['\"]?\s*[:=]\s*['\"]?([^,'\"\s}]+)")
 USER_PATTERN = re.compile(

@@ -64,7 +64,7 @@ except ModuleNotFoundError:
 
 
 CALL_MARKER_PATTERN = (
-    r"\[(SIGNALING|WEBRTC|REALTIME|DITTO_CALL|CALL_TRACE|VIDEO_OUT)\]"
+    r"\[(SIGNALING|WEBRTC|REALTIME|DITTO_CALL|CALL_TRACE|VIDEO_OUT|TALK_LOG)\]"
     r"|Traceback|Error|Exception"
 )
 NOISE_PATTERN = r"sending video frame"
