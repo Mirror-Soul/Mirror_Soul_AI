@@ -80,11 +80,15 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("callId=77 turn=2", output.getvalue())
         self.assertIn("elapsed_ms=", output.getvalue())
-        rag_query = search_memories.call_args.args[1]
-        self.assertIn("현재 질문: 아까 이야기 기억나?", rag_query)
-        self.assertIn("12", rag_query)
-        self.assertIn("14", rag_query)
-        self.assertNotIn("15", rag_query)
+        rag_queries = sorted(call.args[1] for call in search_memories.call_args_list)
+        self.assertEqual(len(rag_queries), 2)
+        # The current question is always searched on its own as well.
+        self.assertIn("아까 이야기 기억나?", rag_queries)
+        contextual = next(q for q in rag_queries if q.startswith("현재 질문:"))
+        self.assertIn("현재 질문: 아까 이야기 기억나?", contextual)
+        self.assertIn("12", contextual)
+        self.assertIn("14", contextual)
+        self.assertNotIn("15", contextual)
         self.assertEqual(len(history), 16)
 
         _append_conversation_turn(
