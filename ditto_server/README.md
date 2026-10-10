@@ -23,6 +23,7 @@ API 키는 충분히 긴 임의 문자열을 사용하고 저장소에 커밋하
 
 ```bash
 export DITTO_SERVICE_API_KEY='<secret>'
+export DITTO_SERVICE_BACKEND=pytorch
 export DITTO_SERVICE_HOST=127.0.0.1
 export DITTO_SERVICE_PORT=8080
 
@@ -35,6 +36,26 @@ export DITTO_SERVICE_PORT=8080
 ```bash
 curl http://127.0.0.1:8080/ready
 ```
+
+## PyTorch와 TensorRT 선택
+
+기본 백엔드는 기존과 같은 `pytorch`다. RTX 4090 서버에 준비된 TensorRT 엔진을
+사용하려면 `.env.ditto-service`에 다음 값을 넣고 워커를 재시작한다.
+
+```env
+DITTO_SERVICE_BACKEND=tensorrt
+DITTO_SERVICE_TENSORRT_PYTHON_PATH=/shareHost/C084003-ditto/trt-pkgs
+DITTO_SERVICE_TENSORRT_LIBRARY_PATH=/shareHost/C084003-ditto/trt-pkgs/tensorrt_libs
+```
+
+`DITTO_SERVICE_DATA_ROOT`와 `DITTO_SERVICE_CONFIG_PATH`를 비워 두면 백엔드에 따라
+PyTorch 또는 TensorRT 기본 경로를 자동으로 선택한다. 특정 모델을 검증할 때만 두
+경로를 명시한다. `/health`와 `/ready`의 `engine.backend`에서 실제 선택값을 확인할 수
+있다. 문제가 생기면 `DITTO_SERVICE_BACKEND=pytorch`로 되돌린 뒤 워커를 재시작한다.
+
+2026-10-10 RTX 4090 격리 시험에서 TensorRT 온라인 경로는 약 47 fps(25 fps 실시간의
+1.88배)를 기록했고, 현재 서비스와 같은 오프라인 렌더 경로도 MP4 생성에 성공했다.
+실제 회원 얼굴과 긴 답변 품질은 운영 전 별도 확인한다.
 
 ## 렌더 요청
 

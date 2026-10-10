@@ -505,12 +505,17 @@ async def process_tts(
     temp_mp3_path = user_assets_dir / "result_audio_source.mp3"
     output_m4a_path = user_assets_dir / "result_audio.m4a"
 
-    print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
+    print(
+        "[TTS] selected ElevenLabs voice: "
+        f"{_mask_voice_id(voice_id)} model={settings.ELEVENLABS_TTS_MODEL_ID}",
+        flush=True,
+    )
     stability_val, style_val = calculate_voice_settings(personality)
     audio_bytes = await synthesize_member_speech(
         text=ai_text,
         voice_id=voice_id,
         api_key=api_key,
+        model_id=settings.ELEVENLABS_TTS_MODEL_ID,
         settings=ElevenLabsVoiceSettings(
             stability=stability_val,
             similarity_boost=0.9,
@@ -566,12 +571,17 @@ async def process_tts_bytes(
     if not api_key or not voice_id:
         raise Exception("ElevenLabs API Key 또는 Voice ID가 설정되지 않았습니다.")
 
-    print(f"[TTS] selected ElevenLabs voice: {_mask_voice_id(voice_id)}", flush=True)
+    print(
+        "[TTS] selected ElevenLabs voice: "
+        f"{_mask_voice_id(voice_id)} model={settings.ELEVENLABS_TTS_MODEL_ID}",
+        flush=True,
+    )
     stability_val, style_val = calculate_voice_settings(personality)
     return await synthesize_member_speech(
         text=ai_text,
         voice_id=voice_id,
         api_key=api_key,
+        model_id=settings.ELEVENLABS_TTS_MODEL_ID,
         settings=ElevenLabsVoiceSettings(
             stability=stability_val,
             similarity_boost=0.9,

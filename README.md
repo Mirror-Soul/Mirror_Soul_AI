@@ -94,6 +94,7 @@ pip install -r requirements.txt
 ```env
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
+ELEVENLABS_TTS_MODEL_ID=eleven_multilingual_v2
 
 BACKEND_API_BASE_URL=
 AI_INTERNAL_API_KEY=
@@ -107,6 +108,9 @@ WEBRTC_TURN_CREDENTIAL=
 API Key와 내부 API 비밀값이 포함된 `.env` 파일은 GitHub에 커밋하지 않습니다.
 AI 서버는 백엔드 MySQL에 직접 접속하지 않으므로 `DB_*` 환경변수가 필요 없습니다.
 회원·클론·음성 정보는 백엔드 내부 API(`/internal/ai/calls/{callId}/context`)로만 받습니다.
+`ELEVENLABS_TTS_MODEL_ID`의 기본값은 기존 음질을 유지하는
+`eleven_multilingual_v2`입니다. 속도 비교 시에만 ElevenLabs에서 지원하는 다른 모델
+ID로 변경하고 통화서버를 재시작합니다. 회원별 `voice_id`는 그대로 유지됩니다.
 
 ### 3. 서버 실행
 

@@ -316,6 +316,79 @@ class IdleLoopSessionTests(unittest.TestCase):
         self.assertEqual(first_track.idle_videos, [b"idle-mp4"])
         self.assertEqual(second_track.idle_videos, [b"idle-mp4"])
 
+    def test_disk_cache_survives_memory_cache_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory)
+            idle_loop = DittoIdleLoopConfig(
+                enabled=True,
+                duration_seconds=4.0,
+                fade_frames=10,
+                cache_dir=cache_dir,
+                cache_version="test-v1",
+            )
+            client = _Client()
+            first_track = _Track()
+            first = DittoVideoSession(
+                user_id="member-uuid",
+                clone_id=6,
+                track=first_track,
+                client=client,
+                profile_loader=_Loader(),
+                call_id=77,
+                idle_loop=idle_loop,
+            )
+            self.assertTrue(asyncio.run(first.prepare_idle_loop()))
+            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(len(list(cache_dir.glob("*.mp4"))), 1)
+
+            ditto_module._idle_loop_cache.clear()
+            second_track = _Track()
+            second = DittoVideoSession(
+                user_id="member-uuid",
+                clone_id=6,
+                track=second_track,
+                client=client,
+                profile_loader=_Loader(),
+                call_id=78,
+                idle_loop=idle_loop,
+            )
+            self.assertTrue(asyncio.run(second.prepare_idle_loop()))
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(second_track.idle_videos, [b"idle-mp4"])
+
+    def test_rejected_disk_cache_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory)
+            idle_loop = DittoIdleLoopConfig(
+                enabled=True,
+                duration_seconds=4.0,
+                fade_frames=10,
+                cache_dir=cache_dir,
+            )
+            first = DittoVideoSession(
+                user_id="member-uuid",
+                clone_id=6,
+                track=_Track(),
+                client=_Client(),
+                profile_loader=_Loader(),
+                idle_loop=idle_loop,
+            )
+            self.assertTrue(asyncio.run(first.prepare_idle_loop()))
+            self.assertEqual(len(list(cache_dir.glob("*.mp4"))), 1)
+
+            ditto_module._idle_loop_cache.clear()
+            second = DittoVideoSession(
+                user_id="member-uuid",
+                clone_id=6,
+                track=_Track(fail=True),
+                client=_Client(),
+                profile_loader=_Loader(),
+                idle_loop=idle_loop,
+            )
+            self.assertFalse(asyncio.run(second.prepare_idle_loop()))
+            self.assertEqual(list(cache_dir.glob("*.mp4")), [])
+
     def test_render_failure_keeps_still_portrait(self) -> None:
         track = _Track()
         client = _Client(DittoRealtimeError("busy", code="DITTO_RENDER_QUEUE_TIMEOUT"))
@@ -355,6 +428,10 @@ class CallConfigTests(unittest.TestCase):
         self.assertTrue(config.idle_loop.enabled)
         self.assertEqual(config.idle_loop.duration_seconds, 6.0)
         self.assertEqual(config.idle_loop.fade_frames, 12)
+        self.assertEqual(
+            config.idle_loop.cache_dir,
+            Path("/tmp/mirror-soul-ditto-idle-cache"),
+        )
 
     def test_can_turn_everything_off(self) -> None:
         env = dict(

@@ -48,6 +48,8 @@ DITTO_CALL_REPLY_FADE_OUT_FRAMES=8
 DITTO_CALL_IDLE_LOOP_ENABLED=true
 DITTO_CALL_IDLE_LOOP_SECONDS=6
 DITTO_CALL_IDLE_LOOP_FADE_FRAMES=12
+DITTO_CALL_IDLE_CACHE_DIR=/tmp/mirror-soul-ditto-idle-cache
+DITTO_CALL_IDLE_CACHE_VERSION=v1
 REALTIME_VIDEO_WIDTH=540
 REALTIME_VIDEO_HEIGHT=960
 REALTIME_VIDEO_FPS=25
@@ -91,6 +93,12 @@ between them without the face jumping; a short crossfade
 (`REALTIME_VIDEO_TRANSITION_FRAMES`) covers the remaining difference when a
 reply starts in the middle of the idle loop.
 
+The encoded idle clip is also kept in a private, bounded disk cache so a call
+server restart does not force the first caller to wait on another idle render.
+The default `/tmp` cache uses directory mode `0700`, file mode `0600`, and at
+most eight clips. Set `DITTO_CALL_IDLE_CACHE_DIR=` to disable persistence or
+bump `DITTO_CALL_IDLE_CACHE_VERSION` after changing the idle model/settings.
+
 The current implementation is turn-based: it waits for the complete TTS audio
 and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the
 first video-call integration but does not yet provide frame-by-frame streaming
@@ -111,6 +119,7 @@ Required environment variables:
 ```env
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
+ELEVENLABS_TTS_MODEL_ID=eleven_multilingual_v2
 BACKEND_API_BASE_URL=https://api.mirrorsoul64.com
 AI_INTERNAL_API_KEY=<shared-secret>
 BACKEND_CALL_CONTEXT_TIMEOUT_SECONDS=5
@@ -119,6 +128,11 @@ BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS=0.2
 CALL_CONTEXT_CACHE_TTL_SECONDS=600
 CALL_CONTEXT_CACHE_MAX_ENTRIES=500
 ```
+
+`ELEVENLABS_TTS_MODEL_ID` selects the synthesis model without changing the
+member's cloned `voice_id`. The default preserves the current production
+behavior. Change it only for a measured latency and Korean voice-quality
+comparison, then restart the call service.
 
 On `CALL_INVITE`, the call server sends one authenticated request to
 `GET /internal/ai/calls/{callId}/context`. It validates and caches the returned
