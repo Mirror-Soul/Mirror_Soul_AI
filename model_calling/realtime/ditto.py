@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import struct
 import tempfile
 import time
 import wave
@@ -13,7 +14,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
 PROFILE_MAX_BYTES = 128 * 1024
 PORTRAIT_MAX_BYTES = 10 * 1024 * 1024
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+STREAM_CONTENT_TYPE = "application/vnd.mirrorsoul.ditto-frame-stream"
+STREAM_MAGIC = b"MSDS1\n"
 
 _render_pool: _DittoRenderPool | None = None
 _render_pool_loop: asyncio.AbstractEventLoop | None = None
@@ -88,7 +91,7 @@ class _DittoRenderPool:
             finally:
                 self._admission_lock.release()
             return tuple(acquired)
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             for worker in acquired:
                 self._available.put_nowait(worker)
             raise DittoRealtimeError(
@@ -169,6 +172,12 @@ class DittoCallConfig:
     video_integrity: VideoIntegrityConfig = VideoIntegrityConfig()
     reply_motion: DittoMotionConfig = DittoMotionConfig()
     idle_loop: DittoIdleLoopConfig = DittoIdleLoopConfig()
+    streaming_enabled: bool = False
+    stream_sampling_timesteps: int = 12
+    stream_start_buffer_frames: int = 8
+    stream_start_timeout_seconds: float = 30.0
+    stream_max_frame_bytes: int = 5 * 1024 * 1024
+    stream_fallback_enabled: bool = True
 
     @property
     def worker_urls(self) -> tuple[str, ...]:
@@ -243,6 +252,27 @@ class DittoCallConfig:
                 or "v1"
             ),
         )
+        streaming_enabled = _env_bool("DITTO_CALL_STREAMING_ENABLED", False)
+        stream_sampling_timesteps = _env_int(
+            "DITTO_CALL_STREAM_SAMPLING_TIMESTEPS",
+            12,
+        )
+        stream_start_buffer_frames = _env_int(
+            "DITTO_CALL_STREAM_START_BUFFER_FRAMES",
+            8,
+        )
+        stream_start_timeout_seconds = _env_float(
+            "DITTO_CALL_STREAM_START_TIMEOUT_SECONDS",
+            30.0,
+        )
+        stream_max_frame_bytes = _env_int(
+            "DITTO_CALL_STREAM_MAX_FRAME_BYTES",
+            5 * 1024 * 1024,
+        )
+        stream_fallback_enabled = _env_bool(
+            "DITTO_CALL_STREAM_FALLBACK_ENABLED",
+            True,
+        )
         if (
             not 0 <= reply_motion.fade_in_frames <= 50
             or not 0 <= reply_motion.fade_out_frames <= 50
@@ -253,6 +283,15 @@ class DittoCallConfig:
             raise DittoRealtimeError(
                 "Ditto fade or idle loop settings are invalid."
             )
+        if (
+            stream_sampling_timesteps <= 0
+            or stream_sampling_timesteps > 50
+            or stream_start_buffer_frames <= 0
+            or stream_start_buffer_frames > 50
+            or stream_start_timeout_seconds <= 0
+            or stream_max_frame_bytes <= 0
+        ):
+            raise DittoRealtimeError("Ditto streaming settings are invalid.")
         return cls(
             service_url=service_urls[0],
             api_key=api_key,
@@ -266,6 +305,12 @@ class DittoCallConfig:
             video_integrity=VideoIntegrityConfig.from_env(),
             reply_motion=reply_motion,
             idle_loop=idle_loop,
+            streaming_enabled=streaming_enabled,
+            stream_sampling_timesteps=stream_sampling_timesteps,
+            stream_start_buffer_frames=stream_start_buffer_frames,
+            stream_start_timeout_seconds=stream_start_timeout_seconds,
+            stream_max_frame_bytes=stream_max_frame_bytes,
+            stream_fallback_enabled=stream_fallback_enabled,
         )
 
 
@@ -275,6 +320,46 @@ class FaceRenderProfile:
     portrait_filename: str
     portrait_content_type: str
     profile_bytes: bytes | None = None
+
+
+class _FrameStreamParser:
+    def __init__(self, *, max_frame_bytes: int) -> None:
+        self.max_frame_bytes = max_frame_bytes
+        self.buffer = bytearray()
+        self.magic_read = False
+        self.completed = False
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        if self.completed and chunk:
+            raise DittoRealtimeError("Ditto stream has data after its terminator.")
+        self.buffer.extend(chunk)
+        frames: list[bytes] = []
+        if not self.magic_read:
+            if len(self.buffer) < len(STREAM_MAGIC):
+                return frames
+            if bytes(self.buffer[: len(STREAM_MAGIC)]) != STREAM_MAGIC:
+                raise DittoRealtimeError("Ditto stream header is invalid.")
+            del self.buffer[: len(STREAM_MAGIC)]
+            self.magic_read = True
+        while len(self.buffer) >= 4 and not self.completed:
+            size = struct.unpack(">I", self.buffer[:4])[0]
+            if size == 0:
+                del self.buffer[:4]
+                self.completed = True
+                break
+            if size > self.max_frame_bytes:
+                raise DittoRealtimeError(
+                    f"Ditto stream frame exceeds {self.max_frame_bytes} bytes."
+                )
+            if len(self.buffer) < 4 + size:
+                break
+            frames.append(bytes(self.buffer[4 : 4 + size]))
+            del self.buffer[: 4 + size]
+        return frames
+
+    def finish(self) -> None:
+        if not self.magic_read or not self.completed or self.buffer:
+            raise DittoRealtimeError("Ditto frame stream ended unexpectedly.")
 
 
 class DittoRenderClient:
@@ -476,6 +561,91 @@ class DittoRenderClient:
             data=form_data or None,
         )
 
+    async def stream_frames(
+        self,
+        profile: FaceRenderProfile,
+        audio_bytes: bytes,
+        *,
+        on_frame: Callable[[bytes], Awaitable[bool]],
+        call_id: int | None = None,
+        turn_id: int | None = None,
+    ) -> int:
+        if not audio_bytes:
+            raise DittoRealtimeError("Ditto reply audio must not be empty.")
+        files = {
+            "portrait": (
+                profile.portrait_filename,
+                profile.portrait_bytes,
+                profile.portrait_content_type,
+            ),
+            "audio": ("reply.mp3", audio_bytes, "audio/mpeg"),
+        }
+        if profile.profile_bytes is not None:
+            files["profile"] = (
+                "face-profile.json",
+                profile.profile_bytes,
+                "application/json",
+            )
+        form_data = {
+            "sampling_timesteps": str(self.config.stream_sampling_timesteps)
+        }
+        pool = _get_render_pool(self.config.worker_urls)
+        workers = await pool.acquire(self.config.queue_timeout_seconds)
+        worker_index, service_url = workers[0]
+        client = self._http_client or httpx.AsyncClient(
+            timeout=self.config.timeout_seconds
+        )
+        owns_client = self._http_client is None
+        count = 0
+        started = time.monotonic()
+        try:
+            async with client.stream(
+                "POST",
+                f"{service_url}/api/v1/render/stream",
+                headers={"X-Ditto-Api-Key": self.config.api_key},
+                files=files,
+                data=form_data,
+            ) as response:
+                if response.status_code != 200:
+                    detail = (await response.aread()).decode(
+                        "utf-8", errors="replace"
+                    )[:500]
+                    raise DittoRealtimeError(
+                        "Ditto stream request failed: "
+                        f"status={response.status_code} detail={detail}"
+                    )
+                content_type = response.headers.get("content-type", "")
+                if not content_type.lower().startswith(STREAM_CONTENT_TYPE):
+                    raise DittoRealtimeError(
+                        "Ditto response is not a frame stream: "
+                        f"content_type={content_type or 'missing'}"
+                    )
+                parser = _FrameStreamParser(
+                    max_frame_bytes=self.config.stream_max_frame_bytes
+                )
+                async for chunk in response.aiter_bytes():
+                    for frame in parser.feed(chunk):
+                        if not await on_frame(frame):
+                            raise DittoRealtimeError(
+                                "Ditto frame stream was superseded."
+                            )
+                        count += 1
+                parser.finish()
+        finally:
+            pool.release(workers)
+            if owns_client:
+                await client.aclose()
+        if count <= 0:
+            raise DittoRealtimeError("Ditto frame stream contained no frames.")
+        print(
+            "[DITTO_CALL] frame stream completed: "
+            f"{trace_fields(call_id, turn_id)} "
+            f"worker={worker_index + 1}/{pool.worker_count} frames={count} "
+            f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            flush=True,
+        )
+        return count
+
 
 class FaceProfileLoader:
     def __init__(self, *, s3_client: Any | None = None) -> None:
@@ -637,6 +807,7 @@ class DittoVideoSession:
         self.call_id = call_id
         self._profile: FaceRenderProfile | None = None
         self._profile_lock = asyncio.Lock()
+        self._stream_tasks: set[asyncio.Task] = set()
 
     async def prepare(self) -> None:
         if self._profile is not None:
@@ -752,6 +923,26 @@ class DittoVideoSession:
     ) -> None:
         await self.prepare()
         assert self._profile is not None
+        client_config = getattr(self.client, "config", None)
+        if client_config is not None and client_config.streaming_enabled:
+            try:
+                await self._enqueue_streaming_reply(
+                    audio_bytes,
+                    turn_id=turn_id,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    "[DITTO_CALL] frame stream failed: "
+                    f"{trace_fields(self.call_id, turn_id)} "
+                    f"fallback={self.client.config.stream_fallback_enabled} "
+                    f"error={exc!r}",
+                    flush=True,
+                )
+                if not self.client.config.stream_fallback_enabled:
+                    raise
         video_bytes = await self.client.render(
             self._profile,
             audio_bytes,
@@ -759,6 +950,93 @@ class DittoVideoSession:
             turn_id=turn_id,
         )
         self.track.enqueue_encoded_video(video_bytes)
+
+    async def _enqueue_streaming_reply(
+        self,
+        audio_bytes: bytes,
+        *,
+        turn_id: int | None,
+    ) -> None:
+        begin = getattr(self.track, "begin_frame_stream", None)
+        enqueue = getattr(self.track, "enqueue_stream_frame", None)
+        wait_ready = getattr(self.track, "wait_for_stream_buffer", None)
+        activate = getattr(self.track, "activate_frame_stream", None)
+        finish = getattr(self.track, "finish_frame_stream", None)
+        fail = getattr(self.track, "fail_frame_stream", None)
+        if not all((begin, enqueue, wait_ready, activate, finish, fail)):
+            raise DittoRealtimeError("Video track does not support frame streaming.")
+
+        stream_id = begin()
+
+        async def produce() -> int:
+            try:
+                count = await self.client.stream_frames(
+                    self._profile,
+                    audio_bytes,
+                    on_frame=lambda frame: enqueue(stream_id, frame),
+                    call_id=self.call_id,
+                    turn_id=turn_id,
+                )
+            except BaseException:
+                fail(stream_id)
+                raise
+            finish(stream_id)
+            return count
+
+        task = asyncio.create_task(produce())
+        self._stream_tasks.add(task)
+        try:
+            buffered = await wait_ready(
+                stream_id,
+                self.client.config.stream_start_buffer_frames,
+                self.client.config.stream_start_timeout_seconds,
+            )
+            if buffered <= 0:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise DittoRealtimeError(
+                    "Ditto frame stream did not produce an initial buffer."
+                )
+            activate(stream_id)
+            print(
+                "[DITTO_CALL] frame stream ready for playback: "
+                f"{trace_fields(self.call_id, turn_id)} "
+                f"stream_id={stream_id} buffered_frames={buffered} "
+                f"sampling_timesteps={self.client.config.stream_sampling_timesteps}",
+                flush=True,
+            )
+        except BaseException:
+            fail(stream_id)
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            if task.done():
+                self._stream_tasks.discard(task)
+            else:
+                task.add_done_callback(self._stream_task_done)
+
+    def _stream_task_done(self, task: asyncio.Task) -> None:
+        self._stream_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            print(
+                "[DITTO_CALL] active frame stream ended with an error: "
+                f"{trace_fields(self.call_id)} error={error!r}",
+                flush=True,
+            )
+
+    async def close(self) -> None:
+        tasks = tuple(self._stream_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._stream_tasks.clear()
 
 
 def create_ditto_video_session(

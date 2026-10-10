@@ -18,12 +18,15 @@ class DittoServiceConfig:
     )
     data_root: Path | None = None
     model_config_path: Path | None = None
+    online_model_config_path: Path | None = None
     tensorrt_python_path: Path | None = None
     ffmpeg_dir: Path = Path("/opt/conda/bin")
     host: str = "127.0.0.1"
     port: int = 8080
     max_portrait_bytes: int = 10 * 1024 * 1024
     max_audio_bytes: int = 25 * 1024 * 1024
+    streaming_enabled: bool = False
+    stream_jpeg_quality: int = 85
     require_cuda: bool = True
     ssl_certfile: Path | None = None
     ssl_keyfile: Path | None = None
@@ -47,6 +50,9 @@ class DittoServiceConfig:
             ),
             data_root=_env_path("DITTO_SERVICE_DATA_ROOT"),
             model_config_path=_env_path("DITTO_SERVICE_CONFIG_PATH"),
+            online_model_config_path=_env_path(
+                "DITTO_SERVICE_ONLINE_CONFIG_PATH"
+            ),
             tensorrt_python_path=_env_path(
                 "DITTO_SERVICE_TENSORRT_PYTHON_PATH"
             ),
@@ -62,6 +68,14 @@ class DittoServiceConfig:
             max_audio_bytes=_env_int(
                 "DITTO_SERVICE_MAX_AUDIO_BYTES",
                 25 * 1024 * 1024,
+            ),
+            streaming_enabled=_env_bool(
+                "DITTO_SERVICE_STREAMING_ENABLED",
+                False,
+            ),
+            stream_jpeg_quality=_env_int(
+                "DITTO_SERVICE_STREAM_JPEG_QUALITY",
+                85,
             ),
             require_cuda=_env_bool("DITTO_SERVICE_REQUIRE_CUDA", True),
             ssl_certfile=_env_path("DITTO_SERVICE_SSL_CERTFILE"),
@@ -89,6 +103,17 @@ class DittoServiceConfig:
             self.model_config_path,
             (
                 "checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
+                if self.normalized_backend == "tensorrt"
+                else "checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
+            ),
+        )
+
+    @property
+    def resolved_online_model_config_path(self) -> Path:
+        return self._resolve_from_repository(
+            self.online_model_config_path,
+            (
+                "checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
                 if self.normalized_backend == "tensorrt"
                 else "checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
             ),
@@ -134,6 +159,10 @@ class DittoServiceConfig:
         if not self.resolved_model_config_path.is_file():
             raise DittoServiceConfigError(
                 f"Ditto config not found: {self.resolved_model_config_path}"
+            )
+        if self.stream_jpeg_quality < 50 or self.stream_jpeg_quality > 100:
+            raise DittoServiceConfigError(
+                "DITTO_SERVICE_STREAM_JPEG_QUALITY must be between 50 and 100."
             )
         if (
             self.normalized_backend == "tensorrt"

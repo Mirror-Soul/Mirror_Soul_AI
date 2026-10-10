@@ -2,10 +2,8 @@
 
 Ditto 모델을 GPU 메모리에 한 번 로드한 뒤 얼굴 이미지와 음성 요청을 순차 처리하는
 내부 렌더링 서비스다. 회원가입 자동화가 생성한 `face-profile.json`의 설정을 받아
-MP4를 반환한다.
-
-현재 API는 통화 서버 연결 전 검증용 MP4 렌더 단계다. 프레임 스트리밍과 WebRTC
-비디오 트랙 연결은 다음 단계다.
+MP4를 반환한다. 선택적으로 온라인 파이프라인을 함께 로드해 생성되는 프레임을 통화
+서버에 즉시 전송할 수 있다.
 
 ## 설치
 
@@ -26,6 +24,7 @@ export DITTO_SERVICE_API_KEY='<secret>'
 export DITTO_SERVICE_BACKEND=pytorch
 export DITTO_SERVICE_HOST=127.0.0.1
 export DITTO_SERVICE_PORT=8080
+export DITTO_SERVICE_STREAMING_ENABLED=false
 
 /shareHost/C084003-ditto/conda-env/bin/python -m ditto_server.main
 ```
@@ -56,6 +55,27 @@ PyTorch 또는 TensorRT 기본 경로를 자동으로 선택한다. 특정 모�
 2026-10-10 RTX 4090 격리 시험에서 TensorRT 온라인 경로는 약 47 fps(25 fps 실시간의
 1.88배)를 기록했고, 현재 서비스와 같은 오프라인 렌더 경로도 MP4 생성에 성공했다.
 실제 회원 얼굴과 긴 답변 품질은 운영 전 별도 확인한다.
+
+## 온라인 프레임 스트리밍
+
+운영 검증 전에는 꺼져 있다. GPU 서비스와 통화 서버 코드를 모두 배포한 뒤 다음 값을
+설정하고 GPU 워커를 재시작한다.
+
+```env
+DITTO_SERVICE_STREAMING_ENABLED=true
+DITTO_SERVICE_ONLINE_CONFIG_PATH=
+DITTO_SERVICE_STREAM_JPEG_QUALITY=85
+```
+
+TensorRT에서는 온라인 전용 `v0.4_hubert_cfg_trt_online.pkl`을 자동 선택한다. `/ready`의
+`engine.streamingAvailable=true`를 확인한 뒤 통화 서버의
+`DITTO_CALL_STREAMING_ENABLED=true`를 적용한다. 스트리밍 API는
+`POST /api/v1/render/stream`이며 외부 공개 API가 아니라 기존 SSH 터널 내부에서만
+사용한다. 응답은 `MSDS1` 헤더와 길이 구분 JPEG 프레임으로 구성된다.
+
+통화 서버는 기본 8프레임을 모은 뒤 음성과 영상을 시작하며, 스트림 초기화나 전송에
+실패하면 기존 `/api/v1/render` MP4 경로로 한 번 복구한다. 즉시 롤백하려면 양쪽의
+스트리밍 플래그를 `false`로 바꾸고 서비스를 재시작한다.
 
 ## 렌더 요청
 

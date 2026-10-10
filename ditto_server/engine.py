@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import sys
 import threading
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
+
+import numpy as np
 
 from ditto_server.config import DittoServiceConfig
 from model_training.face_training.ditto_runner import (
@@ -31,6 +34,8 @@ class DittoRuntime:
     seed_everything: Callable[[int], None]
     cuda_available: Callable[[], bool]
     gpu_name: Callable[[], str]
+    online_sdk_factory: Callable[[str, str], Any] | None = None
+    load_audio: Callable[[str], np.ndarray] | None = None
 
 
 FADE_TYPES = frozenset({"s", "d0"})
@@ -109,6 +114,29 @@ class DittoRenderMetrics:
     output_size_bytes: int
 
 
+@dataclass(frozen=True)
+class DittoStreamMetrics:
+    duration_seconds: float
+    frame_count: int
+
+
+class _FrameCallbackWriter:
+    def __init__(
+        self,
+        writer: Any,
+        callback: Callable[[np.ndarray], None],
+    ) -> None:
+        self._writer = writer
+        self._callback = callback
+
+    def __call__(self, frame: np.ndarray, *args: Any, **kwargs: Any) -> Any:
+        self._callback(frame)
+        return self._writer(frame, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+
 class DittoEngine:
     def __init__(
         self,
@@ -120,6 +148,7 @@ class DittoEngine:
         self._runtime_loader = runtime_loader or _load_runtime
         self._runtime: DittoRuntime | None = None
         self._sdk: Any = None
+        self._online_sdk: Any = None
         self._render_slot = threading.Lock()
         self._state_lock = threading.Lock()
         self._loaded = False
@@ -147,6 +176,18 @@ class DittoEngine:
                 str(self.config.resolved_model_config_path),
                 str(self.config.resolved_data_root),
             )
+            online_sdk = None
+            online_config_path = self.config.resolved_online_model_config_path
+            if (
+                self.config.streaming_enabled
+                and runtime.online_sdk_factory is not None
+                and runtime.load_audio is not None
+                and online_config_path.is_file()
+            ):
+                online_sdk = runtime.online_sdk_factory(
+                    str(online_config_path),
+                    str(self.config.resolved_data_root),
+                )
             gpu_name = runtime.gpu_name() if runtime.cuda_available() else "none"
         except Exception as exc:
             with self._state_lock:
@@ -158,6 +199,7 @@ class DittoEngine:
         with self._state_lock:
             self._runtime = runtime
             self._sdk = sdk
+            self._online_sdk = online_sdk
             self._gpu_name = gpu_name
             self._load_seconds = monotonic() - started
             self._loaded = True
@@ -236,6 +278,109 @@ class DittoEngine:
                 self._busy = False
             self._render_slot.release()
 
+    def stream_frames(
+        self,
+        source_path: Path,
+        audio_path: Path,
+        output_path: Path,
+        *,
+        settings: DittoRenderSettings,
+        on_frame: Callable[[np.ndarray], None],
+        seed: int = 1024,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> DittoStreamMetrics:
+        """Run Ditto online mode and publish frames as soon as they exist."""
+        validate_ditto_render_settings(settings)
+        source_path = source_path.resolve()
+        audio_path = audio_path.resolve()
+        output_path = output_path.resolve()
+        if not source_path.is_file():
+            raise DittoEngineError(f"Source image not found: {source_path}")
+        if not audio_path.is_file():
+            raise DittoEngineError(f"Audio file not found: {audio_path}")
+
+        with self._state_lock:
+            runtime = self._runtime
+            sdk = self._online_sdk
+            if not self._loaded or runtime is None:
+                raise DittoEngineError("Ditto model is not loaded.")
+            if sdk is None or runtime.load_audio is None:
+                raise DittoEngineError("Ditto online runtime is unavailable.")
+        if not self._render_slot.acquire(blocking=False):
+            raise DittoEngineBusyError("Ditto GPU is already rendering.")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.unlink(missing_ok=True)
+        with self._state_lock:
+            self._busy = True
+            self._last_error = None
+
+        started = monotonic()
+        frame_count = 0
+        stream_started = False
+        stream_closed = False
+
+        def publish(frame: np.ndarray) -> None:
+            nonlocal frame_count
+            if should_cancel is not None and should_cancel():
+                raise DittoEngineError("Ditto online stream was cancelled.")
+            on_frame(frame)
+            frame_count += 1
+
+        try:
+            runtime.seed_everything(seed)
+            audio = runtime.load_audio(str(audio_path)).astype(np.float32)
+            samples_per_frame = 16_000 // 25
+            total_frames = max(1, math.ceil(len(audio) / samples_per_frame))
+            sdk.setup(
+                str(source_path),
+                str(output_path),
+                crop_scale=settings.crop_scale,
+                smo_k_d=settings.smoothing_kernel,
+                sampling_timesteps=settings.sampling_timesteps,
+            )
+            stream_started = True
+            sdk.setup_Nd(N_d=total_frames)
+            sdk.writer = _FrameCallbackWriter(sdk.writer, publish)
+
+            chunksize = (3, 5, 2)
+            padded = np.concatenate(
+                [np.zeros(chunksize[0] * samples_per_frame, dtype=np.float32), audio]
+            )
+            split_len = int(sum(chunksize) * 0.04 * 16_000) + 80
+            for index in range(0, len(padded), chunksize[1] * samples_per_frame):
+                if should_cancel is not None and should_cancel():
+                    raise DittoEngineError("Ditto online stream was cancelled.")
+                chunk = padded[index : index + split_len]
+                if len(chunk) < split_len:
+                    chunk = np.pad(chunk, (0, split_len - len(chunk)))
+                sdk.run_chunk(chunk, chunksize)
+            sdk.close()
+            stream_closed = True
+            if frame_count <= 0:
+                raise DittoEngineError("Ditto online mode produced no frames.")
+            duration_seconds = monotonic() - started
+            with self._state_lock:
+                self._render_count += 1
+                self._last_render_seconds = duration_seconds
+                self._last_error = None
+            return DittoStreamMetrics(duration_seconds, frame_count)
+        except Exception as exc:
+            with self._state_lock:
+                self._last_error = str(exc)
+            if isinstance(exc, DittoEngineError):
+                raise
+            raise DittoEngineError(f"Ditto online stream failed: {exc}") from exc
+        finally:
+            if stream_started and not stream_closed:
+                try:
+                    sdk.close()
+                except Exception:
+                    pass
+            with self._state_lock:
+                self._busy = False
+            self._render_slot.release()
+
     def status(self) -> dict[str, object]:
         with self._state_lock:
             return {
@@ -245,6 +390,7 @@ class DittoEngine:
                 "gpu": self._gpu_name,
                 "modelLoadSeconds": self._load_seconds,
                 "renderCount": self._render_count,
+                "streamingAvailable": self._online_sdk is not None,
                 "lastRenderSeconds": self._last_render_seconds,
                 "lastError": self._last_error,
             }
@@ -258,13 +404,32 @@ def _load_runtime(repository_dir: Path) -> DittoRuntime:
     os.chdir(repository_dir)
     inference = importlib.import_module("inference")
     pipeline = importlib.import_module("stream_pipeline_offline")
+    try:
+        online_pipeline = importlib.import_module("stream_pipeline_online")
+    except ModuleNotFoundError:
+        online_pipeline = None
     torch = importlib.import_module("torch")
+    load_audio = None
+    if online_pipeline is not None:
+        try:
+            librosa = importlib.import_module("librosa")
+        except ModuleNotFoundError:
+            online_pipeline = None
+        else:
+            def load_audio(path: str) -> np.ndarray:
+                audio, _ = librosa.core.load(path, sr=16_000)
+                return audio.astype(np.float32)
+
     return DittoRuntime(
         sdk_factory=pipeline.StreamSDK,
         run=inference.run,
         seed_everything=inference.seed_everything,
         cuda_available=torch.cuda.is_available,
         gpu_name=lambda: torch.cuda.get_device_name(0),
+        online_sdk_factory=(
+            online_pipeline.StreamSDK if online_pipeline is not None else None
+        ),
+        load_audio=load_audio,
     )
 
 

@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import struct
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from model_calling.realtime.ditto import (
     DittoVideoSession,
     FaceProfileLoader,
     FaceRenderProfile,
+    _FrameStreamParser,
     _get_render_pool,
 )
 from model_calling.realtime.video_integrity import (
@@ -121,7 +123,70 @@ class _RenderClient:
         return b"mp4"
 
 
+class _StreamingTrack(_Track):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames = []
+        self.active = []
+        self.finished = False
+
+    def begin_frame_stream(self):
+        return 1
+
+    async def enqueue_stream_frame(self, stream_id, content):
+        self.frames.append(content)
+        return True
+
+    async def wait_for_stream_buffer(self, stream_id, min_frames, timeout):
+        deadline = asyncio.get_running_loop().time() + timeout
+        while len(self.frames) < min_frames and not self.finished:
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0)
+        return len(self.frames)
+
+    def activate_frame_stream(self, stream_id):
+        self.active.append(stream_id)
+
+    def finish_frame_stream(self, stream_id):
+        self.finished = True
+
+    def fail_frame_stream(self, stream_id):
+        pass
+
+
+class _StreamingClient(_RenderClient):
+    def __init__(self, *, fail=False):
+        super().__init__()
+        self.fail = fail
+        self.config = DittoCallConfig(
+            service_url="http://127.0.0.1:8080",
+            api_key="secret",
+            streaming_enabled=True,
+            stream_start_buffer_frames=2,
+            stream_fallback_enabled=True,
+            video_integrity=VideoIntegrityConfig(enabled=False),
+        )
+
+    async def stream_frames(self, profile, audio_bytes, *, on_frame, **kwargs):
+        if self.fail:
+            raise DittoRealtimeError("stream failed")
+        await on_frame(b"jpeg-1")
+        await on_frame(b"jpeg-2")
+        return 2
+
+
 class DittoRealtimeTests(unittest.TestCase):
+    def test_frame_stream_parser_handles_split_packets(self) -> None:
+        frame = b"jpeg-frame"
+        payload = b"MSDS1\n" + struct.pack(">I", len(frame)) + frame + struct.pack(">I", 0)
+        parser = _FrameStreamParser(max_frame_bytes=1024)
+        frames = []
+        for chunk in (payload[:2], payload[2:9], payload[9:13], payload[13:]):
+            frames.extend(parser.feed(chunk))
+        parser.finish()
+        self.assertEqual(frames, [frame])
+
     def test_render_queue_timeout_has_stable_error_code(self) -> None:
         async def run() -> None:
             worker_urls = ("http://127.0.0.1:8080",)
@@ -234,6 +299,60 @@ class DittoRealtimeTests(unittest.TestCase):
                 )
 
         self.assertEqual(asyncio.run(run()), b"rendered-mp4")
+
+    def test_stream_client_delivers_frames_incrementally(self) -> None:
+        first = b"jpeg-1"
+        second = b"jpeg-2"
+        payload = (
+            b"MSDS1\n"
+            + struct.pack(">I", len(first))
+            + first
+            + struct.pack(">I", len(second))
+            + second
+            + struct.pack(">I", 0)
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/api/v1/render/stream")
+            return httpx.Response(
+                200,
+                content=payload,
+                headers={
+                    "Content-Type": (
+                        "application/vnd.mirrorsoul.ditto-frame-stream"
+                    )
+                },
+            )
+
+        async def run():
+            received = []
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http_client:
+                client = DittoRenderClient(
+                    DittoCallConfig(
+                        service_url="http://127.0.0.1:8080",
+                        api_key="secret",
+                    ),
+                    http_client=http_client,
+                )
+
+                async def receive(frame):
+                    received.append(frame)
+                    return True
+
+                count = await client.stream_frames(
+                    FaceRenderProfile(
+                        portrait_bytes=b"portrait",
+                        portrait_filename="portrait.jpg",
+                        portrait_content_type="image/jpeg",
+                    ),
+                    b"audio",
+                    on_frame=receive,
+                )
+            return count, received
+
+        self.assertEqual(asyncio.run(run()), (2, [first, second]))
 
     def test_render_client_retries_busy_gpu(self) -> None:
         attempts = 0
@@ -557,6 +676,50 @@ class DittoRealtimeTests(unittest.TestCase):
         self.assertEqual(track.idle_images, [b"portrait"])
         self.assertEqual(track.videos, [b"mp4", b"mp4"])
         self.assertEqual(client.calls[0][2]["call_id"], 77)
+
+    def test_video_session_activates_stream_after_initial_buffer(self) -> None:
+        profile = FaceRenderProfile(
+            portrait_bytes=b"portrait",
+            portrait_filename="portrait.jpg",
+            portrait_content_type="image/jpeg",
+        )
+        track = _StreamingTrack()
+        session = DittoVideoSession(
+            user_id="member-uuid",
+            clone_id=6,
+            track=track,
+            client=_StreamingClient(),
+            profile_loader=_ProfileLoader(profile),
+            call_id=78,
+        )
+
+        asyncio.run(session.enqueue_reply(b"audio", turn_id=1))
+
+        self.assertEqual(track.frames, [b"jpeg-1", b"jpeg-2"])
+        self.assertEqual(track.active, [1])
+        self.assertTrue(track.finished)
+        self.assertEqual(track.videos, [])
+
+    def test_video_session_falls_back_to_mp4_when_stream_fails(self) -> None:
+        profile = FaceRenderProfile(
+            portrait_bytes=b"portrait",
+            portrait_filename="portrait.jpg",
+            portrait_content_type="image/jpeg",
+        )
+        track = _StreamingTrack()
+        client = _StreamingClient(fail=True)
+        session = DittoVideoSession(
+            user_id="member-uuid",
+            clone_id=6,
+            track=track,
+            client=client,
+            profile_loader=_ProfileLoader(profile),
+            call_id=79,
+        )
+
+        asyncio.run(session.enqueue_reply(b"audio", turn_id=1))
+
+        self.assertEqual(track.videos, [b"mp4"])
 
 
 if __name__ == "__main__":

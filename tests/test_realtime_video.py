@@ -30,6 +30,55 @@ def _encoded_video() -> bytes:
 
 
 class QueuedVideoTrackTests(unittest.TestCase):
+    def test_stream_frames_wait_for_activation_and_return_to_idle(self) -> None:
+        async def run():
+            track = QueuedVideoTrack(
+                width=32,
+                height=32,
+                fps=1000,
+                stream_buffer_max_frames=4,
+            )
+            frame = _encoded_video()
+            track.set_idle_image(frame)
+            stream_id = track.begin_frame_stream()
+            await track.enqueue_stream_frame(stream_id, frame)
+            await track.enqueue_stream_frame(stream_id, frame)
+            buffered = await track.wait_for_stream_buffer(stream_id, 2, 1.0)
+            track.activate_frame_stream(stream_id)
+            track.finish_frame_stream(stream_id)
+            first = await track.recv()
+            second = await track.recv()
+            third = await track.recv()
+            playing = track.is_playing
+            track.stop()
+            return buffered, first, second, third, playing
+
+        buffered, first, second, third, playing = asyncio.run(run())
+
+        self.assertEqual(buffered, 2)
+        self.assertEqual((first.width, first.height), (32, 32))
+        self.assertEqual((second.width, second.height), (32, 32))
+        self.assertEqual((third.width, third.height), (32, 32))
+        self.assertFalse(playing)
+
+    def test_corrupt_stream_frame_falls_back_without_stopping_video(self) -> None:
+        async def run():
+            track = QueuedVideoTrack(width=32, height=32, fps=1000)
+            track.set_idle_image(_encoded_video())
+            stream_id = track.begin_frame_stream()
+            await track.enqueue_stream_frame(stream_id, b"not-an-image")
+            track.activate_frame_stream(stream_id)
+            track.finish_frame_stream(stream_id)
+            first = await track.recv()
+            second = await track.recv()
+            track.stop()
+            return first, second
+
+        first, second = asyncio.run(run())
+
+        self.assertEqual((first.width, first.height), (32, 32))
+        self.assertEqual((second.width, second.height), (32, 32))
+
     def test_rejects_encoded_segment_without_decodable_frame(self) -> None:
         track = QueuedVideoTrack(width=32, height=32, fps=25)
 
