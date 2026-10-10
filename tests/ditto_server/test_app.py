@@ -1,8 +1,12 @@
 import json
+import struct
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 
 from fastapi.testclient import TestClient
 
@@ -31,6 +35,7 @@ class FakeEngine:
             "renderCount": len(self.render_calls),
             "lastRenderSeconds": None,
             "lastError": None,
+            "streamingAvailable": True,
         }
 
     def render(
@@ -58,6 +63,20 @@ class FakeEngine:
             duration_seconds=2.5,
             output_size_bytes=14,
         )
+
+    def stream_frames(
+        self,
+        source_path,
+        audio_path,
+        output_path,
+        *,
+        settings,
+        on_frame,
+        seed,
+        should_cancel,
+    ):
+        for value in (10, 20):
+            on_frame(np.full((8, 8, 3), value, dtype=np.uint8))
 
 
 class DittoServiceAppTests(unittest.TestCase):
@@ -166,6 +185,57 @@ class DittoServiceAppTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 429)
+
+    def test_stream_returns_length_prefixed_jpeg_frames(self) -> None:
+        engine = FakeEngine()
+        config = self._config(streaming_enabled=True)
+        with patch(
+            "ditto_server.app._encode_stream_frame",
+            side_effect=[b"\xff\xd8frame-1", b"\xff\xd8frame-2"],
+        ):
+            with TestClient(create_app(config, engine=engine)) as client:
+                response = client.post(
+                    "/api/v1/render/stream",
+                    headers={"X-Ditto-Api-Key": "secret-key"},
+                    files={
+                        "portrait": ("portrait.jpg", b"image", "image/jpeg"),
+                        "audio": ("speech.wav", b"audio", "audio/wav"),
+                    },
+                    data={"sampling_timesteps": "12"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response.headers["content-type"].startswith(
+                "application/vnd.mirrorsoul.ditto-frame-stream"
+            )
+        )
+        payload = response.content
+        self.assertTrue(payload.startswith(b"MSDS1\n"))
+        cursor = len(b"MSDS1\n")
+        sizes = []
+        while True:
+            size = struct.unpack(">I", payload[cursor : cursor + 4])[0]
+            cursor += 4
+            if size == 0:
+                break
+            sizes.append(size)
+            self.assertTrue(payload[cursor : cursor + size].startswith(b"\xff\xd8"))
+            cursor += size
+        self.assertEqual(len(sizes), 2)
+
+    def test_stream_is_disabled_by_default(self) -> None:
+        engine = FakeEngine()
+        with TestClient(create_app(self._config(), engine=engine)) as client:
+            response = client.post(
+                "/api/v1/render/stream",
+                headers={"X-Ditto-Api-Key": "secret-key"},
+                files={
+                    "portrait": ("portrait.jpg", b"image", "image/jpeg"),
+                    "audio": ("speech.wav", b"audio", "audio/wav"),
+                },
+            )
+        self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":

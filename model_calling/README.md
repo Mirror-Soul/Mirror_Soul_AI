@@ -50,6 +50,12 @@ DITTO_CALL_IDLE_LOOP_SECONDS=6
 DITTO_CALL_IDLE_LOOP_FADE_FRAMES=12
 DITTO_CALL_IDLE_CACHE_DIR=/tmp/mirror-soul-ditto-idle-cache
 DITTO_CALL_IDLE_CACHE_VERSION=v1
+DITTO_CALL_STREAMING_ENABLED=false
+DITTO_CALL_STREAM_SAMPLING_TIMESTEPS=12
+DITTO_CALL_STREAM_START_BUFFER_FRAMES=8
+DITTO_CALL_STREAM_BUFFER_MAX_FRAMES=125
+DITTO_CALL_STREAM_START_TIMEOUT_SECONDS=30
+DITTO_CALL_STREAM_FALLBACK_ENABLED=true
 REALTIME_VIDEO_WIDTH=540
 REALTIME_VIDEO_HEIGHT=960
 REALTIME_VIDEO_FPS=25
@@ -99,10 +105,14 @@ The default `/tmp` cache uses directory mode `0700`, file mode `0600`, and at
 most eight clips. Set `DITTO_CALL_IDLE_CACHE_DIR=` to disable persistence or
 bump `DITTO_CALL_IDLE_CACHE_VERSION` after changing the idle model/settings.
 
-The current implementation is turn-based: it waits for the complete TTS audio
-and Ditto MP4, then sends decoded frames over WebRTC. It is suitable for the
-first video-call integration but does not yet provide frame-by-frame streaming
-while the answer is being generated.
+기본값은 기존과 같은 MP4 완성 후 재생 방식이다. GPU와 통화 서버 양쪽에 온라인
+스트리밍을 활성화하면 Ditto가 생성한 JPEG 프레임을 즉시 통화 서버로 보내고, 시작
+버퍼가 준비되는 순간 음성과 함께 재생한다. 스트림 큐는 제한되어 있으며 느린 소비자는
+GPU 생성 단계까지 역압을 전달한다. 초기 스트림이 실패하면 기존 MP4 렌더 방식으로
+자동 복구한다.
+
+현재 단계는 완성된 TTS 음성을 Ditto에 전달하는 영상 프레임 스트리밍이다. GPT와 TTS
+자체의 청크 스트리밍은 별도 단계이므로, 답변 생성·TTS 대기 시간은 아직 남아 있다.
 
 Before a rendered reply is queued, the call service decodes the complete MP4
 and verifies its video stream, frame count, duration, frame rate, dimensions,

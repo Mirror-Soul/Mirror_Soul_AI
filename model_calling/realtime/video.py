@@ -71,6 +71,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         idle_motion_scale: float = 0.012,
         idle_motion_period_seconds: float = 6.0,
         transition_frames: int = 0,
+        stream_buffer_max_frames: int = 125,
     ) -> None:
         super().__init__()
         if width <= 0 or height <= 0 or width % 2 or height % 2:
@@ -83,6 +84,8 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise ValueError("Idle motion period must be positive.")
         if transition_frames < 0 or transition_frames > 50:
             raise ValueError("Transition frames must be between 0 and 50.")
+        if stream_buffer_max_frames <= 0:
+            raise ValueError("Stream frame buffer limit must be positive.")
 
         self.width = width
         self.height = height
@@ -110,10 +113,23 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._blend_from: np.ndarray | None = None
         self._blend_step = 0
         self._transitions = 0
+        self._stream_frames: deque[tuple[int, bytes]] = deque()
+        self._stream_buffer_max_frames = stream_buffer_max_frames
+        self._stream_next_id = 1
+        self._stream_pending_id: int | None = None
+        self._stream_active_id: int | None = None
+        self._stream_finished = False
+        self._stream_ready = asyncio.Event()
+        self._stream_space = asyncio.Event()
+        self._stream_space.set()
 
     @property
     def is_playing(self) -> bool:
-        return self._active_segment is not None or bool(self._segments)
+        return (
+            self._stream_active_id is not None
+            or self._active_segment is not None
+            or bool(self._segments)
+        )
 
     @property
     def has_idle_video(self) -> bool:
@@ -171,6 +187,89 @@ class QueuedVideoTrack(MediaStreamTrack):
             flush=True,
         )
 
+    def begin_frame_stream(self) -> int:
+        if self._stream_active_id is not None:
+            raise QueuedVideoTrackError("A Ditto frame stream is already active.")
+        self._stream_frames.clear()
+        stream_id = self._stream_next_id
+        self._stream_next_id += 1
+        self._stream_pending_id = stream_id
+        self._stream_finished = False
+        self._stream_ready.clear()
+        self._stream_space.set()
+        return stream_id
+
+    async def enqueue_stream_frame(self, stream_id: int, frame_bytes: bytes) -> bool:
+        if not frame_bytes:
+            raise QueuedVideoTrackError("Stream frame must not be empty.")
+        while len(self._stream_frames) >= self._stream_buffer_max_frames:
+            if stream_id not in {self._stream_pending_id, self._stream_active_id}:
+                return False
+            self._stream_space.clear()
+            if len(self._stream_frames) < self._stream_buffer_max_frames:
+                self._stream_space.set()
+                break
+            await self._stream_space.wait()
+        if stream_id not in {self._stream_pending_id, self._stream_active_id}:
+            return False
+        self._stream_frames.append((stream_id, frame_bytes))
+        self._stream_ready.set()
+        return True
+
+    async def wait_for_stream_buffer(
+        self,
+        stream_id: int,
+        min_frames: int,
+        timeout_seconds: float,
+    ) -> int:
+        async def wait() -> int:
+            while True:
+                count = sum(1 for item_id, _ in self._stream_frames if item_id == stream_id)
+                if count >= min_frames or self._stream_finished:
+                    return count
+                if stream_id != self._stream_pending_id:
+                    return 0
+                self._stream_ready.clear()
+                count = sum(
+                    1 for item_id, _ in self._stream_frames if item_id == stream_id
+                )
+                if count >= min_frames or self._stream_finished:
+                    continue
+                await self._stream_ready.wait()
+
+        return await asyncio.wait_for(wait(), timeout=timeout_seconds)
+
+    def activate_frame_stream(self, stream_id: int) -> int:
+        if stream_id != self._stream_pending_id:
+            raise QueuedVideoTrackError("Ditto frame stream is no longer pending.")
+        count = sum(1 for item_id, _ in self._stream_frames if item_id == stream_id)
+        if count <= 0:
+            raise QueuedVideoTrackError("Ditto frame stream has no buffered frames.")
+        self._stream_pending_id = None
+        self._stream_active_id = stream_id
+        print(
+            "[VIDEO_OUT] Ditto frame stream activated: "
+            f"stream_id={stream_id} buffered_frames={count}",
+            flush=True,
+        )
+        return count
+
+    def finish_frame_stream(self, stream_id: int) -> None:
+        if stream_id in {self._stream_pending_id, self._stream_active_id}:
+            self._stream_finished = True
+            self._stream_ready.set()
+
+    def fail_frame_stream(self, stream_id: int) -> None:
+        if stream_id == self._stream_pending_id:
+            self._stream_frames = deque(
+                item for item in self._stream_frames if item[0] != stream_id
+            )
+            self._stream_pending_id = None
+        if stream_id == self._stream_active_id:
+            self._stream_finished = True
+        self._stream_ready.set()
+        self._stream_space.set()
+
     async def recv(self) -> av.VideoFrame:
         if self._started_at is None:
             self._started_at = time.monotonic()
@@ -178,16 +277,24 @@ class QueuedVideoTrack(MediaStreamTrack):
             target_time = self._started_at + (self._frame_number / self.fps)
             await asyncio.sleep(max(0.0, target_time - time.monotonic()))
 
-        frame = self._next_rendered_frame()
+        stream_id = self._stream_active_id
+        frame = self._next_stream_frame()
         if frame is not None:
-            assert self._active_segment is not None
-            source = ("reply", self._active_segment.segment_id)
+            source = ("reply-stream", stream_id or 0)
         else:
-            if self._last_source is not None and self._last_source[0] == "reply":
-                # Replies end on the neutral pose, and so does the idle
-                # loop's first frame: restart the loop there.
-                self._close_idle_loop()
-            frame, source = self._next_idle_frame()
+            frame = self._next_rendered_frame()
+            if frame is not None:
+                assert self._active_segment is not None
+                source = ("reply", self._active_segment.segment_id)
+            else:
+                if (
+                    self._last_source is not None
+                    and self._last_source[0] in {"reply", "reply-stream"}
+                ):
+                    # Replies end on the neutral pose, and so does the idle
+                    # loop's first frame: restart the loop there.
+                    self._close_idle_loop()
+                frame, source = self._next_idle_frame()
         frame = self._apply_transition(frame, source)
         frame = frame.reformat(
             width=self.width,
@@ -212,7 +319,57 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._close_idle_loop()
         while self._segments:
             self._segments.popleft().close()
+        self._stream_frames.clear()
+        self._stream_pending_id = None
+        self._stream_active_id = None
+        self._stream_finished = True
+        self._stream_ready.set()
+        self._stream_space.set()
         super().stop()
+
+    def _next_stream_frame(self) -> av.VideoFrame | None:
+        stream_id = self._stream_active_id
+        if stream_id is None:
+            return None
+        while self._stream_frames and self._stream_frames[0][0] != stream_id:
+            self._stream_frames.popleft()
+        if self._stream_frames:
+            _, frame_bytes = self._stream_frames.popleft()
+            self._stream_space.set()
+            container = None
+            try:
+                container = av.open(io.BytesIO(frame_bytes))
+                return next(container.decode(video=0))
+            except Exception as exc:
+                print(
+                    "[VIDEO_OUT] streamed frame decode failed: "
+                    f"stream_id={stream_id} error={exc!r}",
+                    flush=True,
+                )
+                if self._last_output is not None:
+                    return av.VideoFrame.from_ndarray(
+                        self._last_output.to_ndarray(format="rgb24"),
+                        format="rgb24",
+                    )
+                return None
+            finally:
+                if container is not None:
+                    container.close()
+        if self._stream_finished:
+            self._stream_active_id = None
+            self._stream_finished = False
+            self._stream_space.set()
+            print(
+                f"[VIDEO_OUT] Ditto frame stream completed: stream_id={stream_id}",
+                flush=True,
+            )
+            return None
+        if self._last_output is not None:
+            return av.VideoFrame.from_ndarray(
+                self._last_output.to_ndarray(format="rgb24"),
+                format="rgb24",
+            )
+        return None
 
     def _next_rendered_frame(self) -> av.VideoFrame | None:
         while True:

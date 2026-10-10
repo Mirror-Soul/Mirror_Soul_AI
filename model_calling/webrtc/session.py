@@ -156,6 +156,9 @@ async def close_session(call_id: int, *, reason: str = "SESSION_CLOSED") -> None
             await session.peer_connection.close()
         finally:
             try:
+                close_video = getattr(session.video_renderer, "close", None)
+                if close_video is not None:
+                    await close_video()
                 # Utterances already spoken are still saved to the call
                 # history, bounded by BACKEND_TALK_LOG_FLUSH_TIMEOUT_SECONDS.
                 await session.talk_log.close()

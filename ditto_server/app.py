@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import hmac
+import struct
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -12,7 +15,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ditto_server.config import DittoServiceConfig
@@ -34,6 +37,8 @@ from model_training.face_training.ditto_runner import (
 PORTRAIT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac"}
 PROFILE_MAX_BYTES = 128 * 1024
+STREAM_CONTENT_TYPE = "application/vnd.mirrorsoul.ditto-frame-stream"
+STREAM_MAGIC = b"MSDS1\n"
 
 
 def create_app(
@@ -121,7 +126,6 @@ def create_app(
                 status_code=429,
                 detail="Ditto GPU is already rendering.",
             )
-
         async with render_guard:
             return await _render_response(
                 render_engine,
@@ -137,7 +141,188 @@ def create_app(
                 motion=motion,
             )
 
+    @app.post("/api/v1/render/stream")
+    async def render_stream(
+        portrait: UploadFile = File(...),
+        audio: UploadFile = File(...),
+        profile: UploadFile | None = File(None),
+        crop_scale: float | None = Form(None),
+        smoothing_kernel: int | None = Form(None),
+        sampling_timesteps: int | None = Form(None),
+        seed: int = Form(1024),
+        x_ditto_api_key: str | None = Header(
+            None,
+            alias="X-Ditto-Api-Key",
+        ),
+    ):
+        _require_api_key(x_ditto_api_key, config.api_key)
+        status = render_engine.status()
+        if not config.streaming_enabled or not status.get("streamingAvailable"):
+            raise HTTPException(
+                status_code=503,
+                detail="Ditto online streaming is unavailable.",
+            )
+        if render_guard.locked():
+            raise HTTPException(
+                status_code=429,
+                detail="Ditto GPU is already rendering.",
+            )
+
+        workspace, portrait_path, audio_path, settings = await _prepare_inputs(
+            config,
+            portrait=portrait,
+            audio=audio,
+            profile=profile,
+            crop_scale=crop_scale,
+            smoothing_kernel=smoothing_kernel,
+            sampling_timesteps=sampling_timesteps,
+        )
+        await render_guard.acquire()
+        return _streaming_response(
+            render_engine,
+            gpu_executor,
+            render_guard,
+            config,
+            workspace=workspace,
+            portrait_path=portrait_path,
+            audio_path=audio_path,
+            settings=settings,
+            seed=seed,
+        )
+
     return app
+
+
+async def _prepare_inputs(
+    config: DittoServiceConfig,
+    *,
+    portrait: UploadFile,
+    audio: UploadFile,
+    profile: UploadFile | None,
+    crop_scale: float | None,
+    smoothing_kernel: int | None,
+    sampling_timesteps: int | None,
+) -> tuple[tempfile.TemporaryDirectory, Path, Path, DittoRenderSettings]:
+    workspace = tempfile.TemporaryDirectory(prefix="mirror-soul-ditto-stream-")
+    workspace_path = Path(workspace.name)
+    try:
+        portrait_path = workspace_path / (
+            "portrait" + _validated_suffix(portrait, PORTRAIT_SUFFIXES)
+        )
+        audio_path = workspace_path / (
+            "audio" + _validated_suffix(audio, AUDIO_SUFFIXES)
+        )
+        await _save_upload(
+            portrait,
+            portrait_path,
+            max_bytes=config.max_portrait_bytes,
+        )
+        await _save_upload(audio, audio_path, max_bytes=config.max_audio_bytes)
+        settings = DittoRenderSettings()
+        if profile is not None:
+            profile_path = workspace_path / "face-profile.json"
+            await _save_upload(profile, profile_path, max_bytes=PROFILE_MAX_BYTES)
+            settings = load_ditto_render_settings(profile_path)
+        settings = _apply_overrides(
+            settings,
+            crop_scale=crop_scale,
+            smoothing_kernel=smoothing_kernel,
+            sampling_timesteps=sampling_timesteps,
+        )
+        return workspace, portrait_path, audio_path, settings
+    except Exception:
+        workspace.cleanup()
+        raise
+
+
+def _streaming_response(
+    render_engine: DittoEngine,
+    gpu_executor: ThreadPoolExecutor,
+    render_guard: asyncio.Lock,
+    config: DittoServiceConfig,
+    *,
+    workspace: tempfile.TemporaryDirectory,
+    portrait_path: Path,
+    audio_path: Path,
+    settings: DittoRenderSettings,
+    seed: int,
+) -> StreamingResponse:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=8)
+    stopped = threading.Event()
+    output_path = Path(workspace.name) / "stream.mp4"
+
+    def put_from_worker(item: bytes | Exception | None) -> bool:
+        while not stopped.is_set():
+            future = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+            try:
+                future.result(timeout=0.25)
+                return True
+            except FutureTimeoutError:
+                future.cancel()
+        return False
+
+    def publish(frame) -> None:
+        packet = _encode_stream_frame(frame, config.stream_jpeg_quality)
+        if not put_from_worker(packet):
+            raise DittoEngineError("Ditto stream client disconnected.")
+
+    def run() -> None:
+        try:
+            render_engine.stream_frames(
+                portrait_path,
+                audio_path,
+                output_path,
+                settings=settings,
+                on_frame=publish,
+                seed=seed,
+                should_cancel=stopped.is_set,
+            )
+        except Exception as exc:
+            put_from_worker(exc)
+        finally:
+            put_from_worker(None)
+
+    worker = loop.run_in_executor(gpu_executor, run)
+
+    async def body():
+        try:
+            yield STREAM_MAGIC
+            while True:
+                item = await queue.get()
+                if item is None:
+                    yield struct.pack(">I", 0)
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield struct.pack(">I", len(item)) + item
+        finally:
+            stopped.set()
+            try:
+                await worker
+            finally:
+                workspace.cleanup()
+                if render_guard.locked():
+                    render_guard.release()
+
+    return StreamingResponse(
+        body(),
+        media_type=STREAM_CONTENT_TYPE,
+        headers={"X-Ditto-Stream-Version": "1"},
+    )
+
+
+def _encode_stream_frame(frame, quality: int) -> bytes:
+    import cv2
+
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+    )
+    if not ok:
+        raise DittoEngineError("Unable to encode Ditto stream frame.")
+    return encoded.tobytes()
 
 
 async def _render_response(

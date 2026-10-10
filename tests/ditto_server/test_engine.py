@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from ditto_server.config import DittoServiceConfig, DittoServiceConfigError
 from ditto_server.engine import (
     DittoEngine,
@@ -118,6 +120,57 @@ class DittoEngineTests(unittest.TestCase):
                     )
             finally:
                 engine._render_slot.release()
+
+    def test_streams_online_frames_as_they_are_generated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            config = DittoServiceConfig(
+                **{**config.__dict__, "streaming_enabled": True}
+            )
+            source, audio, output = self._inputs(directory)
+
+            class Writer:
+                def __call__(self, frame):
+                    return None
+
+            class OnlineSdk:
+                def setup(self, source_path, output_path, **kwargs):
+                    self.writer = Writer()
+
+                def setup_Nd(self, N_d):
+                    self.frame_count = N_d
+
+                def run_chunk(self, chunk, chunksize):
+                    self.writer(np.zeros((8, 8, 3), dtype=np.uint8))
+
+                def close(self):
+                    pass
+
+            runtime = DittoRuntime(
+                sdk_factory=lambda config_path, data_root: object(),
+                run=lambda *args, **kwargs: None,
+                seed_everything=lambda seed: None,
+                cuda_available=lambda: True,
+                gpu_name=lambda: "Test GPU",
+                online_sdk_factory=lambda config_path, data_root: OnlineSdk(),
+                load_audio=lambda path: np.zeros(3_200, dtype=np.float32),
+            )
+            engine = DittoEngine(config, runtime_loader=lambda repository: runtime)
+            engine.load()
+            frames = []
+
+            metrics = engine.stream_frames(
+                source,
+                audio,
+                output,
+                settings=DittoRenderSettings(sampling_timesteps=12),
+                on_frame=frames.append,
+            )
+
+            self.assertGreater(metrics.frame_count, 0)
+            self.assertEqual(metrics.frame_count, len(frames))
+            self.assertTrue(engine.status()["streamingAvailable"])
+            self.assertEqual(engine.status()["renderCount"], 1)
 
     def test_fails_when_runtime_does_not_create_final_video(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
