@@ -178,6 +178,10 @@ class DittoCallConfig:
     stream_start_timeout_seconds: float = 30.0
     stream_max_frame_bytes: int = 5 * 1024 * 1024
     stream_fallback_enabled: bool = True
+    # Streamed frames are shrunk on the GPU to fit this size (the WebRTC
+    # output size). (0, 0) sends Ditto's native size.
+    stream_max_width: int = 0
+    stream_max_height: int = 0
 
     @property
     def worker_urls(self) -> tuple[str, ...]:
@@ -273,6 +277,11 @@ class DittoCallConfig:
             "DITTO_CALL_STREAM_FALLBACK_ENABLED",
             True,
         )
+        if _env_bool("DITTO_CALL_STREAM_MATCH_OUTPUT_SIZE", True):
+            stream_max_width = _env_int("REALTIME_VIDEO_WIDTH", 540)
+            stream_max_height = _env_int("REALTIME_VIDEO_HEIGHT", 960)
+        else:
+            stream_max_width = stream_max_height = 0
         if (
             not 0 <= reply_motion.fade_in_frames <= 50
             or not 0 <= reply_motion.fade_out_frames <= 50
@@ -290,6 +299,8 @@ class DittoCallConfig:
             or stream_start_buffer_frames > 50
             or stream_start_timeout_seconds <= 0
             or stream_max_frame_bytes <= 0
+            or stream_max_width < 0
+            or stream_max_height < 0
         ):
             raise DittoRealtimeError("Ditto streaming settings are invalid.")
         return cls(
@@ -311,6 +322,8 @@ class DittoCallConfig:
             stream_start_timeout_seconds=stream_start_timeout_seconds,
             stream_max_frame_bytes=stream_max_frame_bytes,
             stream_fallback_enabled=stream_fallback_enabled,
+            stream_max_width=stream_max_width,
+            stream_max_height=stream_max_height,
         )
 
 
@@ -587,8 +600,14 @@ class DittoRenderClient:
                 "application/json",
             )
         form_data = {
-            "sampling_timesteps": str(self.config.stream_sampling_timesteps)
+            "sampling_timesteps": str(self.config.stream_sampling_timesteps),
+            # Same neutral start/end as MP4 replies, so the stream joins the
+            # idle loop without a jump. Older GPU services ignore these.
+            **self.config.reply_motion.form_fields(),
         }
+        if self.config.stream_max_width > 0 and self.config.stream_max_height > 0:
+            form_data["max_width"] = str(self.config.stream_max_width)
+            form_data["max_height"] = str(self.config.stream_max_height)
         pool = _get_render_pool(self.config.worker_urls)
         workers = await pool.acquire(self.config.queue_timeout_seconds)
         worker_index, service_url = workers[0]
@@ -597,6 +616,8 @@ class DittoRenderClient:
         )
         owns_client = self._http_client is None
         count = 0
+        total_bytes = 0
+        first_frame_ms: int | None = None
         started = time.monotonic()
         try:
             async with client.stream(
@@ -625,11 +646,14 @@ class DittoRenderClient:
                 )
                 async for chunk in response.aiter_bytes():
                     for frame in parser.feed(chunk):
+                        if first_frame_ms is None:
+                            first_frame_ms = round((time.monotonic() - started) * 1000)
                         if not await on_frame(frame):
                             raise DittoRealtimeError(
                                 "Ditto frame stream was superseded."
                             )
                         count += 1
+                        total_bytes += len(frame)
                 parser.finish()
         finally:
             pool.release(workers)
@@ -637,11 +661,17 @@ class DittoRenderClient:
                 await client.aclose()
         if count <= 0:
             raise DittoRealtimeError("Ditto frame stream contained no frames.")
+        elapsed = time.monotonic() - started
+        video_seconds = count / 25
         print(
             "[DITTO_CALL] frame stream completed: "
             f"{trace_fields(call_id, turn_id)} "
             f"worker={worker_index + 1}/{pool.worker_count} frames={count} "
-            f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            f"first_frame_ms={first_frame_ms} "
+            f"elapsed_ms={round(elapsed * 1000)} "
+            f"avg_frame_kb={round(total_bytes / max(count, 1) / 1024, 1)} "
+            # Bandwidth the tunnel must sustain for this stream in real time.
+            f"realtime_mbps={round(total_bytes * 8 / max(video_seconds, 0.04) / 1_000_000, 1)}",
             flush=True,
         )
         return count

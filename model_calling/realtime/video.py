@@ -72,6 +72,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         idle_motion_period_seconds: float = 6.0,
         transition_frames: int = 0,
         stream_buffer_max_frames: int = 125,
+        stream_max_lag_frames: int = 3,
     ) -> None:
         super().__init__()
         if width <= 0 or height <= 0 or width % 2 or height % 2:
@@ -86,6 +87,8 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise ValueError("Transition frames must be between 0 and 50.")
         if stream_buffer_max_frames <= 0:
             raise ValueError("Stream frame buffer limit must be positive.")
+        if stream_max_lag_frames < 0 or stream_max_lag_frames > 50:
+            raise ValueError("Stream max lag frames must be between 0 and 50.")
 
         self.width = width
         self.height = height
@@ -122,6 +125,20 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._stream_ready = asyncio.Event()
         self._stream_space = asyncio.Event()
         self._stream_space.set()
+        # Lip sync: reply audio starts when a stream is activated, so stream
+        # frame N belongs at activation + N / fps. When frames arrive late
+        # (GPU shared with another call, slow tunnel) the last frame is
+        # repeated; once frames arrive again, frames that are already more
+        # than ``stream_max_lag_frames`` behind the audio are skipped so the
+        # mouth catches up instead of staying late for the rest of the reply.
+        # 0 disables catching up.
+        self.stream_max_lag_frames = stream_max_lag_frames
+        self._stream_activated_at: float | None = None
+        self._stream_consumed = 0
+        self._stream_dropped = 0
+        self._stream_stalled = 0
+        self._stream_max_lag = 0
+        self._stream_skip_logged_at = 0.0
 
     @property
     def is_playing(self) -> bool:
@@ -247,6 +264,11 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise QueuedVideoTrackError("Ditto frame stream has no buffered frames.")
         self._stream_pending_id = None
         self._stream_active_id = stream_id
+        self._stream_activated_at = time.monotonic()
+        self._stream_consumed = 0
+        self._stream_dropped = 0
+        self._stream_stalled = 0
+        self._stream_max_lag = 0
         print(
             "[VIDEO_OUT] Ditto frame stream activated: "
             f"stream_id={stream_id} buffered_frames={count}",
@@ -334,7 +356,9 @@ class QueuedVideoTrack(MediaStreamTrack):
         while self._stream_frames and self._stream_frames[0][0] != stream_id:
             self._stream_frames.popleft()
         if self._stream_frames:
+            self._skip_late_stream_frames()
             _, frame_bytes = self._stream_frames.popleft()
+            self._stream_consumed += 1
             self._stream_space.set()
             container = None
             try:
@@ -360,16 +384,57 @@ class QueuedVideoTrack(MediaStreamTrack):
             self._stream_finished = False
             self._stream_space.set()
             print(
-                f"[VIDEO_OUT] Ditto frame stream completed: stream_id={stream_id}",
+                f"[VIDEO_OUT] Ditto frame stream completed: stream_id={stream_id} "
+                f"frames={self._stream_consumed} dropped={self._stream_dropped} "
+                f"stalled={self._stream_stalled} "
+                f"max_lag_ms={round(self._stream_max_lag * 1000 / self.fps)}",
                 flush=True,
             )
             return None
+        # Frames are late: hold the last picture; audio keeps playing.
+        self._stream_stalled += 1
         if self._last_output is not None:
             return av.VideoFrame.from_ndarray(
                 self._last_output.to_ndarray(format="rgb24"),
                 format="rgb24",
             )
         return None
+
+    def _stream_lag_frames(self) -> int:
+        """How many frames the stream is behind the reply audio right now."""
+        if self._stream_activated_at is None:
+            return 0
+        expected = int((time.monotonic() - self._stream_activated_at) * self.fps)
+        return expected - self._stream_consumed
+
+    def _skip_late_stream_frames(self) -> None:
+        lag = self._stream_lag_frames()
+        self._stream_max_lag = max(self._stream_max_lag, lag)
+        if self.stream_max_lag_frames <= 0 or lag <= self.stream_max_lag_frames:
+            return
+        # Drop buffered frames that are already past due, but always keep
+        # one to show now. Dropped frames are never decoded.
+        skipped = 0
+        while (
+            skipped < lag
+            and len(self._stream_frames) > 1
+            and self._stream_frames[1][0] == self._stream_active_id
+        ):
+            self._stream_frames.popleft()
+            skipped += 1
+        if skipped:
+            self._stream_consumed += skipped
+            self._stream_dropped += skipped
+            now = time.monotonic()
+            if now - self._stream_skip_logged_at < 1.0:
+                return
+            self._stream_skip_logged_at = now
+            print(
+                "[VIDEO_OUT] stream behind audio, skipped late frames: "
+                f"stream_id={self._stream_active_id} skipped={skipped} "
+                f"lag_ms={round(lag * 1000 / self.fps)}",
+                flush=True,
+            )
 
     def _next_rendered_frame(self) -> av.VideoFrame | None:
         while True:

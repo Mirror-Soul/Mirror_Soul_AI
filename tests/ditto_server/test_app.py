@@ -74,7 +74,9 @@ class FakeEngine:
         on_frame,
         seed,
         should_cancel,
+        **kwargs,
     ):
+        self.stream_kwargs = kwargs
         for value in (10, 20):
             on_frame(np.full((8, 8, 3), value, dtype=np.uint8))
 

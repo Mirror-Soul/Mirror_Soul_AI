@@ -121,6 +121,13 @@ class DittoStreamMetrics:
 
 
 class _FrameCallbackWriter:
+    """Forwards every frame Ditto writes to ``callback`` in BGR order.
+
+    Ditto's online pipeline calls its writer with ``fmt="rgb"`` frames, while
+    OpenCV (used to JPEG-encode stream frames) expects BGR. Passing RGB
+    straight to ``cv2.imencode`` swaps red and blue in every streamed frame.
+    """
+
     def __init__(
         self,
         writer: Any,
@@ -130,7 +137,9 @@ class _FrameCallbackWriter:
         self._callback = callback
 
     def __call__(self, frame: np.ndarray, *args: Any, **kwargs: Any) -> Any:
-        self._callback(frame)
+        fmt = kwargs.get("fmt", args[0] if args else "bgr")
+        bgr = frame[..., ::-1] if str(fmt).lower() == "rgb" else frame
+        self._callback(np.ascontiguousarray(bgr))
         return self._writer(frame, *args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
@@ -288,9 +297,17 @@ class DittoEngine:
         on_frame: Callable[[np.ndarray], None],
         seed: int = 1024,
         should_cancel: Callable[[], bool] | None = None,
+        motion: DittoMotionOptions | None = None,
     ) -> DittoStreamMetrics:
-        """Run Ditto online mode and publish frames as soon as they exist."""
+        """Run Ditto online mode and publish BGR frames as soon as they exist.
+
+        ``motion`` blends the first/last frames toward the portrait pose, the
+        same as the offline render, so a streamed reply starts and ends on
+        the neutral frame the idle loop uses.
+        """
         validate_ditto_render_settings(settings)
+        if motion is not None:
+            motion.validate()
         source_path = source_path.resolve()
         audio_path = audio_path.resolve()
         output_path = output_path.resolve()
@@ -320,10 +337,19 @@ class DittoEngine:
         stream_started = False
         stream_closed = False
 
+        total_frames = 0
+        extra_frames = 0
+
         def publish(frame: np.ndarray) -> None:
-            nonlocal frame_count
+            nonlocal frame_count, extra_frames
             if should_cancel is not None and should_cancel():
                 raise DittoEngineError("Ditto online stream was cancelled.")
+            if total_frames and frame_count >= total_frames:
+                # Frames past the audio length come from the padded final
+                # chunk; they are outside the fade-out window and would undo
+                # the return to the neutral pose.
+                extra_frames += 1
+                return
             on_frame(frame)
             frame_count += 1
 
@@ -332,15 +358,27 @@ class DittoEngine:
             audio = runtime.load_audio(str(audio_path)).astype(np.float32)
             samples_per_frame = 16_000 // 25
             total_frames = max(1, math.ceil(len(audio) / samples_per_frame))
-            sdk.setup(
-                str(source_path),
-                str(output_path),
-                crop_scale=settings.crop_scale,
-                smo_k_d=settings.smoothing_kernel,
-                sampling_timesteps=settings.sampling_timesteps,
-            )
+            setup_kwargs: dict[str, Any] = {
+                "crop_scale": settings.crop_scale,
+                "smo_k_d": settings.smoothing_kernel,
+                "sampling_timesteps": settings.sampling_timesteps,
+            }
+            motion_active = motion is not None and motion.active
+            if motion_active:
+                setup_kwargs["fade_type"] = motion.fade_type
+                setup_kwargs["fade_out_keys"] = tuple(motion.fade_keys)
+            sdk.setup(str(source_path), str(output_path), **setup_kwargs)
             stream_started = True
-            sdk.setup_Nd(N_d=total_frames)
+            if motion_active:
+                sdk.setup_Nd(
+                    N_d=total_frames,
+                    fade_in=motion.fade_in_frames or -1,
+                    fade_out=motion.fade_out_frames or -1,
+                    # A fresh dict per stream: Ditto mutates ctrl_info.
+                    ctrl_info={},
+                )
+            else:
+                sdk.setup_Nd(N_d=total_frames)
             sdk.writer = _FrameCallbackWriter(sdk.writer, publish)
 
             chunksize = (3, 5, 2)
@@ -359,6 +397,12 @@ class DittoEngine:
             stream_closed = True
             if frame_count <= 0:
                 raise DittoEngineError("Ditto online mode produced no frames.")
+            if extra_frames:
+                print(
+                    "[DITTO_SERVICE] online stream trimmed frames past the audio: "
+                    f"published={frame_count} trimmed={extra_frames}",
+                    flush=True,
+                )
             duration_seconds = monotonic() - started
             with self._state_lock:
                 self._render_count += 1

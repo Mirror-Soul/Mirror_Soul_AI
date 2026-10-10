@@ -152,7 +152,8 @@ class _StreamingTrack(_Track):
         self.finished = True
 
     def fail_frame_stream(self, stream_id):
-        pass
+        # Like the real track: a failed stream stops waiting for its buffer.
+        self.finished = True
 
 
 class _StreamingClient(_RenderClient):
