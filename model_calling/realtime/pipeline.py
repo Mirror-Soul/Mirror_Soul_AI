@@ -741,6 +741,22 @@ async def start_realtime_audio(
                     audio_timing = output_track.enqueue_encoded_audio(
                         reply.audio_bytes
                     )
+                    if video_renderer is not None:
+                        synchronize_video = getattr(
+                            video_renderer,
+                            "synchronize_reply_audio",
+                            None,
+                        )
+                        if synchronize_video is not None and synchronize_video(
+                            audio_timing.start_delay_seconds
+                        ):
+                            print(
+                                "[REALTIME] reply video synchronized with audio: "
+                                f"{fields} user={user_id} "
+                                "start_delay_ms="
+                                f"{round(audio_timing.start_delay_seconds * 1000)}",
+                                flush=True,
+                            )
                     if talk_log_recorder is not None:
                         _record_talk_log_turn(
                             talk_log_recorder,

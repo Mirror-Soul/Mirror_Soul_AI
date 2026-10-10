@@ -128,6 +128,7 @@ class _StreamingTrack(_Track):
         super().__init__()
         self.frames = []
         self.active = []
+        self.synchronized = []
         self.finished = False
 
     def begin_frame_stream(self):
@@ -147,6 +148,10 @@ class _StreamingTrack(_Track):
 
     def activate_frame_stream(self, stream_id):
         self.active.append(stream_id)
+
+    def synchronize_frame_stream(self, start_delay_seconds=0.0):
+        self.synchronized.append(start_delay_seconds)
+        return bool(self.active)
 
     def finish_frame_stream(self, stream_id):
         self.finished = True
@@ -695,9 +700,12 @@ class DittoRealtimeTests(unittest.TestCase):
         )
 
         asyncio.run(session.enqueue_reply(b"audio", turn_id=1))
+        synchronized = session.synchronize_reply_audio(0.25)
 
         self.assertEqual(track.frames, [b"jpeg-1", b"jpeg-2"])
         self.assertEqual(track.active, [1])
+        self.assertTrue(synchronized)
+        self.assertEqual(track.synchronized, [0.25])
         self.assertTrue(track.finished)
         self.assertEqual(track.videos, [])
 
