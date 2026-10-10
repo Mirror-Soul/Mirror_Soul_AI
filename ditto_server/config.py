@@ -12,11 +12,13 @@ class DittoServiceConfigError(RuntimeError):
 @dataclass(frozen=True)
 class DittoServiceConfig:
     api_key: str
+    backend: str = "pytorch"
     repository_dir: Path = Path(
         "/shareHost/C084003-ditto/ditto-talkinghead"
     )
     data_root: Path | None = None
     model_config_path: Path | None = None
+    tensorrt_python_path: Path | None = None
     ffmpeg_dir: Path = Path("/opt/conda/bin")
     host: str = "127.0.0.1"
     port: int = 8080
@@ -36,6 +38,7 @@ class DittoServiceConfig:
 
         return cls(
             api_key=api_key,
+            backend=os.getenv("DITTO_SERVICE_BACKEND", "pytorch"),
             repository_dir=Path(
                 os.getenv(
                     "DITTO_SERVICE_REPO_DIR",
@@ -44,6 +47,9 @@ class DittoServiceConfig:
             ),
             data_root=_env_path("DITTO_SERVICE_DATA_ROOT"),
             model_config_path=_env_path("DITTO_SERVICE_CONFIG_PATH"),
+            tensorrt_python_path=_env_path(
+                "DITTO_SERVICE_TENSORRT_PYTHON_PATH"
+            ),
             ffmpeg_dir=Path(
                 os.getenv("DITTO_SERVICE_FFMPEG_DIR", "/opt/conda/bin")
             ),
@@ -63,20 +69,43 @@ class DittoServiceConfig:
         )
 
     @property
+    def normalized_backend(self) -> str:
+        return self.backend.strip().lower()
+
+    @property
     def resolved_data_root(self) -> Path:
         return self._resolve_from_repository(
             self.data_root,
-            "checkpoints/ditto_pytorch",
+            (
+                "checkpoints/ditto_trt_Ampere_Plus"
+                if self.normalized_backend == "tensorrt"
+                else "checkpoints/ditto_pytorch"
+            ),
         )
 
     @property
     def resolved_model_config_path(self) -> Path:
         return self._resolve_from_repository(
             self.model_config_path,
-            "checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl",
+            (
+                "checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl"
+                if self.normalized_backend == "tensorrt"
+                else "checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
+            ),
         )
 
+    @property
+    def resolved_tensorrt_python_path(self) -> Path:
+        return (
+            self.tensorrt_python_path
+            or Path("/shareHost/C084003-ditto/trt-pkgs")
+        ).resolve()
+
     def validate(self) -> None:
+        if self.normalized_backend not in {"pytorch", "tensorrt"}:
+            raise DittoServiceConfigError(
+                "DITTO_SERVICE_BACKEND must be 'pytorch' or 'tensorrt'."
+            )
         if self.port <= 0 or self.port > 65535:
             raise DittoServiceConfigError("DITTO_SERVICE_PORT is invalid.")
         if self.max_portrait_bytes <= 0 or self.max_audio_bytes <= 0:
@@ -105,6 +134,14 @@ class DittoServiceConfig:
         if not self.resolved_model_config_path.is_file():
             raise DittoServiceConfigError(
                 f"Ditto config not found: {self.resolved_model_config_path}"
+            )
+        if (
+            self.normalized_backend == "tensorrt"
+            and not self.resolved_tensorrt_python_path.is_dir()
+        ):
+            raise DittoServiceConfigError(
+                "TensorRT Python packages not found: "
+                f"{self.resolved_tensorrt_python_path}"
             )
         if not self.ffmpeg_dir.resolve().is_dir():
             raise DittoServiceConfigError(

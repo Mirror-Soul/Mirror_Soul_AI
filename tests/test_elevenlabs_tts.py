@@ -39,7 +39,23 @@ class ElevenLabsTTSTests(unittest.IsolatedAsyncioTestCase):
         url, request = client.request
         self.assertTrue(url.endswith("/member-voice"))
         self.assertEqual(request["json"]["text"], "안녕하세요.")
+        self.assertEqual(request["json"]["model_id"], "eleven_multilingual_v2")
         self.assertEqual(request["params"]["output_format"], "mp3_44100_128")
+
+    async def test_uses_explicit_model_without_changing_voice(self) -> None:
+        client = _Client(_Response(200, b"member-audio"))
+
+        await synthesize_member_speech(
+            text="안녕하세요.",
+            voice_id="member-voice",
+            api_key="api-key",
+            model_id="eleven_flash_v2_5",
+            http_client=client,
+        )
+
+        url, request = client.request
+        self.assertTrue(url.endswith("/member-voice"))
+        self.assertEqual(request["json"]["model_id"], "eleven_flash_v2_5")
 
     async def test_does_not_include_remote_error_body(self) -> None:
         client = _Client(_Response(403, b"sensitive upstream response"))

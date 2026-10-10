@@ -184,6 +184,59 @@ class DittoEngineTests(unittest.TestCase):
             ):
                 config.validate()
 
+    def test_tensorrt_backend_selects_default_engine_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "ditto"
+            data_root = repository / "checkpoints" / "ditto_trt_Ampere_Plus"
+            data_root.mkdir(parents=True)
+            model_config = (
+                repository
+                / "checkpoints"
+                / "ditto_cfg"
+                / "v0.4_hubert_cfg_trt.pkl"
+            )
+            model_config.parent.mkdir(parents=True)
+            model_config.write_bytes(b"config")
+            ffmpeg_dir = root / "ffmpeg"
+            ffmpeg_dir.mkdir()
+            packages = root / "trt-pkgs"
+            packages.mkdir()
+
+            config = DittoServiceConfig(
+                api_key="test-key",
+                backend="TensorRT",
+                repository_dir=repository,
+                ffmpeg_dir=ffmpeg_dir,
+                tensorrt_python_path=packages,
+            )
+
+            config.validate()
+            self.assertEqual(config.normalized_backend, "tensorrt")
+            self.assertEqual(config.resolved_data_root, data_root.resolve())
+            self.assertEqual(
+                config.resolved_model_config_path,
+                model_config.resolve(),
+            )
+
+    def test_rejects_unknown_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            config = DittoServiceConfig(
+                **{**config.__dict__, "backend": "unknown"}
+            )
+
+            with self.assertRaisesRegex(
+                DittoServiceConfigError,
+                "pytorch.*tensorrt",
+            ):
+                config.validate()
+
+    def test_status_reports_selected_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = DittoEngine(self._config(directory))
+            self.assertEqual(engine.status()["backend"], "pytorch")
+
 
 if __name__ == "__main__":
     unittest.main()

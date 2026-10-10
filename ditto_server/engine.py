@@ -37,6 +37,14 @@ FADE_TYPES = frozenset({"s", "d0"})
 FADE_KEYS = frozenset({"exp", "pitch", "yaw", "roll", "t", "scale"})
 DEFAULT_FADE_KEYS = ("exp", "pitch", "yaw", "roll", "t")
 MAX_FADE_FRAMES = 250
+NUMPY_COMPAT_ALIASES = {
+    "atan2": "arctan2",
+    "atan": "arctan",
+    "asin": "arcsin",
+    "acos": "arccos",
+    "pow": "power",
+    "concat": "concatenate",
+}
 
 
 @dataclass(frozen=True)
@@ -233,6 +241,7 @@ class DittoEngine:
             return {
                 "loaded": self._loaded,
                 "busy": self._busy,
+                "backend": self.config.normalized_backend,
                 "gpu": self._gpu_name,
                 "modelLoadSeconds": self._load_seconds,
                 "renderCount": self._render_count,
@@ -242,6 +251,7 @@ class DittoEngine:
 
 
 def _load_runtime(repository_dir: Path) -> DittoRuntime:
+    _install_numpy_compat_aliases()
     repository = str(repository_dir)
     if repository not in sys.path:
         sys.path.insert(0, repository)
@@ -256,6 +266,14 @@ def _load_runtime(repository_dir: Path) -> DittoRuntime:
         cuda_available=torch.cuda.is_available,
         gpu_name=lambda: torch.cuda.get_device_name(0),
     )
+
+
+def _install_numpy_compat_aliases() -> None:
+    """Provide NumPy 2 spellings used by Ditto on the pinned NumPy 1 runtime."""
+    numpy = importlib.import_module("numpy")
+    for alias, target in NUMPY_COMPAT_ALIASES.items():
+        if not hasattr(numpy, alias):
+            setattr(numpy, alias, getattr(numpy, target))
 
 
 def _prepend_path(path: Path) -> None:

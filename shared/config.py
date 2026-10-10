@@ -7,6 +7,9 @@ load_dotenv()
 class Settings:
     OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
     ELEVENLABS_API_KEY: str | None = os.getenv("ELEVENLABS_API_KEY")
+    ELEVENLABS_TTS_MODEL_ID: str = (
+        os.getenv("ELEVENLABS_TTS_MODEL_ID") or "eleven_multilingual_v2"
+    ).strip()
 
     BACKEND_API_BASE_URL: str = os.getenv(
         "BACKEND_API_BASE_URL",

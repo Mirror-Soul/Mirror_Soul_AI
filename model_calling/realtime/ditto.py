@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import tempfile
 import time
 import wave
 from collections import OrderedDict
@@ -108,6 +109,7 @@ class _DittoRenderPool:
 DEFAULT_FADE_KEYS = "exp,pitch,yaw,roll,t"
 IDLE_LOOP_SAMPLE_RATE = 16_000
 IDLE_LOOP_CACHE_MAX_ENTRIES = 8
+IDLE_LOOP_CACHE_MAX_BYTES = 100 * 1024 * 1024
 _idle_loop_cache: OrderedDict[str, bytes] = OrderedDict()
 
 
@@ -143,6 +145,8 @@ class DittoIdleLoopConfig:
     enabled: bool = False
     duration_seconds: float = 6.0
     fade_frames: int = 12
+    cache_dir: Path | None = None
+    cache_version: str = "v1"
 
     def motion(self) -> DittoMotionConfig:
         return DittoMotionConfig(
@@ -230,6 +234,14 @@ class DittoCallConfig:
             enabled=_env_bool("DITTO_CALL_IDLE_LOOP_ENABLED", True),
             duration_seconds=_env_float("DITTO_CALL_IDLE_LOOP_SECONDS", 6.0),
             fade_frames=_env_int("DITTO_CALL_IDLE_LOOP_FADE_FRAMES", 12),
+            cache_dir=_env_optional_path(
+                "DITTO_CALL_IDLE_CACHE_DIR",
+                "/tmp/mirror-soul-ditto-idle-cache",
+            ),
+            cache_version=(
+                os.getenv("DITTO_CALL_IDLE_CACHE_VERSION", "v1").strip()
+                or "v1"
+            ),
         )
         if (
             not 0 <= reply_motion.fade_in_frames <= 50
@@ -663,6 +675,13 @@ class DittoVideoSession:
         video_bytes = _idle_loop_cache.get(cache_key)
         source = "cache"
         if video_bytes is None:
+            video_bytes = _read_idle_loop_disk_cache(
+                self.idle_loop.cache_dir,
+                cache_key,
+            )
+            if video_bytes is not None:
+                source = "disk-cache"
+        if video_bytes is None:
             source = "render"
             print(
                 "[DITTO_CALL] idle loop render started: "
@@ -700,11 +719,22 @@ class DittoVideoSession:
                 flush=True,
             )
             _idle_loop_cache.pop(cache_key, None)
+            if source == "disk-cache":
+                _remove_idle_loop_disk_cache(
+                    self.idle_loop.cache_dir,
+                    cache_key,
+                )
             return False
         _idle_loop_cache[cache_key] = video_bytes
         _idle_loop_cache.move_to_end(cache_key)
         while len(_idle_loop_cache) > IDLE_LOOP_CACHE_MAX_ENTRIES:
             _idle_loop_cache.popitem(last=False)
+        if source == "render":
+            _write_idle_loop_disk_cache(
+                self.idle_loop.cache_dir,
+                cache_key,
+                video_bytes,
+            )
         print(
             "[DITTO_CALL] idle loop ready: "
             f"{trace_fields(self.call_id)} clone_id={self.clone_id} "
@@ -787,9 +817,88 @@ def _idle_loop_cache_key(
     digest.update(b"\0")
     digest.update(profile.profile_bytes or b"")
     digest.update(
-        f"\0{config.duration_seconds:.3f}:{config.fade_frames}".encode()
+        (
+            f"\0{config.duration_seconds:.3f}:{config.fade_frames}:"
+            f"{config.cache_version}"
+        ).encode()
     )
     return digest.hexdigest()
+
+
+def _read_idle_loop_disk_cache(
+    cache_dir: Path | None,
+    cache_key: str,
+) -> bytes | None:
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{cache_key}.mp4"
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > IDLE_LOOP_CACHE_MAX_BYTES:
+            return None
+        content = path.read_bytes()
+        os.utime(path, None)
+        return content
+    except OSError:
+        return None
+
+
+def _write_idle_loop_disk_cache(
+    cache_dir: Path | None,
+    cache_key: str,
+    video_bytes: bytes,
+) -> None:
+    if cache_dir is None or not video_bytes:
+        return
+    temporary_path: Path | None = None
+    try:
+        cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(cache_dir, 0o700)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{cache_key}.",
+            suffix=".tmp",
+            dir=cache_dir,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(video_bytes)
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, cache_dir / f"{cache_key}.mp4")
+        _prune_idle_loop_disk_cache(cache_dir)
+    except OSError as exc:
+        print(
+            "[DITTO_CALL] idle loop disk cache write skipped: "
+            f"error={exc!r}",
+            flush=True,
+        )
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _remove_idle_loop_disk_cache(
+    cache_dir: Path | None,
+    cache_key: str,
+) -> None:
+    if cache_dir is None:
+        return
+    try:
+        (cache_dir / f"{cache_key}.mp4").unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _prune_idle_loop_disk_cache(cache_dir: Path) -> None:
+    try:
+        paths = sorted(
+            cache_dir.glob("*.mp4"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in paths[IDLE_LOOP_CACHE_MAX_ENTRIES:]:
+            path.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def _validate_profile(
@@ -888,6 +997,11 @@ def _env_float(name: str, default: float) -> float:
         return float(value) if value else default
     except ValueError as exc:
         raise DittoRealtimeError(f"{name} must be a number.") from exc
+
+
+def _env_optional_path(name: str, default: str) -> Path | None:
+    value = os.getenv(name, default).strip()
+    return Path(value).expanduser() if value else None
 
 
 def _env_int(name: str, default: int) -> int:
