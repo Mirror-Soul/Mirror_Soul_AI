@@ -150,12 +150,25 @@ def create_app(
         smoothing_kernel: int | None = Form(None),
         sampling_timesteps: int | None = Form(None),
         seed: int = Form(1024),
+        fade_in_frames: int | None = Form(None),
+        fade_out_frames: int | None = Form(None),
+        fade_type: str | None = Form(None),
+        fade_keys: str | None = Form(None),
+        max_width: int | None = Form(None),
+        max_height: int | None = Form(None),
         x_ditto_api_key: str | None = Header(
             None,
             alias="X-Ditto-Api-Key",
         ),
     ):
         _require_api_key(x_ditto_api_key, config.api_key)
+        motion = _motion_options(
+            fade_in_frames=fade_in_frames,
+            fade_out_frames=fade_out_frames,
+            fade_type=fade_type,
+            fade_keys=fade_keys,
+        )
+        max_size = _stream_max_size(max_width, max_height)
         status = render_engine.status()
         if not config.streaming_enabled or not status.get("streamingAvailable"):
             raise HTTPException(
@@ -188,9 +201,31 @@ def create_app(
             audio_path=audio_path,
             settings=settings,
             seed=seed,
+            motion=motion,
+            max_size=max_size,
         )
 
     return app
+
+
+def _stream_max_size(
+    max_width: int | None,
+    max_height: int | None,
+) -> tuple[int, int] | None:
+    """Optional bound for streamed frames (the call server's output size)."""
+    if max_width is None and max_height is None:
+        return None
+    if max_width is None or max_height is None:
+        raise HTTPException(
+            status_code=422,
+            detail="max_width and max_height must be sent together.",
+        )
+    if not (16 <= max_width <= 4096 and 16 <= max_height <= 4096):
+        raise HTTPException(
+            status_code=422,
+            detail="max_width and max_height must be between 16 and 4096.",
+        )
+    return max_width, max_height
 
 
 async def _prepare_inputs(
@@ -246,6 +281,8 @@ def _streaming_response(
     audio_path: Path,
     settings: DittoRenderSettings,
     seed: int,
+    motion: DittoMotionOptions | None = None,
+    max_size: tuple[int, int] | None = None,
 ) -> StreamingResponse:
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=8)
@@ -263,9 +300,18 @@ def _streaming_response(
         return False
 
     def publish(frame) -> None:
-        packet = _encode_stream_frame(frame, config.stream_jpeg_quality)
+        packet = _encode_stream_frame(
+            frame,
+            config.stream_jpeg_quality,
+            max_size=max_size,
+        )
         if not put_from_worker(packet):
             raise DittoEngineError("Ditto stream client disconnected.")
+
+    stream_kwargs: dict[str, object] = {}
+    if motion is not None:
+        # Only sent when requested so engines without fade support still work.
+        stream_kwargs["motion"] = motion
 
     def run() -> None:
         try:
@@ -277,6 +323,7 @@ def _streaming_response(
                 on_frame=publish,
                 seed=seed,
                 should_cancel=stopped.is_set,
+                **stream_kwargs,
             )
         except Exception as exc:
             put_from_worker(exc)
@@ -312,9 +359,29 @@ def _streaming_response(
     )
 
 
-def _encode_stream_frame(frame, quality: int) -> bytes:
+def _encode_stream_frame(
+    frame,
+    quality: int,
+    *,
+    max_size: tuple[int, int] | None = None,
+) -> bytes:
+    """JPEG-encode one BGR frame, shrunk to fit ``max_size`` if given.
+
+    The call server shows 540x960 by default while Ditto renders larger
+    frames; shrinking here cuts the bytes sent over the tunnel and the
+    decoding work on the call server.
+    """
     import cv2
 
+    if max_size is not None:
+        height, width = frame.shape[:2]
+        scale = min(max_size[0] / width, max_size[1] / height)
+        if scale < 1.0:
+            frame = cv2.resize(
+                frame,
+                (max(2, round(width * scale)), max(2, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
     ok, encoded = cv2.imencode(
         ".jpg",
         frame,

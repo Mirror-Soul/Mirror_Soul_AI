@@ -210,6 +210,9 @@ async def create_answer_from_offer(
                 stream_buffer_max_frames=int(
                     os.getenv("DITTO_CALL_STREAM_BUFFER_MAX_FRAMES", "125")
                 ),
+                stream_max_lag_frames=int(
+                    os.getenv("DITTO_CALL_STREAM_MAX_LAG_FRAMES", "3")
+                ),
             )
             pc.addTrack(output_video_track)
             try:
