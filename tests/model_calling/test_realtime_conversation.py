@@ -1,16 +1,90 @@
+import asyncio
 import unittest
 from contextlib import redirect_stdout
 import io
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from model_calling.realtime.pipeline import (
+    GeneratedReply,
     _append_conversation_turn,
     generate_reply_audio,
+    start_realtime_audio,
 )
 from model_calling.schemas import PersonalityProfile, SpeechProfile
 
 
 class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_clock_starts_after_audio_is_queued(self):
+        events = []
+
+        class OutputTrack:
+            def enqueue_encoded_audio(self, audio_bytes):
+                events.append(("audio", audio_bytes))
+                return SimpleNamespace(
+                    start_delay_seconds=0.2,
+                    duration_seconds=1.0,
+                )
+
+        class VideoRenderer:
+            async def enqueue_reply(self, audio_bytes, *, turn_id=None):
+                events.append(("video", audio_bytes, turn_id))
+
+            def synchronize_reply_audio(self, start_delay_seconds):
+                events.append(("sync", start_delay_seconds))
+                return True
+
+        async def receive_forever(*args, **kwargs):
+            await asyncio.Future()
+
+        queue = asyncio.Queue()
+        await queue.put(b"wav")
+        reply = GeneratedReply(
+            audio_bytes=b"reply",
+            user_text="질문",
+            assistant_text="답변",
+            started_at=time.monotonic(),
+            stage_timings_ms={},
+        )
+        with (
+            patch(
+                "model_calling.realtime.pipeline.generate_reply_audio",
+                new=AsyncMock(return_value=reply),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.receive_utterances",
+                new=receive_forever,
+            ),
+        ):
+            receiver_task, pipeline_task = await start_realtime_audio(
+                call_id=77,
+                user_id="member-uuid",
+                clone_id=14,
+                incoming_track=object(),
+                output_track=OutputTrack(),
+                utterance_queue=queue,
+                video_renderer=VideoRenderer(),
+                video_required=True,
+            )
+            await asyncio.wait_for(queue.join(), timeout=1.0)
+            receiver_task.cancel()
+            pipeline_task.cancel()
+            await asyncio.gather(
+                receiver_task,
+                pipeline_task,
+                return_exceptions=True,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("video", b"reply", 1),
+                ("audio", b"reply"),
+                ("sync", 0.2),
+            ],
+        )
+
     async def test_reply_uses_and_updates_bounded_conversation_history(self):
         personality = PersonalityProfile(
             openness=50,

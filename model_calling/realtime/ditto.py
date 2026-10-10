@@ -981,6 +981,12 @@ class DittoVideoSession:
         )
         self.track.enqueue_encoded_video(video_bytes)
 
+    def synchronize_reply_audio(self, start_delay_seconds: float = 0.0) -> bool:
+        synchronize = getattr(self.track, "synchronize_frame_stream", None)
+        if synchronize is None:
+            return False
+        return bool(synchronize(start_delay_seconds))
+
     async def _enqueue_streaming_reply(
         self,
         audio_bytes: bytes,

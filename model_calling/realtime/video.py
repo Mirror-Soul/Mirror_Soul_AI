@@ -125,12 +125,12 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._stream_ready = asyncio.Event()
         self._stream_space = asyncio.Event()
         self._stream_space.set()
-        # Lip sync: reply audio starts when a stream is activated, so stream
-        # frame N belongs at activation + N / fps. When frames arrive late
-        # (GPU shared with another call, slow tunnel) the last frame is
-        # repeated; once frames arrive again, frames that are already more
-        # than ``stream_max_lag_frames`` behind the audio are skipped so the
-        # mouth catches up instead of staying late for the rest of the reply.
+        # Lip sync: the stream can become ready before reply audio is decoded
+        # and queued. The clock is therefore armed separately when the audio
+        # queue reports when playback will start. Frame N belongs at that
+        # audio start time + N / fps. When frames arrive late (GPU shared with
+        # another call, slow tunnel), old frames are skipped so the mouth
+        # catches up instead of staying late for the rest of the reply.
         # 0 disables catching up.
         self.stream_max_lag_frames = stream_max_lag_frames
         self._stream_activated_at: float | None = None
@@ -208,6 +208,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         if self._stream_active_id is not None:
             raise QueuedVideoTrackError("A Ditto frame stream is already active.")
         self._stream_frames.clear()
+        self._stream_activated_at = None
         stream_id = self._stream_next_id
         self._stream_next_id += 1
         self._stream_pending_id = stream_id
@@ -264,7 +265,7 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise QueuedVideoTrackError("Ditto frame stream has no buffered frames.")
         self._stream_pending_id = None
         self._stream_active_id = stream_id
-        self._stream_activated_at = time.monotonic()
+        self._stream_activated_at = None
         self._stream_consumed = 0
         self._stream_dropped = 0
         self._stream_stalled = 0
@@ -275,6 +276,24 @@ class QueuedVideoTrack(MediaStreamTrack):
             flush=True,
         )
         return count
+
+    def synchronize_frame_stream(self, start_delay_seconds: float = 0.0) -> bool:
+        """Start the lip-sync clock at the matching audio playback time."""
+        if not math.isfinite(start_delay_seconds) or start_delay_seconds < 0:
+            raise QueuedVideoTrackError(
+                "Audio playback delay must be a finite non-negative number."
+            )
+        stream_id = self._stream_active_id
+        if stream_id is None:
+            return False
+        self._stream_activated_at = time.monotonic() + start_delay_seconds
+        print(
+            "[VIDEO_OUT] Ditto frame stream synchronized with audio: "
+            f"stream_id={stream_id} "
+            f"start_delay_ms={round(start_delay_seconds * 1000)}",
+            flush=True,
+        )
+        return True
 
     def finish_frame_stream(self, stream_id: int) -> None:
         if stream_id in {self._stream_pending_id, self._stream_active_id}:
@@ -344,6 +363,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._stream_frames.clear()
         self._stream_pending_id = None
         self._stream_active_id = None
+        self._stream_activated_at = None
         self._stream_finished = True
         self._stream_ready.set()
         self._stream_space.set()
@@ -352,6 +372,9 @@ class QueuedVideoTrack(MediaStreamTrack):
     def _next_stream_frame(self) -> av.VideoFrame | None:
         stream_id = self._stream_active_id
         if stream_id is None:
+            return None
+        audio_started_at = self._stream_activated_at
+        if audio_started_at is None or time.monotonic() < audio_started_at:
             return None
         while self._stream_frames and self._stream_frames[0][0] != stream_id:
             self._stream_frames.popleft()
@@ -381,6 +404,7 @@ class QueuedVideoTrack(MediaStreamTrack):
                     container.close()
         if self._stream_finished:
             self._stream_active_id = None
+            self._stream_activated_at = None
             self._stream_finished = False
             self._stream_space.set()
             print(

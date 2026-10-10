@@ -314,6 +314,7 @@ class LipSyncCatchUpTests(unittest.TestCase):
         with patch.object(video_module.time, "monotonic", clock):
             track, stream_id = asyncio.run(setup())
             track.activate_frame_stream(stream_id)
+            track.synchronize_frame_stream()
         return track, clock
 
     def _pull(self, track, clock, at):
@@ -355,6 +356,31 @@ class LipSyncCatchUpTests(unittest.TestCase):
         self._pull(track, clock, 100.04)
         self._pull(track, clock, 100.08)
         self.assertEqual(track._stream_stalled, 2)
+
+    def test_activation_does_not_start_clock_before_audio_is_queued(self):
+        track, clock = self._track(frames=6)
+        track._stream_activated_at = None
+
+        self.assertIsNone(self._pull(track, clock, 101.00))
+        self.assertEqual(track._stream_consumed, 0)
+        self.assertEqual(track._stream_dropped, 0)
+
+        with patch.object(video_module.time, "monotonic", clock):
+            self.assertTrue(track.synchronize_frame_stream())
+        self.assertIsNotNone(self._pull(track, clock, 101.00))
+        self.assertEqual(track._stream_consumed, 1)
+        self.assertEqual(track._stream_dropped, 0)
+
+    def test_audio_queue_delay_holds_first_mouth_frame(self):
+        track, clock = self._track(frames=6)
+        with patch.object(video_module.time, "monotonic", clock):
+            track.synchronize_frame_stream(0.20)
+
+        self.assertIsNone(self._pull(track, clock, 100.19))
+        self.assertEqual(track._stream_consumed, 0)
+        self.assertIsNotNone(self._pull(track, clock, 100.20))
+        self.assertEqual(track._stream_consumed, 1)
+        self.assertEqual(track._stream_dropped, 0)
 
 
 if __name__ == "__main__":
