@@ -70,9 +70,12 @@ class QueuedVideoTrack(MediaStreamTrack):
         idle_motion_enabled: bool = True,
         idle_motion_scale: float = 0.012,
         idle_motion_period_seconds: float = 6.0,
+        idle_loop_motion_scale: float = 0.006,
+        idle_loop_motion_period_seconds: float = 11.0,
         transition_frames: int = 0,
         stream_buffer_max_frames: int = 125,
         stream_max_lag_frames: int = 3,
+        stream_max_catch_up_frames: int = 1,
     ) -> None:
         super().__init__()
         if width <= 0 or height <= 0 or width % 2 or height % 2:
@@ -83,12 +86,20 @@ class QueuedVideoTrack(MediaStreamTrack):
             raise ValueError("Idle motion scale must be between 0 and 0.05.")
         if idle_motion_period_seconds <= 0:
             raise ValueError("Idle motion period must be positive.")
+        if idle_loop_motion_scale < 0 or idle_loop_motion_scale > 0.02:
+            raise ValueError("Idle loop motion scale must be between 0 and 0.02.")
+        if idle_loop_motion_period_seconds <= 0:
+            raise ValueError("Idle loop motion period must be positive.")
         if transition_frames < 0 or transition_frames > 50:
             raise ValueError("Transition frames must be between 0 and 50.")
         if stream_buffer_max_frames <= 0:
             raise ValueError("Stream frame buffer limit must be positive.")
         if stream_max_lag_frames < 0 or stream_max_lag_frames > 50:
             raise ValueError("Stream max lag frames must be between 0 and 50.")
+        if stream_max_catch_up_frames <= 0 or stream_max_catch_up_frames > 10:
+            raise ValueError(
+                "Stream catch-up frames must be between 1 and 10."
+            )
 
         self.width = width
         self.height = height
@@ -96,6 +107,8 @@ class QueuedVideoTrack(MediaStreamTrack):
         self.idle_motion_enabled = idle_motion_enabled
         self.idle_motion_scale = idle_motion_scale
         self.idle_motion_period_seconds = idle_motion_period_seconds
+        self.idle_loop_motion_scale = idle_loop_motion_scale
+        self.idle_loop_motion_period_seconds = idle_loop_motion_period_seconds
         self._segments: deque[_VideoSegment] = deque()
         self._active_segment: _VideoSegment | None = None
         self._idle_rgb = np.zeros((height, width, 3), dtype=np.uint8)
@@ -133,6 +146,7 @@ class QueuedVideoTrack(MediaStreamTrack):
         # catches up instead of staying late for the rest of the reply.
         # 0 disables catching up.
         self.stream_max_lag_frames = stream_max_lag_frames
+        self.stream_max_catch_up_frames = stream_max_catch_up_frames
         self._stream_activated_at: float | None = None
         self._stream_consumed = 0
         self._stream_dropped = 0
@@ -436,11 +450,14 @@ class QueuedVideoTrack(MediaStreamTrack):
         self._stream_max_lag = max(self._stream_max_lag, lag)
         if self.stream_max_lag_frames <= 0 or lag <= self.stream_max_lag_frames:
             return
-        # Drop buffered frames that are already past due, but always keep
-        # one to show now. Dropped frames are never decoded.
+        # Recover only the lag beyond the tolerated window. Limiting each
+        # output tick prevents a short GPU slowdown from turning into a
+        # visible multi-frame jump in the mouth animation.
+        excess_lag = lag - self.stream_max_lag_frames
+        drop_limit = min(excess_lag, self.stream_max_catch_up_frames)
         skipped = 0
         while (
-            skipped < lag
+            skipped < drop_limit
             and len(self._stream_frames) > 1
             and self._stream_frames[1][0] == self._stream_active_id
         ):
@@ -456,7 +473,9 @@ class QueuedVideoTrack(MediaStreamTrack):
             print(
                 "[VIDEO_OUT] stream behind audio, skipped late frames: "
                 f"stream_id={self._stream_active_id} skipped={skipped} "
-                f"lag_ms={round(lag * 1000 / self.fps)}",
+                f"lag_ms={round(lag * 1000 / self.fps)} "
+                f"tolerance_ms="
+                f"{round(self.stream_max_lag_frames * 1000 / self.fps)}",
                 flush=True,
             )
 
@@ -492,13 +511,68 @@ class QueuedVideoTrack(MediaStreamTrack):
                     self._idle_loop_generation += 1
                 try:
                     frame = next(self._idle_loop.frames)
-                    return frame, ("idle-loop", self._idle_loop_generation)
+                    return (
+                        self._animate_idle_loop_frame(frame),
+                        ("idle-loop", self._idle_loop_generation),
+                    )
                 except StopIteration:
                     self._close_idle_loop()
                 except Exception as exc:
                     self._disable_idle_video(exc)
                     break
         return self._idle_frame(), ("idle-portrait", 0)
+
+    def _animate_idle_loop_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
+        """Add subtle continuous breathing motion without resetting at loop wrap."""
+        scale_amount = self.idle_loop_motion_scale
+        if scale_amount == 0:
+            return frame
+
+        elapsed = self._frame_number / self.fps
+        primary = 2 * math.pi * elapsed / self.idle_loop_motion_period_seconds
+        secondary = primary / 1.61803398875
+        breathing = (
+            0.62 * (1 - math.cos(primary)) / 2
+            + 0.38 * (1 - math.cos(secondary)) / 2
+        )
+        scale = 1 + scale_amount * breathing
+        crop_width = max(2, min(self.width, round(self.width / scale)))
+        crop_height = max(2, min(self.height, round(self.height / scale)))
+        horizontal_shift = round(
+            self.width
+            * scale_amount
+            * 0.10
+            * (math.sin(primary * 0.73) + 0.35 * math.sin(secondary))
+        )
+        vertical_shift = round(
+            self.height
+            * scale_amount
+            * 0.14
+            * (math.sin(primary) + 0.25 * math.sin(secondary * 1.31))
+        )
+        left = max(
+            0,
+            min(
+                self.width - crop_width,
+                (self.width - crop_width) // 2 + horizontal_shift,
+            ),
+        )
+        top = max(
+            0,
+            min(
+                self.height - crop_height,
+                (self.height - crop_height) // 2 + vertical_shift,
+            ),
+        )
+        rgb = frame.reformat(
+            width=self.width,
+            height=self.height,
+            format="rgb24",
+        ).to_ndarray()
+        return av.VideoFrame.from_ndarray(
+            rgb[top : top + crop_height, left : left + crop_width],
+            format="rgb24",
+        )
 
     def _disable_idle_video(self, exc: Exception) -> None:
         self._close_idle_loop()

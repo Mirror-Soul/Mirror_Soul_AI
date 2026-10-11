@@ -20,6 +20,10 @@ from urllib.parse import urlparse
 import httpx
 import numpy as np
 
+from model_calling.realtime.diagnostics import (
+    ReplyVideoDiagnosticCapture,
+    ReplyVideoDiagnosticConfig,
+)
 from model_calling.realtime.trace import trace_fields
 from model_calling.realtime.video_integrity import (
     VideoIntegrityConfig,
@@ -182,6 +186,7 @@ class DittoCallConfig:
     # output size). (0, 0) sends Ditto's native size.
     stream_max_width: int = 0
     stream_max_height: int = 0
+    diagnostics: ReplyVideoDiagnosticConfig = ReplyVideoDiagnosticConfig()
 
     @property
     def worker_urls(self) -> tuple[str, ...]:
@@ -303,6 +308,11 @@ class DittoCallConfig:
             or stream_max_height < 0
         ):
             raise DittoRealtimeError("Ditto streaming settings are invalid.")
+        diagnostics = ReplyVideoDiagnosticConfig.from_env()
+        try:
+            diagnostics.validate()
+        except ValueError as exc:
+            raise DittoRealtimeError(str(exc)) from exc
         return cls(
             service_url=service_urls[0],
             api_key=api_key,
@@ -324,6 +334,7 @@ class DittoCallConfig:
             stream_fallback_enabled=stream_fallback_enabled,
             stream_max_width=stream_max_width,
             stream_max_height=stream_max_height,
+            diagnostics=diagnostics,
         )
 
 
@@ -617,6 +628,12 @@ class DittoRenderClient:
         owns_client = self._http_client is None
         count = 0
         total_bytes = 0
+        diagnostic = ReplyVideoDiagnosticCapture(
+            self.config.diagnostics,
+            audio_bytes=audio_bytes,
+            call_id=call_id,
+            turn_id=turn_id,
+        )
         first_frame_ms: int | None = None
         started = time.monotonic()
         try:
@@ -652,6 +669,7 @@ class DittoRenderClient:
                             raise DittoRealtimeError(
                                 "Ditto frame stream was superseded."
                             )
+                        diagnostic.add_frame(frame)
                         count += 1
                         total_bytes += len(frame)
                 parser.finish()
@@ -674,6 +692,7 @@ class DittoRenderClient:
             f"realtime_mbps={round(total_bytes * 8 / max(video_seconds, 0.04) / 1_000_000, 1)}",
             flush=True,
         )
+        diagnostic.finish_in_background()
         return count
 
 

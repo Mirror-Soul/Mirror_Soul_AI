@@ -48,6 +48,8 @@ DITTO_CALL_REPLY_FADE_OUT_FRAMES=8
 DITTO_CALL_IDLE_LOOP_ENABLED=true
 DITTO_CALL_IDLE_LOOP_SECONDS=6
 DITTO_CALL_IDLE_LOOP_FADE_FRAMES=12
+DITTO_CALL_IDLE_LOOP_MOTION_SCALE=0.006
+DITTO_CALL_IDLE_LOOP_MOTION_PERIOD_SECONDS=11
 DITTO_CALL_IDLE_CACHE_DIR=/tmp/mirror-soul-ditto-idle-cache
 DITTO_CALL_IDLE_CACHE_VERSION=v1
 DITTO_CALL_STREAMING_ENABLED=false
@@ -59,8 +61,14 @@ DITTO_CALL_STREAM_FALLBACK_ENABLED=true
 # Skip stream frames that are this many frames behind the reply audio
 # (GPU or tunnel stall) so lips catch up. 0 disables.
 DITTO_CALL_STREAM_MAX_LAG_FRAMES=3
+# Recover gradually instead of dropping every late mouth frame at once.
+DITTO_CALL_STREAM_MAX_CATCH_UP_FRAMES=1
 # Ask the GPU to shrink frames to REALTIME_VIDEO_WIDTH x HEIGHT before JPEG.
 DITTO_CALL_STREAM_MATCH_OUTPUT_SIZE=true
+# Optional test-only MP4s containing generated clone video + exact TTS audio.
+# Caller microphone audio is not captured. Empty disables recording.
+DITTO_CALL_DIAGNOSTIC_DIR=
+DITTO_CALL_DIAGNOSTIC_MAX_FILES=20
 REALTIME_VIDEO_WIDTH=540
 REALTIME_VIDEO_HEIGHT=960
 REALTIME_VIDEO_FPS=25

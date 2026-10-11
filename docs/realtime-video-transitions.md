@@ -49,6 +49,7 @@ GPU 서비스가 이 필드를 받지 못하는 구버전이어도 오류는 나
 - 이 클립은 앞뒤 12프레임을 초상화 자세로 맞춰 렌더합니다. 그래서 끝 프레임과 첫 프레임이 같고, 반복해도 이음매가 보이지 않습니다.
 - 같은 클론과 같은 초상화로 다시 통화하면 서버 메모리에 저장된 클립을 재사용합니다(최대 8개). 이때는 GPU를 쓰지 않습니다.
 - 답변이 끝나면 대기 루프를 첫 프레임(중립)부터 다시 재생합니다.
+- 클립 위에 11초 주기의 아주 약한 확대·이동을 연속 적용합니다. 6초 루프와 주기가 달라 같은 동작이 그대로 반복되어 보이는 현상을 줄이며, 얼굴 표정이나 입 모양은 인위적으로 만들지 않습니다.
 - 렌더가 실패해도 통화에는 영향이 없습니다. 정지 초상화로 계속 진행합니다.
 
 ### 2.3 크로스페이드 (통화 서버)
@@ -76,6 +77,10 @@ GPU 서비스가 이 필드를 받지 못하는 구버전이어도 오류는 나
 | `DITTO_CALL_IDLE_LOOP_ENABLED` | `true` | Ditto 대기 루프 사용 |
 | `DITTO_CALL_IDLE_LOOP_SECONDS` | `6` | 대기 클립 길이(2~20초) |
 | `DITTO_CALL_IDLE_LOOP_FADE_FRAMES` | `12` | 대기 클립 앞뒤 복귀 프레임 |
+| `DITTO_CALL_IDLE_LOOP_MOTION_SCALE` | `0.006` | 대기 루프에 덧씌우는 호흡성 확대·이동 강도. `0`이면 비활성화 |
+| `DITTO_CALL_IDLE_LOOP_MOTION_PERIOD_SECONDS` | `11` | 호흡성 움직임 주기 |
+| `DITTO_CALL_STREAM_MAX_LAG_FRAMES` | `3` | 음성보다 영상이 이 프레임 수만큼 늦는 것까지 허용 |
+| `DITTO_CALL_STREAM_MAX_CATCH_UP_FRAMES` | `1` | 한 출력 시점에 건너뛸 최대 프레임 수 |
 
 > 운영 통화 서버 `.env`에 예전 예시값 `REALTIME_IDLE_MOTION_ENABLED=true`가 들어 있다면 `false`로 바꾸거나 그 줄을 지웁니다.
 
@@ -141,6 +146,21 @@ GPU `.env.ditto-service`에는 새로 추가할 값이 없습니다.
 | 전환이 여전히 튐 | `REALTIME_VIDEO_TRANSITION_FRAMES=10` |
 
 값을 바꾼 뒤에는 `sudo systemctl restart mirror-soul-call.service`를 실행합니다. 대기 클립 길이나 복귀 프레임을 바꾸면 캐시가 자동으로 새로 만들어집니다.
+
+### 테스트용 음성 포함 답변 영상
+
+아이폰 화면 녹화에서 통화 음성이 빠지는 경우, 통화 서버에 아래 값을 설정하면 클론이 생성한 프레임과 해당 TTS 원음을 MP4로 합쳐 저장합니다.
+
+```env
+DITTO_CALL_DIAGNOSTIC_DIR=/tmp/mirror-soul-call-diagnostics
+DITTO_CALL_DIAGNOSTIC_MAX_FILES=20
+```
+
+- 기본값은 비활성화입니다. 경로를 설정한 테스트에서만 동작합니다.
+- 발신자의 마이크 음성은 저장하지 않고 클론 답변만 저장합니다.
+- 실시간 송출이 끝난 뒤 별도 작업으로 합치므로 답변 재생을 기다리게 하지 않습니다.
+- 통화 음성과 얼굴 영상이 들어 있으므로 테스트 후 파일을 삭제하고 외부에 공개하지 않습니다.
+- 저장 로그는 `[DITTO_DIAGNOSTIC] reply video saved`입니다.
 
 ## 7. 한계와 다음 단계
 

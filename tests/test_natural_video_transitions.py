@@ -173,6 +173,29 @@ class CrossfadeTrackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             QueuedVideoTrack(width=SIZE, height=SIZE, transition_frames=51)
 
+    def test_idle_loop_overlay_changes_gradually_without_resizing_output(self) -> None:
+        track = QueuedVideoTrack(
+            width=64,
+            height=64,
+            fps=25,
+            idle_motion_enabled=False,
+            idle_loop_motion_scale=0.02,
+            idle_loop_motion_period_seconds=8.0,
+        )
+        gradient = np.tile(np.arange(64, dtype=np.uint8), (64, 1))
+        rgb = np.repeat(gradient[:, :, None], 3, axis=2)
+        frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+
+        track._frame_number = 0
+        neutral = track._animate_idle_loop_frame(frame).to_ndarray(format="rgb24")
+        track._frame_number = 100
+        moved = track._animate_idle_loop_frame(frame).reformat(
+            width=64, height=64, format="rgb24"
+        ).to_ndarray()
+
+        self.assertEqual(neutral.shape, moved.shape)
+        self.assertFalse(np.array_equal(neutral, moved))
+
 
 class SilentAudioTests(unittest.TestCase):
     def test_silent_wav_is_16khz_mono_and_quiet(self) -> None:
