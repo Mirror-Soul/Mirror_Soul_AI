@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -21,6 +22,8 @@ class ReplyVideoDiagnosticConfig:
     output_dir: Path | None = None
     max_files: int = 20
     max_buffer_bytes: int = 64 * 1024 * 1024
+    max_age_hours: float = 24.0
+    max_pending_tasks: int = 2
 
     @classmethod
     def from_env(cls) -> "ReplyVideoDiagnosticConfig":
@@ -34,6 +37,12 @@ class ReplyVideoDiagnosticConfig:
                     str(64 * 1024 * 1024),
                 )
             ),
+            max_age_hours=float(
+                os.getenv("DITTO_CALL_DIAGNOSTIC_MAX_AGE_HOURS", "24")
+            ),
+            max_pending_tasks=int(
+                os.getenv("DITTO_CALL_DIAGNOSTIC_MAX_PENDING_TASKS", "2")
+            ),
         )
 
     def validate(self) -> None:
@@ -45,6 +54,14 @@ class ReplyVideoDiagnosticConfig:
         ):
             raise ValueError(
                 "Diagnostic frame buffer must be between 1 byte and 512 MiB."
+            )
+        if self.max_age_hours <= 0 or self.max_age_hours > 168:
+            raise ValueError(
+                "Diagnostic max age must be greater than 0 and at most 168 hours."
+            )
+        if self.max_pending_tasks <= 0 or self.max_pending_tasks > 8:
+            raise ValueError(
+                "Diagnostic pending task limit must be between 1 and 8."
             )
 
 
@@ -97,6 +114,16 @@ class ReplyVideoDiagnosticCapture:
             )
             return None
         if not self.frames or not self.audio_bytes:
+            return None
+        if len(_diagnostic_tasks) >= self.config.max_pending_tasks:
+            self.frames.clear()
+            self.buffered_bytes = 0
+            print(
+                "[DITTO_DIAGNOSTIC] capture skipped: encoder backlog limit "
+                f"reached pending={len(_diagnostic_tasks)} "
+                f"call_id={self.call_id} turn_id={self.turn_id}",
+                flush=True,
+            )
             return None
 
         frames = tuple(self.frames)
@@ -169,7 +196,11 @@ def _write_reply_video(
         os.chmod(output_path, 0o600)
     except OSError:
         pass
-    _prune_diagnostics(output_dir, config.max_files)
+    _prune_diagnostics(
+        output_dir,
+        config.max_files,
+        config.max_age_hours,
+    )
     print(
         "[DITTO_DIAGNOSTIC] reply video saved: "
         f"call_id={call_id} turn_id={turn_id} frames={len(frames)} "
@@ -259,13 +290,22 @@ def _decode_image(content: bytes) -> av.VideoFrame:
         container.close()
 
 
-def _prune_diagnostics(output_dir: Path, max_files: int) -> None:
+def _prune_diagnostics(
+    output_dir: Path,
+    max_files: int,
+    max_age_hours: float,
+) -> None:
     try:
+        cutoff = time.time() - max_age_hours * 3600
         paths = sorted(
             output_dir.glob("call-*-turn-*.mp4"),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
+        for path in paths:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        paths = [path for path in paths if path.exists()]
         for path in paths[max_files:]:
             path.unlink(missing_ok=True)
     except OSError as exc:

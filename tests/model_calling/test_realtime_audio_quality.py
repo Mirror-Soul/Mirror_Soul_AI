@@ -2,7 +2,11 @@ import unittest
 
 import numpy as np
 
-from model_calling.realtime.audio import analyze_pcm_quality
+from model_calling.realtime.audio import (
+    QueuedAudioTrack,
+    _QueuedAudioSegment,
+    analyze_pcm_quality,
+)
 
 
 class RealtimeAudioQualityTests(unittest.TestCase):
@@ -23,6 +27,21 @@ class RealtimeAudioQualityTests(unittest.TestCase):
 
         self.assertIn("CLIPPING", quality.warnings)
         self.assertGreater(quality.clipping_ratio, 0.99)
+
+    def test_cancels_only_the_failed_turn_audio(self):
+        track = QueuedAudioTrack()
+        track._segments.extend(
+            (
+                _QueuedAudioSegment(turn_id=1, pcm=bytearray(b"first")),
+                _QueuedAudioSegment(turn_id=2, pcm=bytearray(b"second")),
+            )
+        )
+
+        removed = track.cancel_turn(1)
+
+        self.assertEqual(removed, len(b"first"))
+        self.assertEqual(track._queued_bytes(), len(b"second"))
+        self.assertEqual(track._segments[0].turn_id, 2)
 
 
 if __name__ == "__main__":

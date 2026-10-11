@@ -182,6 +182,18 @@ class _StreamingClient(_RenderClient):
         return 2
 
 
+class _LateFailStreamingClient(_StreamingClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_now = asyncio.Event()
+
+    async def stream_frames(self, profile, audio_bytes, *, on_frame, **kwargs):
+        await on_frame(b"jpeg-1")
+        await on_frame(b"jpeg-2")
+        await self.fail_now.wait()
+        raise DittoRealtimeError("stream broke after playback started")
+
+
 class DittoRealtimeTests(unittest.TestCase):
     def test_frame_stream_parser_handles_split_packets(self) -> None:
         frame = b"jpeg-frame"
@@ -729,6 +741,42 @@ class DittoRealtimeTests(unittest.TestCase):
         asyncio.run(session.enqueue_reply(b"audio", turn_id=1))
 
         self.assertEqual(track.videos, [b"mp4"])
+
+    def test_active_stream_failure_notifies_the_matching_turn(self) -> None:
+        profile = FaceRenderProfile(
+            portrait_bytes=b"portrait",
+            portrait_filename="portrait.jpg",
+            portrait_content_type="image/jpeg",
+        )
+        track = _StreamingTrack()
+        client = _LateFailStreamingClient()
+        failures = []
+        session = DittoVideoSession(
+            user_id="member-uuid",
+            clone_id=6,
+            track=track,
+            client=client,
+            profile_loader=_ProfileLoader(profile),
+            call_id=80,
+            stream_failure_callback=lambda turn_id, error: failures.append(
+                (turn_id, str(error))
+            ),
+        )
+
+        async def run() -> None:
+            await session.enqueue_reply(b"audio", turn_id=4)
+            client.fail_now.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        self.assertEqual(
+            failures,
+            [(4, "stream broke after playback started")],
+        )
+        self.assertTrue(session.consume_stream_failure(4))
+        self.assertFalse(session.consume_stream_failure(4))
 
 
 if __name__ == "__main__":

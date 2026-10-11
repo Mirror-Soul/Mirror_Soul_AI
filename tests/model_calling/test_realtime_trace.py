@@ -52,6 +52,25 @@ class CallTraceTests(unittest.TestCase):
 
         self.assertIn("status=FAILED", output.getvalue())
 
+    def test_completed_turn_can_be_reclassified_after_output_failure(self) -> None:
+        trace = CallTrace(
+            call_id=83,
+            user_id="member-uuid",
+            clone_id=15,
+            media_type="VIDEO",
+        )
+        turn = trace.start_turn()
+        trace.finish_turn(turn, "COMPLETED")
+
+        changed = trace.fail_turn(turn, error="VIDEO_STREAM_INTERRUPTED")
+        changed_twice = trace.fail_turn(turn, error="duplicate")
+
+        self.assertTrue(changed)
+        self.assertFalse(changed_twice)
+        self.assertEqual(trace.turns_completed, 0)
+        self.assertEqual(trace.turns_failed, 1)
+        self.assertEqual(trace.last_error, "VIDEO_STREAM_INTERRUPTED")
+
 
 if __name__ == "__main__":
     unittest.main()

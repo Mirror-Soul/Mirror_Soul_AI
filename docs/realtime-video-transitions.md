@@ -118,11 +118,17 @@ GPU `.env.ditto-service`에는 새로 추가할 값이 없습니다.
 [DITTO_CALL] render slot acquired: callId=... turn=1 ... fade_in=2 fade_out=8
 [VIDEO_OUT] crossfade started: from=idle-loop to=reply frames=6
 [VIDEO_OUT] crossfade started: from=reply to=idle-loop frames=6
+[DITTO_CALL] frame stream completed: ... first_frame_ms=... realtime_mbps=...
+[VIDEO_OUT] Ditto frame stream completed: ... dropped=0 stalled=0 max_lag_ms=...
 ```
 
 - 같은 클론으로 다시 통화하면 `source=cache`가 나옵니다.
 - 대기 루프가 실패하면 `idle loop unavailable; keeping still portrait`가 나옵니다. 통화는 정지 초상화로 계속됩니다.
 - 실시간 통화 모니터에는 `IDLE` 줄이 추가돼 `READY`(대기 루프 재생 중) 또는 `WARNING`(정지 초상화)으로 표시됩니다.
+- 실시간 스트리밍을 사용하면 모니터의 `SYNC` 줄에서 건너뛴 프레임, 멈춘 프레임,
+  최대 입 모양 지연을 확인합니다. 하나라도 발생하면 `WARNING`으로 표시됩니다.
+- 재생 도중 영상 스트림이 끊기면 해당 답변의 남은 음성만 취소합니다. 다음 답변의
+  음성에는 영향을 주지 않으며, 통화 요약은 `VIDEO_STREAM_INTERRUPTED` 오류로 남습니다.
 
 ## 6. 테스트 때 볼 것
 
@@ -154,9 +160,13 @@ GPU `.env.ditto-service`에는 새로 추가할 값이 없습니다.
 ```env
 DITTO_CALL_DIAGNOSTIC_DIR=/tmp/mirror-soul-call-diagnostics
 DITTO_CALL_DIAGNOSTIC_MAX_FILES=20
+DITTO_CALL_DIAGNOSTIC_MAX_AGE_HOURS=24
+DITTO_CALL_DIAGNOSTIC_MAX_PENDING_TASKS=2
 ```
 
 - 기본값은 비활성화입니다. 경로를 설정한 테스트에서만 동작합니다.
+- 파일은 기본 24시간이 지나면 정리되고 최대 20개만 유지합니다.
+- MP4 인코딩은 동시에 최대 2개만 실행해 통화 서버 자원이 쌓이지 않게 합니다.
 - 발신자의 마이크 음성은 저장하지 않고 클론 답변만 저장합니다.
 - 실시간 송출이 끝난 뒤 별도 작업으로 합치므로 답변 재생을 기다리게 하지 않습니다.
 - 통화 음성과 얼굴 영상이 들어 있으므로 테스트 후 파일을 삭제하고 외부에 공개하지 않습니다.
@@ -168,3 +178,34 @@ DITTO_CALL_DIAGNOSTIC_MAX_FILES=20
 - **무음 입력 결과는 실측 필요**: Ditto가 무음에서 만드는 움직임의 양은 실제 렌더로 확인해야 합니다. 너무 정적이거나 입이 움직이면 6절 표대로 조정합니다.
 - **답변 대기 시간 자체는 그대로**: 이 변경은 화면의 자연스러움을 개선하는 것이고, 답변을 받기까지 걸리는 시간(STT → LLM → TTS → Ditto)은 줄이지 않습니다. 대기 중에 듣는 모습이 자연스러워져 기다림이 덜 어색해지는 효과만 있습니다.
 - **다음 후보**: Ditto `online_mode` 청크 렌더로 답변 영상을 생성되는 대로 송출하면 첫 반응 시간을 줄일 수 있습니다. 구조 변경이 커서 이번 테스트 결과를 보고 결정합니다.
+
+## 8. 워커 2개 동시 스트리밍 점검
+
+프론트와 백엔드 없이 GPU 서버 안에서 두 Ditto 워커를 동시에 확인할 수 있습니다.
+`--urls`에는 실제 워커 주소 두 개를 넣고, 동일한 초상화·음성·프로필을 사용합니다.
+
+```bash
+cd /shareHost/C084003-ai/Mirror_Soul_AI
+set -a
+source /shareHost/C084003-ai/.env.ditto-service
+set +a
+/shareHost/C084003-ditto/conda-env/bin/python tools/gpu/benchmark-ditto-workers.py \
+  --mode stream \
+  --urls http://127.0.0.1:8080,http://127.0.0.1:8081 \
+  --portrait /path/to/portrait.jpg \
+  --audio /path/to/reply.wav \
+  --profile /path/to/face-profile.json
+```
+
+결과의 `quality`, `firstFrameMs`, `generationFps`, `realtimeFactor`,
+`streamMbps`를 확인합니다. `PASS`가 정상이고, `WARNING`은 조정 대상이며,
+`FAIL`이면 종료 코드 2를 반환합니다. 느린 소비자나 터널 정체를 흉내 내려면
+`--consumer-delay-ms 10`을 추가합니다.
+
+기본 판정 기준은 다음과 같습니다.
+
+| 판정 | 첫 프레임 | 생성 속도 |
+| --- | --- | --- |
+| `PASS` | 1.5초 미만 | 24fps 이상 |
+| `WARNING` | 1.5~3초 | 20~24fps |
+| `FAIL` | 3초 이상 | 20fps 미만 |

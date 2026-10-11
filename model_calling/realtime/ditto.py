@@ -846,6 +846,8 @@ class DittoVideoSession:
         profile_loader: FaceProfileLoader,
         call_id: int | None = None,
         idle_loop: DittoIdleLoopConfig | None = None,
+        stream_failure_callback: Callable[[int | None, BaseException], None]
+        | None = None,
     ) -> None:
         self.idle_loop = idle_loop or DittoIdleLoopConfig()
         self.user_id = user_id
@@ -854,9 +856,11 @@ class DittoVideoSession:
         self.client = client
         self.profile_loader = profile_loader
         self.call_id = call_id
+        self.stream_failure_callback = stream_failure_callback
         self._profile: FaceRenderProfile | None = None
         self._profile_lock = asyncio.Lock()
         self._stream_tasks: set[asyncio.Task] = set()
+        self._failed_stream_turns: set[int | None] = set()
 
     async def prepare(self) -> None:
         if self._profile is not None:
@@ -1061,6 +1065,12 @@ class DittoVideoSession:
                 f"sampling_timesteps={self.client.config.stream_sampling_timesteps}",
                 flush=True,
             )
+            # If production already ended, surface its result now. A failure
+            # before audio is queued can still use the MP4 fallback. Only a
+            # stream that remains active is handed off to the background
+            # failure callback below.
+            if task.done():
+                task.result()
         except BaseException:
             fail(stream_id)
             if not task.done():
@@ -1071,19 +1081,38 @@ class DittoVideoSession:
             if task.done():
                 self._stream_tasks.discard(task)
             else:
-                task.add_done_callback(self._stream_task_done)
+                task.add_done_callback(
+                    lambda completed, active_turn=turn_id: self._stream_task_done(
+                        completed,
+                        active_turn,
+                    )
+                )
 
-    def _stream_task_done(self, task: asyncio.Task) -> None:
+    def _stream_task_done(
+        self,
+        task: asyncio.Task,
+        turn_id: int | None = None,
+    ) -> None:
         self._stream_tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()
         if error is not None:
+            self._failed_stream_turns.add(turn_id)
             print(
                 "[DITTO_CALL] active frame stream ended with an error: "
-                f"{trace_fields(self.call_id)} error={error!r}",
+                f"{trace_fields(self.call_id, turn_id)} error={error!r}",
                 flush=True,
             )
+            if self.stream_failure_callback is not None:
+                self.stream_failure_callback(turn_id, error)
+
+    def consume_stream_failure(self, turn_id: int | None) -> bool:
+        """Return and clear a failure recorded before reply audio was queued."""
+        if turn_id not in self._failed_stream_turns:
+            return False
+        self._failed_stream_turns.remove(turn_id)
+        return True
 
     async def close(self) -> None:
         tasks = tuple(self._stream_tasks)
@@ -1092,6 +1121,7 @@ class DittoVideoSession:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._stream_tasks.clear()
+        self._failed_stream_turns.clear()
 
 
 def create_ditto_video_session(
@@ -1100,6 +1130,8 @@ def create_ditto_video_session(
     user_id: str,
     clone_id: int,
     track: "QueuedVideoTrack",
+    stream_failure_callback: Callable[[int | None, BaseException], None]
+    | None = None,
 ) -> DittoVideoSession | None:
     config = DittoCallConfig.from_env()
     if config is None:
@@ -1117,6 +1149,7 @@ def create_ditto_video_session(
         profile_loader=FaceProfileLoader(),
         call_id=call_id,
         idle_loop=config.idle_loop,
+        stream_failure_callback=stream_failure_callback,
     )
 
 

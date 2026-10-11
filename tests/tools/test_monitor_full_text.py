@@ -153,11 +153,51 @@ class CallStreamTests(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("2026-10-06 (이전 기록)", text)
         self.assertEqual(text.count("시그널링 서버 연결 끊김 (HTTP 502)"), 1)
-        self.assertIn("(같은 내용 3줄 더 반복)", text)
-        self.assertIn("시그널링 서버 연결됨", text)
+        self.assertIn("(같은 내용 1줄 더 반복)", text)
+        self.assertIn("시그널링 재연결 완료", text)
+        self.assertNotIn("시그널링 서버에 연결 중", text)
+        self.assertNotIn("AI 서버 입장 요청 보냄", text)
         self.assertIn("앱의 연결 정보(SDP offer) 받음", text)
         self.assertNotIn("rtpmap", text)
-        self.assertIn("여기부터 실시간 로그", text)
+        self.assertIn("실시간", text)
+        self.assertIn("통화 요청 대기 중", text)
+
+    def test_healthy_signaling_handshake_is_hidden(self) -> None:
+        formatter = CallLogFormatter(color=False, width=90)
+        lines = []
+        for raw in (
+            "[SIGNALING] connecting...",
+            "[SIGNALING] connected",
+            "[SIGNALING] JOIN sent",
+            "[SIGNALING] received: {'type': 'JOINED'}",
+            "__MIRROR_SOUL_LIVE__",
+        ):
+            lines += formatter.format(raw)
+
+        text = "\n".join(lines)
+        self.assertNotIn("시그널링 서버", text)
+        self.assertNotIn("입장 요청", text)
+        self.assertIn("최근 통화 없음", text)
+        self.assertIn("통화 요청 대기 중", text)
+
+    def test_stream_quality_events_are_summarized(self) -> None:
+        from tools.call_event_text import WARN, describe
+
+        generated = describe(
+            "[DITTO_CALL] frame stream completed: callId=7 turn=2 worker=1/2 "
+            "frames=125 first_frame_ms=842 elapsed_ms=4870 avg_frame_kb=41.2 "
+            "realtime_mbps=8.2"
+        )
+        degraded = describe(
+            "[VIDEO_OUT] Ditto frame stream completed: stream_id=3 frames=120 "
+            "dropped=4 stalled=2 max_lag_ms=240"
+        )
+
+        self.assertIn("첫 프레임 0.8초", generated.text)
+        self.assertIn("전송량 8.2Mbps", generated.text)
+        self.assertIn("동기화 주의", degraded.text)
+        self.assertIn("건너뜀 4", degraded.text)
+        self.assertEqual(degraded.style, WARN)
 
     def test_remote_command_drops_frame_noise(self) -> None:
         command = remote_command(60, 2000)

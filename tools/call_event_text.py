@@ -92,6 +92,20 @@ def _duration(ms: str | None) -> str:
     return f"{minutes}분 {seconds}초" if minutes else f"{seconds}초"
 
 
+def _integer(value: str | None) -> int:
+    try:
+        return int(value or 0)
+    except ValueError:
+        return 0
+
+
+def _decimal(value: str | None) -> float:
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+
 def _short_user(value: str | None) -> str:
     return f"{value[:8]}…" if value and len(value) > 8 else (value or "-")
 
@@ -248,6 +262,31 @@ def describe(message: str) -> EventText | None:
             )
         if "render completed" in message:
             return EventText("VIDEO", f"Ditto 렌더 완료 ({float(f.get('seconds', 0)):.1f}초 걸림)", OK)
+        if "frame stream ready for playback" in message:
+            return EventText(
+                "VIDEO",
+                f"답변 영상 재생 준비 완료 (초기 버퍼 {f.get('buffered_frames', '-')}프레임)",
+                RUN,
+            )
+        if "frame stream completed" in message:
+            first_frame_ms = _integer(f.get("first_frame_ms"))
+            elapsed_ms = _integer(f.get("elapsed_ms"))
+            realtime_mbps = _decimal(f.get("realtime_mbps"))
+            style = FAIL if first_frame_ms >= 3000 else WARN if first_frame_ms >= 1500 else OK
+            return EventText(
+                "VIDEO",
+                "영상 스트림 생성 완료: "
+                f"첫 프레임 {_seconds(f.get('first_frame_ms'))}, "
+                f"총 {_seconds(f.get('elapsed_ms'))}, "
+                f"{f.get('frames', '-')}프레임, 전송량 {realtime_mbps:.1f}Mbps"
+                + (" (첫 화면이 많이 늦음)" if style == FAIL else " (첫 화면이 늦음)" if style == WARN else ""),
+                style,
+            )
+        if "active frame stream ended with an error" in message:
+            return EventText("VIDEO", "답변 영상 스트림이 재생 도중 중단됨", FAIL)
+        if "frame stream failed" in message:
+            fallback = "MP4 방식으로 다시 시도" if f.get("fallback") == "True" else "대체 재생 없음"
+            return EventText("VIDEO", f"영상 스트리밍 실패 ({fallback})", WARN)
         if "retrying render" in message:
             return EventText("VIDEO", f"Ditto 렌더 재시도 ({f.get('attempt', '-')}번째)", WARN)
         return None
@@ -268,6 +307,25 @@ def describe(message: str) -> EventText | None:
             return EventText("VIDEO", "답변 영상 재생 오류, 대기 화면으로 돌아감", FAIL)
         if "idle loop video failed" in message:
             return EventText("VIDEO", "대기 영상 재생 오류, 정지 사진으로 전환", WARN)
+        if "stream behind audio" in message:
+            return EventText(
+                "SYNC",
+                f"입 모양이 음성보다 {_integer(f.get('lag_ms'))}ms 늦어 "
+                f"{f.get('skipped', '-')}프레임 건너뜀",
+                WARN,
+            )
+        if "Ditto frame stream completed" in message:
+            dropped = _integer(f.get("dropped"))
+            stalled = _integer(f.get("stalled"))
+            max_lag_ms = _integer(f.get("max_lag_ms"))
+            degraded = dropped > 0 or stalled > 0 or max_lag_ms > 120
+            style = WARN if degraded else OK
+            text = (
+                "음성·입 모양 동기화 "
+                f"{'주의' if degraded else '정상'}: 재생 {f.get('frames', '-')}프레임, "
+                f"건너뜀 {dropped}, 멈춤 {stalled}, 최대 지연 {max_lag_ms}ms"
+            )
+            return EventText("SYNC", text, style)
         # queued/idle-ready lines repeat the [DITTO_CALL]/[REALTIME] ones.
         return EventText("", "", "")
 
@@ -321,7 +379,15 @@ def describe(message: str) -> EventText | None:
         if "Ditto reply render failed" in message:
             return EventText("VIDEO", f"Ditto 답변 영상 실패 ({f.get('error_code', '-')})", FAIL)
         if "reply audio suppressed" in message:
+            if "stream ended early" in message:
+                return EventText("CALL", "영상 스트림이 일찍 중단되어 답변 음성을 내보내지 않음", FAIL)
             return EventText("CALL", "영상이 준비되지 않아 답변을 내보내지 않음", FAIL)
+        if "reply audio cancelled after video stream failure" in message:
+            return EventText(
+                "CALL",
+                "영상 스트림이 중단되어 해당 답변의 남은 음성도 중단",
+                FAIL,
+            )
         if "reply audio queued" in message:
             return EventText("CALL", "답변 재생 시작", OK)
         if "conversation context updated" in message:

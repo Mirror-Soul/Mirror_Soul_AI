@@ -102,6 +102,7 @@ class CallSnapshot:
     tts: Stage = field(default_factory=Stage)
     video: Stage = field(default_factory=Stage)
     idle: Stage = field(default_factory=Stage)
+    stream_quality: Stage = field(default_factory=Stage)
     trace_summary: str = "아직 완료된 대화 없음"
     recent_call_summaries: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
@@ -279,6 +280,39 @@ def parse_call_logs(logs: str) -> CallSnapshot:
             )
         if "ditto reply render started" in lowered:
             snapshot.video = Stage("PROCESSING", "Ditto 답변 영상 렌더 중")
+        if "frame stream ready for playback" in lowered:
+            snapshot.video = Stage("PROCESSING", "첫 영상 프레임 준비, 재생 시작")
+        if "[ditto_call] frame stream completed" in lowered:
+            first_frame = _last_value(re.compile(r"\bfirst_frame_ms=(\d+)"), [line])
+            elapsed = _last_value(re.compile(r"\belapsed_ms=(\d+)"), [line])
+            mbps = _last_value(re.compile(r"\brealtime_mbps=([0-9.]+)"), [line])
+            try:
+                first_frame_value = int(first_frame)
+            except ValueError:
+                first_frame_value = 0
+            status = "FAILED" if first_frame_value >= 3000 else "WARNING" if first_frame_value >= 1500 else "COMPLETED"
+            snapshot.video = Stage(
+                status,
+                f"첫 프레임 {first_frame}ms, 전체 생성 {elapsed}ms, 전송량 {mbps}Mbps",
+            )
+        if "[video_out] ditto frame stream completed" in lowered:
+            values = dict(re.findall(r"\b([a-z_]+)=([^\s,]+)", line))
+            dropped = int(values.get("dropped", "0"))
+            stalled = int(values.get("stalled", "0"))
+            max_lag = int(values.get("max_lag_ms", "0"))
+            degraded = dropped > 0 or stalled > 0 or max_lag > 120
+            snapshot.stream_quality = Stage(
+                "WARNING" if degraded else "COMPLETED",
+                f"건너뜀 {dropped}, 멈춤 {stalled}, 최대 지연 {max_lag}ms",
+            )
+        if "stream behind audio" in lowered:
+            snapshot.stream_quality = Stage("WARNING", "입 모양 지연을 줄이기 위해 늦은 프레임 건너뜀")
+        if "active frame stream ended with an error" in lowered:
+            snapshot.video = Stage("FAILED", "답변 영상 스트림이 재생 도중 중단됨")
+            snapshot.stream_quality = Stage("FAILED", line)
+        if "reply audio cancelled after video stream failure" in lowered:
+            snapshot.video = Stage("FAILED", "영상 중단으로 해당 답변 음성도 안전하게 중단")
+            snapshot.stream_quality = Stage("FAILED", "음성만 재생되는 상황을 차단함")
         if "[ditto_call] render completed" in lowered:
             snapshot.video = Stage("COMPLETED", line)
         if "ditto reply video queued" in lowered:
@@ -549,6 +583,7 @@ def render(
         _stage_line("TTS", snapshot.tts, color),
         _stage_line("VIDEO", snapshot.video, color),
         _stage_line("IDLE", snapshot.idle, color),
+        _stage_line("SYNC", snapshot.stream_quality, color),
         "",
         section("최근 대화 소요 시간 (LATEST TURN)", color, width),
         _tagged_event_line(snapshot.trace_summary, color, width)
@@ -581,7 +616,7 @@ def render(
         _paint(
             "색상: 초록=완료  청록=진행 중  노랑=주의  빨강=실패  회색=대기"
             "   |  종료: Ctrl+C\n"
-            "전체 대화 기록 보기: tools\\monitor-call-events.cmd --color always",
+            "통화 로그 보기: tools\\monitor-call-events.cmd --color always",
             ANSI_DIM,
             color,
         ),
