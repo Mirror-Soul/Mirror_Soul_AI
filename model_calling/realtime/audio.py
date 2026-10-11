@@ -68,12 +68,18 @@ class QueuedAudioTiming:
     duration_seconds: float
 
 
+@dataclass
+class _QueuedAudioSegment:
+    turn_id: int | None
+    pcm: bytearray
+
+
 class QueuedAudioTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self) -> None:
         super().__init__()
-        self._pcm = bytearray()
+        self._segments: deque[_QueuedAudioSegment] = deque()
         self._pts = 0
         self._started_at: float | None = None
         self._sent_audio_frames = 0
@@ -82,11 +88,20 @@ class QueuedAudioTrack(MediaStreamTrack):
 
     @property
     def is_playing(self) -> bool:
-        return bool(self._pcm)
+        return bool(self._segments)
 
-    def enqueue_encoded_audio(self, audio_bytes: bytes) -> QueuedAudioTiming:
+    def _queued_bytes(self) -> int:
+        return sum(len(segment.pcm) for segment in self._segments)
+
+    def enqueue_encoded_audio(
+        self,
+        audio_bytes: bytes,
+        *,
+        turn_id: int | None = None,
+    ) -> QueuedAudioTiming:
         """Decode and queue audio; return when it starts and how long it plays."""
-        pcm_before = len(self._pcm)
+        pcm_before = self._queued_bytes()
+        decoded_pcm = bytearray()
         decoded_frames = 0
         resampled_frames = 0
         container = av.open(io.BytesIO(audio_bytes))
@@ -101,27 +116,46 @@ class QueuedAudioTrack(MediaStreamTrack):
                 decoded_frames += 1
                 for resampled in resampler.resample(frame):
                     resampled_frames += 1
-                    self._pcm.extend(resampled.to_ndarray().tobytes())
+                    decoded_pcm.extend(resampled.to_ndarray().tobytes())
 
             for resampled in resampler.resample(None):
                 resampled_frames += 1
-                self._pcm.extend(resampled.to_ndarray().tobytes())
+                decoded_pcm.extend(resampled.to_ndarray().tobytes())
         finally:
             container.close()
 
-        added_pcm = len(self._pcm) - pcm_before
+        added_pcm = len(decoded_pcm)
+        if decoded_pcm:
+            self._segments.append(
+                _QueuedAudioSegment(turn_id=turn_id, pcm=decoded_pcm)
+            )
+        pcm_total = pcm_before + added_pcm
         duration_seconds = added_pcm / (OUTPUT_SAMPLE_RATE * 2)
         print(
             "[AUDIO_OUT] queued encoded audio: "
             f"encoded_bytes={len(audio_bytes)} decoded_frames={decoded_frames} "
             f"resampled_frames={resampled_frames} pcm_added={added_pcm} "
-            f"pcm_total={len(self._pcm)} duration={duration_seconds:.2f}s",
+            f"pcm_total={pcm_total} duration={duration_seconds:.2f}s "
+            f"turn={turn_id if turn_id is not None else 'unknown'}",
             flush=True,
         )
         return QueuedAudioTiming(
             start_delay_seconds=pcm_before / (OUTPUT_SAMPLE_RATE * 2),
             duration_seconds=duration_seconds,
         )
+
+    def cancel_turn(self, turn_id: int | None) -> int:
+        """Remove the unplayed audio for one failed reply and return its bytes."""
+        kept: deque[_QueuedAudioSegment] = deque()
+        removed = 0
+        while self._segments:
+            segment = self._segments.popleft()
+            if segment.turn_id == turn_id:
+                removed += len(segment.pcm)
+            else:
+                kept.append(segment)
+        self._segments = kept
+        return removed
 
     async def recv(self) -> av.AudioFrame:
         if self._started_at is None:
@@ -131,20 +165,32 @@ class QueuedAudioTrack(MediaStreamTrack):
             await asyncio.sleep(max(0.0, target_time - time.monotonic()))
 
         byte_count = OUTPUT_SAMPLES_PER_FRAME * 2
-        if len(self._pcm) >= byte_count:
-            pcm = bytes(self._pcm[:byte_count])
-            del self._pcm[:byte_count]
+        queued_bytes = self._queued_bytes()
+        if queued_bytes >= byte_count:
+            pcm_parts: list[bytes] = []
+            remaining = byte_count
+            while remaining > 0 and self._segments:
+                segment = self._segments[0]
+                take = min(remaining, len(segment.pcm))
+                pcm_parts.append(bytes(segment.pcm[:take]))
+                del segment.pcm[:take]
+                remaining -= take
+                if not segment.pcm:
+                    self._segments.popleft()
+            pcm = b"".join(pcm_parts)
             self._sent_audio_frames += 1
             if self._sent_audio_frames == 1 or self._sent_audio_frames % 50 == 0:
                 print(
                     "[AUDIO_OUT] sending audio frame: "
-                    f"frames={self._sent_audio_frames} remaining_pcm={len(self._pcm)}",
+                    f"frames={self._sent_audio_frames} "
+                    f"remaining_pcm={self._queued_bytes()}",
                     flush=True,
                 )
-        elif self._pcm:
-            remaining_bytes = len(self._pcm)
-            pcm = bytes(self._pcm) + bytes(byte_count - remaining_bytes)
-            self._pcm.clear()
+        elif self._segments:
+            remaining_bytes = queued_bytes
+            pcm = b"".join(bytes(segment.pcm) for segment in self._segments)
+            pcm += bytes(byte_count - remaining_bytes)
+            self._segments.clear()
             self._sent_audio_frames += 1
             print(
                 "[AUDIO_OUT] sending final padded audio frame: "

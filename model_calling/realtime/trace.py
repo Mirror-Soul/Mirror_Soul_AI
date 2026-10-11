@@ -17,6 +17,7 @@ class CallTrace:
     turns_skipped: int = 0
     last_error: str | None = None
     _active_turns: set[int] = field(default_factory=set, repr=False)
+    _completed_turns: set[int] = field(default_factory=set, repr=False)
     _closed: bool = field(default=False, repr=False)
 
     def start_turn(self) -> int:
@@ -38,11 +39,25 @@ class CallTrace:
         normalized = status.upper()
         if normalized == "COMPLETED":
             self.turns_completed += 1
+            self._completed_turns.add(turn_id)
         elif normalized == "SKIPPED":
             self.turns_skipped += 1
         else:
             self.turns_failed += 1
             self.last_error = error
+
+    def fail_turn(self, turn_id: int, *, error: str) -> bool:
+        """Fail an active turn or reclassify a completed turn after output loss."""
+        if turn_id in self._active_turns:
+            self.finish_turn(turn_id, "FAILED", error=error)
+            return True
+        if turn_id not in self._completed_turns:
+            return False
+        self._completed_turns.remove(turn_id)
+        self.turns_completed = max(0, self.turns_completed - 1)
+        self.turns_failed += 1
+        self.last_error = error
+        return True
 
     def close(self, *, reason: str) -> None:
         if self._closed:
@@ -50,6 +65,7 @@ class CallTrace:
         self._closed = True
         cancelled = len(self._active_turns)
         self._active_turns.clear()
+        self._completed_turns.clear()
         duration_ms = round((time.monotonic() - self.started_at) * 1000)
         failed_close = "FAILED" in reason.upper() or "ERROR" in reason.upper()
         status = (

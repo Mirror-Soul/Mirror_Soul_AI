@@ -77,6 +77,11 @@ TURN = re.compile(r"\bturn=(\d+)")
 SPOKEN = re.compile(r"elapsed_ms=(\d+):\s?(?P<text>.*)$")
 
 
+def _received_signal_type(message: str) -> str | None:
+    match = re.search(r"['\"]type['\"]:\s*['\"]([A-Z_]+)['\"]", message)
+    return match.group(1) if match else None
+
+
 def remote_command(history_minutes: int, scan_lines: int) -> str:
     """Recent history (if any), a live marker, then the live tail."""
     unit = "journalctl -u mirror-soul-call.service"
@@ -148,6 +153,7 @@ class CallLogFormatter:
         self._suppressed = 0
         self._history_lines = 0
         self._live = False
+        self._signaling_problem = False
 
     def _width(self) -> int:
         return self.width or terminal_width()
@@ -186,8 +192,13 @@ class CallLogFormatter:
         self._live = True
         lines = self._reset_repeats()
         if self._history_lines == 0:
-            lines.append(_paint("(최근 기록 없음)", ANSI_DIM, self.color))
-        return lines + [""] + self._rule("여기부터 실시간 로그", "#", ANSI_BOLD + ANSI_BRIGHT_CYAN)
+            lines.append(_paint("최근 통화 없음", ANSI_DIM, self.color))
+        return (
+            lines
+            + [""]
+            + self._rule("실시간", "#", ANSI_BOLD + ANSI_BRIGHT_CYAN)
+            + [_paint("통화 요청 대기 중", ANSI_DIM, self.color)]
+        )
 
     def format(self, raw: str) -> list[str]:
         if raw.strip() == LIVE_MARKER:
@@ -196,6 +207,34 @@ class CallLogFormatter:
         message = message.strip()
         if not message:
             return []
+
+        # A healthy service prints four signaling handshake lines on every
+        # restart. They obscure actual calls, so keep only failures and the
+        # recovery that follows a failure.
+        if message.startswith("[SIGNALING]"):
+            if "disconnected:" in message:
+                self._signaling_problem = True
+            elif (
+                "reconnecting in" in message
+                or "connecting..." in message
+                or "JOIN sent" in message
+                or _received_signal_type(message) == "JOINED"
+            ):
+                return []
+            elif message.rstrip().endswith("connected"):
+                if not self._signaling_problem:
+                    return []
+                self._signaling_problem = False
+                moment = moment or datetime.now()
+                if not self._live:
+                    self._history_lines += 1
+                return self._flush_repeats() + self._line(
+                    moment.strftime("%H:%M:%S"),
+                    "SIGNAL",
+                    "시그널링 재연결 완료",
+                    ANSI_GREEN,
+                )
+
         if not self._live:
             self._history_lines += 1
         moment = moment or datetime.now()
@@ -279,6 +318,20 @@ def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+def quit_requested() -> bool:
+    """Return immediately when Q is pressed in a Windows terminal."""
+    if os.name != "nt":
+        return False
+    import msvcrt
+
+    requested = False
+    while msvcrt.kbhit():
+        key = msvcrt.getwch()
+        if key.lower() == "q":
+            requested = True
+    return requested
+
+
 def build_parser() -> argparse.ArgumentParser:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
@@ -346,18 +399,23 @@ def main() -> int:
 
     emit(
         [
-            _paint("MIRROR SOUL - 통화 전체 로그", ANSI_BOLD + ANSI_BRIGHT_CYAN, color),
-            "모든 통화의 대화와 처리 과정을 잘리지 않게 이어서 보여 줍니다. 위로 스크롤하면 지난 내용을 볼 수 있습니다.",
-            f"최근 {args.history_minutes}분 기록을 먼저 보여 준 뒤 실시간 로그가 이어집니다. 종료: Ctrl+C",
-            _paint(f"저장 위치: {save_file.name}", ANSI_DIM, color) if save_file else "파일 저장 안 함 (--no-save)",
+            _paint("MIRROR SOUL - 통화 로그", ANSI_BOLD + ANSI_BRIGHT_CYAN, color),
+            (
+                _paint(f"저장: {save_file.name}", ANSI_DIM, color)
+                if save_file
+                else _paint("저장 안 함", ANSI_DIM, color)
+            )
+            + _paint("  |  종료: Q", ANSI_DIM, color),
             "=" * min(terminal_width(), 110),
         ]
     )
     worker.start()
     try:
         while True:
+            if quit_requested():
+                break
             try:
-                source, line = events.get(timeout=1)
+                source, line = events.get(timeout=0.2)
             except queue.Empty:
                 continue
             if source == "SYSTEM":
@@ -374,7 +432,7 @@ def main() -> int:
         worker.terminate()
         if save_file is not None:
             save_file.close()
-    print("\n통화 전체 로그를 종료했습니다.")
+    print("\n통화 로그를 종료했습니다.")
     return 0
 
 

@@ -1,5 +1,8 @@
 @echo off
 setlocal
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 set "SCRIPT=%~dp0realtime_call_monitor.py"
 
 py -3 -c "import sys" >nul 2>nul

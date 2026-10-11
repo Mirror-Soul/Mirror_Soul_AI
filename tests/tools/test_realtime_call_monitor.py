@@ -30,6 +30,9 @@ class RealtimeCallMonitorTest(unittest.TestCase):
 [REALTIME] TTS start: user=user-1
 [REALTIME] TTS complete: user=user-1 audio_bytes=200
 [REALTIME] Ditto reply render started: user=user-1
+[DITTO_CALL] frame stream ready for playback: callId=31 turn=1 stream_id=1 buffered_frames=8
+[DITTO_CALL] frame stream completed: callId=31 turn=1 worker=1/2 frames=80 first_frame_ms=720 elapsed_ms=3000 avg_frame_kb=40.0 realtime_mbps=8.0
+[VIDEO_OUT] Ditto frame stream completed: stream_id=1 frames=80 dropped=0 stalled=0 max_lag_ms=80
 [DITTO_CALL] render completed: bytes=300 seconds=2.5
 [REALTIME] Ditto reply video queued: user=user-1
 [CALL_TRACE] turn completed: callId=31 turn=1 user=user-1 media_type=VIDEO total_ms=1250 stt_ms=100 context_ms=50 rag_ms=80 llm_ms=500 tts_ms=200 video_ms=320
@@ -49,6 +52,8 @@ class RealtimeCallMonitorTest(unittest.TestCase):
         self.assertEqual(snapshot.llm.status, "COMPLETED")
         self.assertEqual(snapshot.tts.status, "COMPLETED")
         self.assertEqual(snapshot.video.status, "COMPLETED")
+        self.assertEqual(snapshot.stream_quality.status, "COMPLETED")
+        self.assertIn("최대 지연 80ms", snapshot.stream_quality.detail)
         self.assertIn("turn completed", snapshot.trace_summary)
         self.assertEqual(len(snapshot.recent_call_summaries), 1)
 

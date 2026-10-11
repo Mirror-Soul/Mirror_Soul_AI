@@ -11,6 +11,7 @@ import numpy as np
 from model_calling.realtime.diagnostics import (
     ReplyVideoDiagnosticCapture,
     ReplyVideoDiagnosticConfig,
+    _prune_diagnostics,
     _write_reply_video,
 )
 
@@ -131,6 +132,30 @@ class ReplyVideoDiagnosticTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             config = ReplyVideoDiagnosticConfig.from_env()
         self.assertIsNone(config.output_dir)
+
+    def test_prune_removes_expired_and_excess_files(self) -> None:
+        Path("tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=Path("tmp")) as directory:
+            output_dir = Path(directory)
+            old = output_dir / "call-1-turn-1-old.mp4"
+            recent = [
+                output_dir / f"call-1-turn-{index}-recent.mp4"
+                for index in range(2, 5)
+            ]
+            old.write_bytes(b"old")
+            for index, path in enumerate(recent):
+                path.write_bytes(b"recent")
+                os.utime(path, (1_000 + index, 1_000 + index))
+            os.utime(old, (1, 1))
+
+            with patch(
+                "model_calling.realtime.diagnostics.time.time",
+                return_value=2_000,
+            ):
+                _prune_diagnostics(output_dir, max_files=2, max_age_hours=0.5)
+
+            self.assertFalse(old.exists())
+            self.assertEqual(len(list(output_dir.glob("*.mp4"))), 2)
 
 
 if __name__ == "__main__":

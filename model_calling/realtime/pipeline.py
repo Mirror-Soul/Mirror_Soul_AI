@@ -736,10 +736,32 @@ async def start_realtime_audio(
                             flush=True,
                         )
                         continue
+                    stream_failed = getattr(
+                        video_renderer,
+                        "consume_stream_failure",
+                        None,
+                    )
+                    if stream_failed is not None and stream_failed(turn_id):
+                        error = "VIDEO_STREAM_FAILED_BEFORE_AUDIO"
+                        print(
+                            "[REALTIME] reply audio suppressed because video "
+                            f"stream ended early: {fields} user={user_id}",
+                            flush=True,
+                        )
+                        trace.finish_turn(turn_id, "FAILED", error=error)
+                        print(
+                            f"[CALL_TRACE] turn failed: {fields} user={user_id} "
+                            f"stage=VIDEO total_ms={_elapsed_ms(reply.started_at)} "
+                            f"{_timing_fields(reply.stage_timings_ms)} "
+                            f"error={error}",
+                            flush=True,
+                        )
+                        continue
                     stage = "OUTPUT"
                     reply_queued_at = utc_now()
                     audio_timing = output_track.enqueue_encoded_audio(
-                        reply.audio_bytes
+                        reply.audio_bytes,
+                        turn_id=turn_id,
                     )
                     if video_renderer is not None:
                         synchronize_video = getattr(

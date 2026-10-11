@@ -225,11 +225,34 @@ async def create_answer_from_offer(
             )
             pc.addTrack(output_video_track)
             try:
+                def cancel_failed_reply_audio(
+                    turn_id: int | None,
+                    error: BaseException,
+                ) -> None:
+                    removed = output_track.cancel_turn(turn_id)
+                    active_session = get_session(call_id)
+                    reclassified = False
+                    if active_session is not None and turn_id is not None:
+                        reclassified = active_session.trace.fail_turn(
+                            turn_id,
+                            error="VIDEO_STREAM_INTERRUPTED",
+                        )
+                    print(
+                        "[REALTIME] reply audio cancelled after video stream failure: "
+                        f"callId={call_id} "
+                        f"turn={turn_id if turn_id is not None else 'unknown'} "
+                        f"removed_bytes={removed} "
+                        f"trace_reclassified={str(reclassified).lower()} "
+                        f"error={error!r}",
+                        flush=True,
+                    )
+
                 video_renderer = create_ditto_video_session(
                     call_id=call_id,
                     user_id=clone_user_uuid,
                     clone_id=clone_id,
                     track=output_video_track,
+                    stream_failure_callback=cancel_failed_reply_audio,
                 )
             except DittoRealtimeError as exc:
                 print(
