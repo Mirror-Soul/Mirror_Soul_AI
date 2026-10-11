@@ -2,11 +2,13 @@ import asyncio
 import io
 import unittest
 from fractions import Fraction
+from unittest.mock import patch
 
 import av
 import numpy as np
 
 from model_calling.realtime.video import QueuedVideoTrack
+from model_calling.realtime import video as video_module
 
 
 def _encoded_video() -> bytes:
@@ -146,6 +148,67 @@ class QueuedVideoTrackTests(unittest.TestCase):
         self.assertEqual(first.shape, (32, 32, 3))
         self.assertEqual(second.shape, (32, 32, 3))
         self.assertFalse(np.array_equal(first, second))
+
+
+class _Clock:
+    def __init__(self, now: float = 100.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class StreamCatchUpTests(unittest.TestCase):
+    def _track(
+        self,
+        *,
+        frames: int = 12,
+        max_lag: int = 3,
+        max_catch_up: int = 1,
+    ) -> tuple[QueuedVideoTrack, _Clock]:
+        clock = _Clock()
+        encoded = _encoded_video()
+
+        async def setup() -> QueuedVideoTrack:
+            track = QueuedVideoTrack(
+                width=32,
+                height=32,
+                fps=25,
+                stream_buffer_max_frames=50,
+                stream_max_lag_frames=max_lag,
+                stream_max_catch_up_frames=max_catch_up,
+            )
+            track.set_idle_image(encoded)
+            stream_id = track.begin_frame_stream()
+            for _ in range(frames):
+                await track.enqueue_stream_frame(stream_id, encoded)
+            track.activate_frame_stream(stream_id)
+            track.synchronize_frame_stream()
+            return track
+
+        with patch.object(video_module.time, "monotonic", clock):
+            track = asyncio.run(setup())
+        return track, clock
+
+    def _pull(self, track: QueuedVideoTrack, clock: _Clock, at: float):
+        clock.now = at
+        with patch.object(video_module.time, "monotonic", clock):
+            return track._next_stream_frame()
+
+    def test_four_frame_lag_drops_only_one_excess_frame(self) -> None:
+        track, clock = self._track(max_lag=3, max_catch_up=4)
+        self._pull(track, clock, 100.00)
+        self._pull(track, clock, 100.16)
+        self.assertEqual(track._stream_dropped, 0)
+
+        self._pull(track, clock, 100.25)
+        self.assertEqual(track._stream_dropped, 1)
+
+    def test_large_lag_is_limited_per_output_tick(self) -> None:
+        track, clock = self._track(max_lag=3, max_catch_up=2)
+        self._pull(track, clock, 100.00)
+        self._pull(track, clock, 100.40)
+        self.assertEqual(track._stream_dropped, 2)
 
 
 if __name__ == "__main__":

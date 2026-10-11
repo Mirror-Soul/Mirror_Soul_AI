@@ -296,7 +296,7 @@ class _Clock:
 
 
 class LipSyncCatchUpTests(unittest.TestCase):
-    def _track(self, frames, max_lag=3):
+    def _track(self, frames, max_lag=3, max_catch_up=1):
         clock = _Clock()
         frame = _encoded_video()
 
@@ -304,6 +304,7 @@ class LipSyncCatchUpTests(unittest.TestCase):
             track = QueuedVideoTrack(
                 width=32, height=32, fps=25,
                 stream_buffer_max_frames=50, stream_max_lag_frames=max_lag,
+                stream_max_catch_up_frames=max_catch_up,
             )
             track.set_idle_image(frame)
             stream_id = track.begin_frame_stream()
@@ -328,16 +329,34 @@ class LipSyncCatchUpTests(unittest.TestCase):
             self.assertIsNotNone(self._pull(track, clock, 100.0 + index * 0.04))
         self.assertEqual(track._stream_dropped, 0)
 
-    def test_late_frames_are_skipped_to_catch_up_with_audio(self):
+    def test_large_lag_is_recovered_gradually(self):
         track, clock = self._track(frames=10)
         self._pull(track, clock, 100.00)
         self._pull(track, clock, 100.04)
-        # GPU stalled: one second later frame 25 should be on screen, but
-        # only frames 2..9 exist. Show the newest instead of frame 2.
+        # A large GPU stall must not jump straight to the newest mouth frame.
         self.assertIsNotNone(self._pull(track, clock, 101.00))
-        self.assertEqual(track._stream_dropped, 7)
-        self.assertEqual(track._stream_consumed, 10)
+        self.assertEqual(track._stream_dropped, 1)
+        self.assertEqual(track._stream_consumed, 4)
         self.assertEqual(track._stream_max_lag, 23)
+
+    def test_only_lag_beyond_tolerance_is_dropped(self):
+        track, clock = self._track(frames=10, max_lag=3, max_catch_up=4)
+        self._pull(track, clock, 100.00)
+        # Expected frame index is 4 while one frame was consumed: lag=3,
+        # which is still inside the configured tolerance.
+        self._pull(track, clock, 100.16)
+        self.assertEqual(track._stream_dropped, 0)
+
+        # At 250 ms the expected index is 6 while two frames were consumed:
+        # lag=4, so only the single excess frame is dropped.
+        self._pull(track, clock, 100.25)
+        self.assertEqual(track._stream_dropped, 1)
+
+    def test_catch_up_per_tick_is_bounded(self):
+        track, clock = self._track(frames=12, max_lag=3, max_catch_up=2)
+        self._pull(track, clock, 100.00)
+        self._pull(track, clock, 100.40)
+        self.assertEqual(track._stream_dropped, 2)
 
     def test_small_lag_is_tolerated(self):
         track, clock = self._track(frames=10)

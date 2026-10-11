@@ -204,6 +204,12 @@ async def create_answer_from_offer(
                 idle_motion_period_seconds=float(
                     os.getenv("REALTIME_IDLE_MOTION_PERIOD_SECONDS", "6.0")
                 ),
+                idle_loop_motion_scale=float(
+                    os.getenv("DITTO_CALL_IDLE_LOOP_MOTION_SCALE", "0.006")
+                ),
+                idle_loop_motion_period_seconds=float(
+                    os.getenv("DITTO_CALL_IDLE_LOOP_MOTION_PERIOD_SECONDS", "11.0")
+                ),
                 transition_frames=int(
                     os.getenv("REALTIME_VIDEO_TRANSITION_FRAMES", "6")
                 ),
@@ -212,6 +218,9 @@ async def create_answer_from_offer(
                 ),
                 stream_max_lag_frames=int(
                     os.getenv("DITTO_CALL_STREAM_MAX_LAG_FRAMES", "3")
+                ),
+                stream_max_catch_up_frames=int(
+                    os.getenv("DITTO_CALL_STREAM_MAX_CATCH_UP_FRAMES", "1")
                 ),
             )
             pc.addTrack(output_video_track)
