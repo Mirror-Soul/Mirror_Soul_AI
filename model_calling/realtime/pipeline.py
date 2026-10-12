@@ -770,7 +770,8 @@ async def start_realtime_audio(
                             None,
                         )
                         if synchronize_video is not None and synchronize_video(
-                            audio_timing.start_delay_seconds
+                            audio_timing.start_delay_seconds,
+                            turn_id=turn_id,
                         ):
                             print(
                                 "[REALTIME] reply video synchronized with audio: "

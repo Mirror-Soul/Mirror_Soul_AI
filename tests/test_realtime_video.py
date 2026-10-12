@@ -83,6 +83,29 @@ class QueuedVideoTrackTests(unittest.TestCase):
         self.assertEqual((first.width, first.height), (32, 32))
         self.assertEqual((second.width, second.height), (32, 32))
 
+    def test_failed_active_stream_returns_to_idle_and_allows_next_stream(self) -> None:
+        async def run():
+            track = QueuedVideoTrack(width=32, height=32, fps=1000)
+            frame = _encoded_video()
+            track.set_idle_image(frame)
+            failed_stream_id = track.begin_frame_stream()
+            await track.enqueue_stream_frame(failed_stream_id, frame)
+            track.activate_frame_stream(failed_stream_id)
+
+            track.fail_frame_stream(failed_stream_id)
+
+            idle = await track.recv()
+            next_stream_id = track.begin_frame_stream()
+            active_stream_id = track._stream_active_id
+            track.stop()
+            return active_stream_id, idle, next_stream_id
+
+        active_stream_id, idle, next_stream_id = asyncio.run(run())
+
+        self.assertIsNone(active_stream_id)
+        self.assertEqual((idle.width, idle.height), (32, 32))
+        self.assertGreater(next_stream_id, 1)
+
     def test_rejects_encoded_segment_without_decodable_frame(self) -> None:
         track = QueuedVideoTrack(width=32, height=32, fps=25)
 

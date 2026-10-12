@@ -291,19 +291,26 @@ class QueuedVideoTrack(MediaStreamTrack):
         )
         return count
 
-    def synchronize_frame_stream(self, start_delay_seconds: float = 0.0) -> bool:
+    def synchronize_frame_stream(
+        self,
+        start_delay_seconds: float = 0.0,
+        *,
+        stream_id: int | None = None,
+    ) -> bool:
         """Start the lip-sync clock at the matching audio playback time."""
         if not math.isfinite(start_delay_seconds) or start_delay_seconds < 0:
             raise QueuedVideoTrackError(
                 "Audio playback delay must be a finite non-negative number."
             )
-        stream_id = self._stream_active_id
-        if stream_id is None:
+        active_stream_id = self._stream_active_id
+        if active_stream_id is None:
+            return False
+        if stream_id is not None and stream_id != active_stream_id:
             return False
         self._stream_activated_at = time.monotonic() + start_delay_seconds
         print(
             "[VIDEO_OUT] Ditto frame stream synchronized with audio: "
-            f"stream_id={stream_id} "
+            f"stream_id={active_stream_id} "
             f"start_delay_ms={round(start_delay_seconds * 1000)}",
             flush=True,
         )
@@ -315,13 +322,19 @@ class QueuedVideoTrack(MediaStreamTrack):
             self._stream_ready.set()
 
     def fail_frame_stream(self, stream_id: int) -> None:
-        if stream_id == self._stream_pending_id:
+        if stream_id in {self._stream_pending_id, self._stream_active_id}:
             self._stream_frames = deque(
                 item for item in self._stream_frames if item[0] != stream_id
             )
+        if stream_id == self._stream_pending_id:
             self._stream_pending_id = None
         if stream_id == self._stream_active_id:
-            self._stream_finished = True
+            # Failure can happen after activation but before reply audio is
+            # queued. Release the active state immediately so the track returns
+            # to idle and the next reply can start.
+            self._stream_active_id = None
+            self._stream_activated_at = None
+            self._stream_finished = False
         self._stream_ready.set()
         self._stream_space.set()
 
