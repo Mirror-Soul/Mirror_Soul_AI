@@ -1,6 +1,15 @@
+import asyncio
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
+
+
+_default_client: httpx.AsyncClient | None = None
+_default_client_loop: asyncio.AbstractEventLoop | None = None
+_default_client_lock = threading.Lock()
 
 
 class ElevenLabsTTSError(RuntimeError):
@@ -67,19 +76,13 @@ async def synthesize_member_speech(
             params=params,
         )
     else:
-        try:
-            import httpx
-        except ImportError as exc:
-            raise ElevenLabsTTSError(
-                "httpx is required for ElevenLabs TTS requests"
-            ) from exc
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(
-                url,
-                headers=headers,
-                json=payload,
-                params=params,
-            )
+        response = await _default_http_client(timeout_seconds).post(
+            url,
+            headers=headers,
+            json=payload,
+            params=params,
+            timeout=timeout_seconds,
+        )
 
     if response.status_code != 200:
         raise ElevenLabsTTSError(
@@ -92,3 +95,21 @@ async def synthesize_member_speech(
 
 def _clamp(value: float) -> float:
     return max(0.0, min(float(value), 1.0))
+
+
+def _default_http_client(timeout_seconds: float) -> httpx.AsyncClient:
+    """Reuse TLS connections while keeping clients isolated by event loop."""
+    global _default_client, _default_client_loop
+
+    loop = asyncio.get_running_loop()
+    with _default_client_lock:
+        if (
+            _default_client is None
+            or _default_client.is_closed
+            or _default_client_loop is not loop
+        ):
+            _default_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout_seconds),
+            )
+            _default_client_loop = loop
+        return _default_client

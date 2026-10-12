@@ -25,6 +25,12 @@ class InternalRagSearchRequest(BaseModel):
     topK: int = Field(6, ge=1, le=20)
 
 
+class InternalRagBatchSearchRequest(BaseModel):
+    userId: str = Field(..., min_length=1, max_length=128)
+    queries: list[str] = Field(..., min_length=1, max_length=3)
+    topK: int = Field(6, ge=1, le=20)
+
+
 class InternalRagSearchResponse(BaseModel):
     success: bool
     memories: list[MemoryItem]
@@ -60,6 +66,33 @@ def internal_search(
         "[RAG_SEARCH] served: "
         f"user_uuid={request.userId} count={len(memories)} "
         f"query_chars={len(request.query)} elapsed_ms={elapsed_ms}",
+        flush=True,
+    )
+    return InternalRagSearchResponse(success=True, memories=memories)
+
+
+@router.post("/search-batch", response_model=InternalRagSearchResponse)
+def internal_batch_search(
+    request: InternalRagBatchSearchRequest,
+    x_rag_internal_key: str | None = Header(default=None),
+):
+    _require_internal_key(x_rag_internal_key)
+
+    from model_training.services import search_user_memories_batch
+
+    started = time.monotonic()
+    memories = search_user_memories_batch(
+        user_id=request.userId,
+        queries=request.queries,
+        top_k=request.topK,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    print(
+        "[RAG_SEARCH] batch served: "
+        f"user_uuid={request.userId} count={len(memories)} "
+        f"queries={len(request.queries)} "
+        f"query_chars={sum(len(query) for query in request.queries)} "
+        f"elapsed_ms={elapsed_ms}",
         flush=True,
     )
     return InternalRagSearchResponse(success=True, memories=memories)

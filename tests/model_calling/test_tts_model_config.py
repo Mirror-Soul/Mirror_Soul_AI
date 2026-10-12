@@ -31,7 +31,7 @@ class TTSModelConfigTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(environ, {"ELEVENLABS_API_KEY": "test-key"}),
             patch.object(
                 settings,
-                "ELEVENLABS_TTS_MODEL_ID",
+                "ELEVENLABS_REALTIME_TTS_MODEL_ID",
                 "eleven_flash_v2_5",
             ),
             patch(

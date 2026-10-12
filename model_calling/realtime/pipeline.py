@@ -23,12 +23,13 @@ from model_calling.realtime.talk_log import (
     wav_duration_seconds,
 )
 from model_calling.realtime.trace import CallTrace, trace_fields
+from model_calling.realtime.transcription import RealtimeTranscriber
 from model_calling.webrtc.session import get_call_context
 from model_training.base_profiles import get_mbti_base_profile
 from model_calling.clients.rag_search import (
-    merge_memory_results,
     search_mode,
     search_user_memories,
+    search_user_memories_batch,
 )
 from shared.config import settings
 
@@ -50,6 +51,8 @@ class QueuedUtterance:
     # Wall-clock window of the user's speech, used for the call history.
     spoken_started_at: datetime | None = None
     spoken_ended_at: datetime | None = None
+    vad_tail_seconds: float = 0.0
+    transcript_future: asyncio.Future[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,7 @@ async def _run_stage(
         return await asyncio.wait_for(operation(), timeout=timeout_seconds)
     except asyncio.CancelledError:
         raise
-    except TimeoutError as exc:
+    except (asyncio.TimeoutError, TimeoutError) as exc:
         raise RealtimePipelineError(
             normalized_stage,
             f"{normalized_stage}_TIMEOUT",
@@ -118,7 +121,13 @@ def _put_latest_utterance(
     replaced = False
     if utterance_queue.full():
         try:
-            utterance_queue.get_nowait()
+            dropped = utterance_queue.get_nowait()
+            if (
+                isinstance(dropped, QueuedUtterance)
+                and dropped.transcript_future is not None
+                and not dropped.transcript_future.done()
+            ):
+                dropped.transcript_future.cancel()
             utterance_queue.task_done()
             replaced = True
         except asyncio.QueueEmpty:
@@ -280,23 +289,32 @@ async def _search_memories(
     queries: list[str],
     top_k: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    results = await asyncio.gather(
-        *(
-            asyncio.to_thread(search_user_memories, user_id, query, top_k)
-            for query in queries
-        ),
-        return_exceptions=True,
-    )
-    successes: list[list[dict[str, Any]]] = []
-    errors: list[BaseException] = []
-    for result in results:
-        if isinstance(result, BaseException):
-            errors.append(result)
-        else:
-            successes.append(result)
-    if not successes:
-        raise errors[0]
-    return merge_memory_results(successes, top_k), len(errors)
+    if len(queries) <= 1:
+        memories = await asyncio.to_thread(
+            search_user_memories,
+            user_id,
+            queries[0],
+            top_k,
+        )
+    else:
+        try:
+            memories = await asyncio.to_thread(
+                search_user_memories_batch,
+                user_id,
+                queries,
+                top_k,
+            )
+        except Exception:
+            # Preserve the current-turn memory lookup if only the optimized
+            # batch endpoint is temporarily unavailable.
+            memories = await asyncio.to_thread(
+                search_user_memories,
+                user_id,
+                queries[0],
+                top_k,
+            )
+            return memories, 1
+    return memories, 0
 
 
 async def generate_reply_audio(
@@ -307,6 +325,7 @@ async def generate_reply_audio(
     *,
     call_id: int | None = None,
     turn_id: int | None = None,
+    transcript_future: asyncio.Future[str] | None = None,
 ) -> GeneratedReply | None:
     started_at = time.monotonic()
     stage = "STT"
@@ -319,11 +338,31 @@ async def generate_reply_audio(
             f"wav_bytes={len(wav_bytes)}",
             flush=True,
         )
-        transcript = await _run_stage(
-            "STT",
-            settings.REALTIME_STT_TIMEOUT_SECONDS,
-            lambda: process_stt(wav_bytes, "realtime_utterance.wav"),
-        )
+        transcript_source = "upload"
+        if transcript_future is not None:
+            try:
+                transcript = await asyncio.wait_for(
+                    asyncio.shield(transcript_future),
+                    timeout=settings.REALTIME_STREAMING_STT_RESULT_TIMEOUT_SECONDS,
+                )
+                transcript_source = "realtime"
+            except Exception as exc:
+                print(
+                    f"[REALTIME] streaming STT fallback: {fields} user={user_id} "
+                    f"error={type(exc).__name__}",
+                    flush=True,
+                )
+                transcript = await _run_stage(
+                    "STT",
+                    settings.REALTIME_STT_TIMEOUT_SECONDS,
+                    lambda: process_stt(wav_bytes, "realtime_utterance.wav"),
+                )
+        else:
+            transcript = await _run_stage(
+                "STT",
+                settings.REALTIME_STT_TIMEOUT_SECONDS,
+                lambda: process_stt(wav_bytes, "realtime_utterance.wav"),
+            )
         timings["stt"] = _elapsed_ms(stage_started)
         if not transcript:
             print(
@@ -336,7 +375,7 @@ async def generate_reply_audio(
 
         print(
             f"[REALTIME] STT user={user_id} {fields} "
-            f"elapsed_ms={timings['stt']}: {transcript}",
+            f"source={transcript_source} elapsed_ms={timings['stt']}: {transcript}",
             flush=True,
         )
 
@@ -424,6 +463,9 @@ async def generate_reply_audio(
                 mbti_base_profile=get_mbti_base_profile(mbti),
                 retrieved_memories=memories,
                 conversation_history=conversation_history,
+                model=settings.REALTIME_LLM_MODEL,
+                stream_sentences=settings.REALTIME_LLM_STREAM_SENTENCES,
+                max_chars=settings.REALTIME_LLM_RESPONSE_MAX_CHARS,
             ),
         )
         response_text = response_text.strip()
@@ -581,11 +623,52 @@ async def start_realtime_audio(
         clone_id=clone_id,
         media_type="VIDEO" if video_required else "VOICE",
     )
+    realtime_transcriber: RealtimeTranscriber | None = None
+    if settings.REALTIME_STREAMING_STT_ENABLED and settings.OPENAI_API_KEY:
+        try:
+            realtime_transcriber = await RealtimeTranscriber.connect(
+                api_key=settings.OPENAI_API_KEY,
+                connection_model=settings.REALTIME_STREAMING_CONNECTION_MODEL,
+                model=settings.REALTIME_STREAMING_STT_MODEL,
+                language=settings.STT_LANGUAGE,
+                timeout_seconds=settings.REALTIME_STREAMING_STT_CONNECT_TIMEOUT_SECONDS,
+            )
+            print(
+                "[REALTIME] streaming STT connected: "
+                f"callId={call_id} model={settings.REALTIME_STREAMING_STT_MODEL}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[REALTIME] streaming STT unavailable; upload fallback active: "
+                f"callId={call_id} error={type(exc).__name__}",
+                flush=True,
+            )
 
-    async def enqueue_utterance(wav_bytes: bytes) -> None:
+    async def enqueue_utterance(
+        wav_bytes: bytes,
+        trailing_silence_seconds: float,
+    ) -> None:
+        transcript_future = None
+        if realtime_transcriber is not None:
+            try:
+                transcript_future = await realtime_transcriber.commit()
+            except Exception as exc:
+                print(
+                    "[REALTIME] streaming STT commit failed; upload fallback active: "
+                    f"callId={call_id} error={type(exc).__name__}",
+                    flush=True,
+                )
+        detected_at = utc_now()
+        duration_seconds = wav_duration_seconds(wav_bytes)
+        vad_tail_seconds = max(
+            0.0,
+            min(float(trailing_silence_seconds), duration_seconds),
+        )
+        spoken_ended_at = detected_at - timedelta(seconds=vad_tail_seconds)
         spoken_started_at, spoken_ended_at = spoken_window(
-            ended_at=utc_now(),
-            duration_seconds=wav_duration_seconds(wav_bytes),
+            ended_at=spoken_ended_at,
+            duration_seconds=max(0.0, duration_seconds - vad_tail_seconds),
         )
         replaced = _put_latest_utterance(
             utterance_queue,
@@ -594,6 +677,8 @@ async def start_realtime_audio(
                 enqueued_at=time.monotonic(),
                 spoken_started_at=spoken_started_at,
                 spoken_ended_at=spoken_ended_at,
+                vad_tail_seconds=vad_tail_seconds,
+                transcript_future=transcript_future,
             ),
         )
         if replaced:
@@ -619,11 +704,15 @@ async def start_realtime_audio(
                 enqueued_at = queued.enqueued_at
                 spoken_started_at = queued.spoken_started_at
                 spoken_ended_at = queued.spoken_ended_at
+                vad_tail_seconds = queued.vad_tail_seconds
+                transcript_future = queued.transcript_future
             else:
                 wav_bytes = queued
                 enqueued_at = time.monotonic()
                 spoken_started_at = None
                 spoken_ended_at = None
+                vad_tail_seconds = 0.0
+                transcript_future = None
             turn_id = trace.start_turn()
             fields = trace_fields(call_id, turn_id)
             stage = "PIPELINE"
@@ -653,6 +742,7 @@ async def start_realtime_audio(
                     conversation_history=conversation_history,
                     call_id=call_id,
                     turn_id=turn_id,
+                    transcript_future=transcript_future,
                 )
                 if reply:
                     print(
@@ -759,6 +849,17 @@ async def start_realtime_audio(
                         continue
                     stage = "OUTPUT"
                     reply_queued_at = utc_now()
+                    response_latency_ms = (
+                        max(
+                            0,
+                            int(
+                                (reply_queued_at - spoken_ended_at).total_seconds()
+                                * 1000
+                            ),
+                        )
+                        if spoken_ended_at is not None
+                        else None
+                    )
                     audio_timing = output_track.enqueue_encoded_audio(
                         reply.audio_bytes,
                         turn_id=turn_id,
@@ -803,6 +904,8 @@ async def start_realtime_audio(
                         f"[CALL_TRACE] turn completed: {fields} user={user_id} "
                         f"media_type={trace.media_type} "
                         f"total_ms={_elapsed_ms(reply.started_at)} "
+                        f"response_latency_ms={response_latency_ms if response_latency_ms is not None else '-'} "
+                        f"vad_tail_ms={int(vad_tail_seconds * 1000)} "
                         f"{_timing_fields(reply.stage_timings_ms)}",
                         flush=True,
                     )
@@ -852,9 +955,28 @@ async def start_realtime_audio(
         f"callId={call_id} user={user_id} clone_id={clone_id}",
         flush=True,
     )
-    receiver_task = asyncio.create_task(
-        receive_utterances(incoming_track, output_track, enqueue_utterance)
-    )
+    async def receive_audio() -> None:
+        try:
+            await receive_utterances(
+                incoming_track,
+                output_track,
+                enqueue_utterance,
+                on_realtime_audio=(
+                    realtime_transcriber.append_audio
+                    if realtime_transcriber is not None
+                    else None
+                ),
+                on_realtime_reset=(
+                    realtime_transcriber.clear
+                    if realtime_transcriber is not None
+                    else None
+                ),
+            )
+        finally:
+            if realtime_transcriber is not None:
+                await realtime_transcriber.close()
+
+    receiver_task = asyncio.create_task(receive_audio())
     pipeline_task = asyncio.create_task(process_queue())
     print(
         "[REALTIME] realtime audio tasks started: "

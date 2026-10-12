@@ -72,24 +72,57 @@ class MergeMemoryResultsTests(unittest.TestCase):
 
 
 class SearchMemoriesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_one_failed_query_keeps_the_other_results(self):
-        def search(user_id, query, top_k):
-            if query.startswith("현재 질문:"):
-                raise RuntimeError("timeout")
-            return [PROFILE, _memory("interview", 0.4)]
-
-        with patch("model_calling.realtime.pipeline.search_user_memories", new=search):
-            memories, failed = await _search_memories(
-                "u", ["면접?", "현재 질문: 면접?\n최근 사용자 발화:\n- 팀"], 6
-            )
-        self.assertEqual(failed, 1)
+    async def test_multiple_queries_use_one_batch_search(self):
+        search = unittest.mock.Mock(
+            return_value=[PROFILE, _memory("interview", 0.4)]
+        )
+        queries = ["면접?", "현재 질문: 면접?\n최근 사용자 발화:\n- 팀"]
+        with patch(
+            "model_calling.realtime.pipeline.search_user_memories_batch",
+            new=search,
+        ):
+            memories, failed = await _search_memories("u", queries, 6)
+        self.assertEqual(failed, 0)
         self.assertEqual([m["documentId"] for m in memories][1], "interview")
+        search.assert_called_once_with("u", queries, 6)
 
-    async def test_all_queries_failing_raises(self):
-        def search(user_id, query, top_k):
+    async def test_batch_failure_falls_back_to_current_query(self):
+        def batch_search(user_id, queries, top_k):
             raise RuntimeError("down")
 
-        with patch("model_calling.realtime.pipeline.search_user_memories", new=search):
+        single_search = unittest.mock.Mock(
+            return_value=[PROFILE, _memory("current", 0.3)]
+        )
+        with (
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories_batch",
+                new=batch_search,
+            ),
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories",
+                new=single_search,
+            ),
+        ):
+            memories, failed = await _search_memories("u", ["a", "b"], 6)
+
+        self.assertEqual(failed, 1)
+        self.assertEqual(memories[1]["documentId"], "current")
+        single_search.assert_called_once_with("u", "a", 6)
+
+    async def test_batch_and_fallback_failure_raises(self):
+        def fail(*args):
+            raise RuntimeError("down")
+
+        with (
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories_batch",
+                new=fail,
+            ),
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories",
+                new=fail,
+            ),
+        ):
             with self.assertRaises(RuntimeError):
                 await _search_memories("u", ["a", "b"], 6)
 
@@ -104,16 +137,21 @@ class SearchMemoriesTests(unittest.IsolatedAsyncioTestCase):
         )
         interview = _memory("u:interview_memory:interview-eve", 0.42)
 
-        def search(user_id, query, top_k):
-            if query.startswith("현재 질문:"):
-                return [PROFILE, _memory("u:interview_memory:team", 0.6)]
-            return [PROFILE, interview]
+        def search(user_id, queries, top_k):
+            return [
+                PROFILE,
+                interview,
+                _memory("u:interview_memory:team", 0.6),
+            ]
 
         llm = AsyncMock(return_value="그냥 포기하고 도망갈 것 같아.")
         with (
             patch("model_calling.realtime.pipeline.process_stt", new=AsyncMock(return_value="면접 전날 너무 떨리면 어떻게 해?")),
             patch("model_calling.realtime.pipeline.load_runtime_context", new=AsyncMock(return_value=({"name": "회원"}, personality, speech, "ISTP"))),
-            patch("model_calling.realtime.pipeline.search_user_memories", new=search),
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories_batch",
+                new=search,
+            ),
             patch("model_calling.realtime.pipeline.process_llm", new=llm),
             patch("model_calling.realtime.pipeline.process_tts_bytes", new=AsyncMock(return_value=b"audio")),
         ):

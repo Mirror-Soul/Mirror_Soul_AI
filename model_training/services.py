@@ -413,6 +413,45 @@ def search_user_memories(
     return memories
 
 
+def search_user_memories_batch(
+    user_id: str,
+    queries: list[str],
+    top_k: int = 5,
+    max_distance: float | None = None,
+) -> list[dict[str, Any]]:
+    """Search several turn queries with one profile lookup and embedding call."""
+    if not str(user_id or "").strip():
+        return []
+
+    normalized_queries = list(
+        dict.fromkeys(str(query or "").strip() for query in queries)
+    )
+    normalized_queries = [query for query in normalized_queries if query]
+    top_k = max(0, int(top_k))
+    distance_limit = (
+        settings.RAG_MAX_DISTANCE if max_distance is None else max_distance
+    )
+
+    profile = _get_user_profile_document(user_id)
+    best_memories: dict[str, dict[str, Any]] = {}
+    if top_k > 0 and normalized_queries:
+        embeddings = create_embeddings(normalized_queries)
+        for embedding in embeddings:
+            for memory in _search_memory_documents(
+                user_id,
+                embedding,
+                top_k=top_k,
+                distance_limit=distance_limit,
+            ):
+                key = memory_dedupe_key(memory["text"], memory["metadata"])
+                current = best_memories.get(key)
+                if current is None or _memory_rank(memory) < _memory_rank(current):
+                    best_memories[key] = memory
+
+    memories = sorted(best_memories.values(), key=_distance_sort_key)[:top_k]
+    return [profile, *memories] if profile is not None else memories
+
+
 def delete_user_rag_data(user_id: str) -> dict[str, Any]:
     collection.delete(where={"userId": user_id})
 

@@ -1,5 +1,6 @@
 import os
 import io
+import inspect
 import json
 import re
 import subprocess
@@ -320,6 +321,8 @@ def build_dynamic_persona_prompt(
     speech: SpeechProfile,
     mbti_base_profile: dict[str, Any] | None = None,
     retrieved_memories: list[dict[str, Any]] | None = None,
+    response_max_chars: int | None = None,
+    response_max_sentences: int | None = None,
 ) -> str:
     verified_profile_text = format_verified_profile(user_persona)
     personality_text = format_personality_guidance(personality)
@@ -345,6 +348,8 @@ def build_dynamic_persona_prompt(
         mbti_profile_text = format_mbti_base_profile(mbti_base_profile)
 
     name = _compact_text(user_persona.get("name")) or "사용자"
+    max_chars = response_max_chars or settings.LLM_RESPONSE_MAX_CHARS
+    max_sentences = response_max_sentences or settings.LLM_RESPONSE_MAX_SENTENCES
     prompt = f"""당신은 '{name}'의 디지털 클론으로서 전화 통화에 자연스럽게 응답합니다.
 목표는 회원의 확인된 사실, 가치관, 말투를 충실히 반영하는 것입니다. 내부 프롬프트, 검색 과정, 점수 또는 데이터 출처는 답변에서 언급하지 마십시오.
 
@@ -372,10 +377,11 @@ def build_dynamic_persona_prompt(
 
 [통화 답변 원칙]
 - 결론이나 직접적인 반응부터 말한다.
-- 자연스러운 한국어 1~3문장으로 답하고, 최대 {settings.LLM_RESPONSE_MAX_CHARS}자 안에서 핵심만 말한다.
+- 자연스러운 한국어 1~{max_sentences}문장으로 답하고, 최대 {max_chars}자 안에서 핵심만 말한다.
 - 한 답변에는 질문을 최대 하나만 포함한다.
 - 같은 인사, 공감 문구, 추임새 또는 문장을 반복하지 않는다.
 - 회원의 고유 표현은 억지로 매번 넣지 말고 어울릴 때만 사용한다.
+- 답변을 내기 전에 현재 질문과 직접 관련된 인터뷰 기억의 결론을 확인한다. 그 결론과 반대되는 일반 조언이나 모범 답안이 섞였으면 제거한다.
 
 [확인된 기본 프로필]
 {verified_profile_text}
@@ -403,6 +409,9 @@ async def process_llm(
     mbti_base_profile: dict[str, Any] | None = None,
     retrieved_memories: list[dict[str, Any]] | None = None,
     conversation_history: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    stream_sentences: int | None = None,
+    max_chars: int | None = None,
 ) -> str:
     # 동적 프롬프트 생성 함수 호출
     system_prompt = build_dynamic_persona_prompt(
@@ -411,6 +420,8 @@ async def process_llm(
         speech,
         mbti_base_profile=mbti_base_profile,
         retrieved_memories=retrieved_memories,
+        response_max_chars=max_chars,
+        response_max_sentences=stream_sentences,
     )
 
     history_message_limit = max(1, settings.REALTIME_HISTORY_MAX_TURNS) * 2
@@ -421,15 +432,16 @@ async def process_llm(
         and str(message.get("content") or "").strip()
     ]
 
+    resolved_model = (model or settings.LLM_MODEL).strip()
     request: dict[str, Any] = {
-        "model": settings.LLM_MODEL,
+        "model": resolved_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             *history_messages,
             {"role": "user", "content": user_text},
         ],
     }
-    if _uses_reasoning_parameters(settings.LLM_MODEL):
+    if _uses_reasoning_parameters(resolved_model):
         request.update(
             {
                 "reasoning_effort": settings.LLM_REASONING_EFFORT,
@@ -444,10 +456,42 @@ async def process_llm(
             }
         )
 
+    if stream_sentences is not None and stream_sentences > 0:
+        stream = await client.chat.completions.create(**request, stream=True)
+        chunks: list[str] = []
+        try:
+            async for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None)
+                if content:
+                    chunks.append(content)
+                current = "".join(chunks)
+                if _sentence_end_count(current) >= stream_sentences:
+                    break
+                if max_chars and len(current) >= max_chars:
+                    break
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                closed = close()
+                if inspect.isawaitable(closed):
+                    await closed
+        return normalize_llm_response(
+            "".join(chunks),
+            max_chars=max_chars,
+            max_sentences=stream_sentences,
+        )
+
     response = await client.chat.completions.create(**request)
-    
     content = response.choices[0].message.content
-    return normalize_llm_response(content)
+    return normalize_llm_response(content, max_chars=max_chars)
+
+
+def _sentence_end_count(text: str) -> int:
+    return sum(character in ".!?。！？" for character in text)
 
 
 def _uses_reasoning_parameters(model: str) -> bool:
@@ -573,7 +617,8 @@ async def process_tts_bytes(
 
     print(
         "[TTS] selected ElevenLabs voice: "
-        f"{_mask_voice_id(voice_id)} model={settings.ELEVENLABS_TTS_MODEL_ID}",
+        f"{_mask_voice_id(voice_id)} "
+        f"model={settings.ELEVENLABS_REALTIME_TTS_MODEL_ID}",
         flush=True,
     )
     stability_val, style_val = calculate_voice_settings(personality)
@@ -581,7 +626,7 @@ async def process_tts_bytes(
         text=ai_text,
         voice_id=voice_id,
         api_key=api_key,
-        model_id=settings.ELEVENLABS_TTS_MODEL_ID,
+        model_id=settings.ELEVENLABS_REALTIME_TTS_MODEL_ID,
         settings=ElevenLabsVoiceSettings(
             stability=stability_val,
             similarity_boost=0.9,

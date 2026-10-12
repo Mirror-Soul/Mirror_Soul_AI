@@ -17,6 +17,7 @@ from model_training.rag_documents import PROFILE_SOURCE_TYPES
 from shared.config import settings
 
 INTERNAL_SEARCH_PATH = "/internal/rag/search"
+INTERNAL_BATCH_SEARCH_PATH = "/internal/rag/search-batch"
 INTERNAL_KEY_HEADER = "X-Rag-Internal-Key"
 
 _client: httpx.Client | None = None
@@ -105,6 +106,66 @@ def _search_remote(user_id: str, query: str, top_k: int) -> list[dict[str, Any]]
     return [memory for memory in memories if isinstance(memory, dict)]
 
 
+def _search_remote_batch(
+    user_id: str,
+    queries: list[str],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    api_key = settings.RAG_INTERNAL_API_KEY
+    if not api_key:
+        raise RagSearchConfigurationError(
+            "RAG_INTERNAL_API_KEY is not configured."
+        )
+    timeout = settings.RAG_SEARCH_TIMEOUT_SECONDS
+    if timeout <= 0:
+        raise RagSearchConfigurationError(
+            "RAG_SEARCH_TIMEOUT_SECONDS must be positive."
+        )
+    url = (
+        f"{settings.RAG_SEARCH_BASE_URL.rstrip('/')}"
+        f"{INTERNAL_BATCH_SEARCH_PATH}"
+    )
+    try:
+        response = _http_client().post(
+            url,
+            headers={INTERNAL_KEY_HEADER: api_key},
+            json={"userId": user_id, "queries": queries, "topK": top_k},
+            timeout=timeout,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        raise RagSearchUnavailable(
+            f"RAG batch search API is unavailable ({type(exc).__name__})."
+        ) from exc
+
+    if response.status_code in {404, 405}:
+        result_sets = [_search_remote(user_id, query, top_k) for query in queries]
+        return merge_memory_results(result_sets, top_k)
+    if response.status_code in {401, 403}:
+        raise RagSearchConfigurationError(
+            f"RAG search API rejected the internal key (HTTP {response.status_code})."
+        )
+    if response.status_code == 503:
+        raise RagSearchConfigurationError(
+            "RAG search API is not configured on the AI server (HTTP 503)."
+        )
+    if response.status_code >= 500:
+        raise RagSearchUnavailable(
+            f"RAG batch search API failed with HTTP {response.status_code}."
+        )
+    if not response.is_success:
+        raise RagSearchRejected(
+            f"RAG batch search API returned HTTP {response.status_code}."
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise RagSearchError("RAG batch search API returned invalid JSON.") from exc
+    memories = body.get("memories") if isinstance(body, dict) else None
+    if not isinstance(memories, list):
+        raise RagSearchError("RAG batch search API response has no memories list.")
+    return [memory for memory in memories if isinstance(memory, dict)]
+
+
 def _memory_key(memory: dict[str, Any]) -> str:
     document_id = memory.get("documentId")
     if isinstance(document_id, str) and document_id:
@@ -161,3 +222,25 @@ def search_user_memories(
     from model_training.services import search_user_memories as local_search
 
     return local_search(user_id, query, top_k)
+
+
+def search_user_memories_batch(
+    user_id: str,
+    queries: list[str],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Blocking batched search used by one realtime conversation turn."""
+    normalized_queries = list(
+        dict.fromkeys(str(query or "").strip() for query in queries)
+    )
+    normalized_queries = [query for query in normalized_queries if query]
+    if not normalized_queries:
+        return []
+    if len(normalized_queries) == 1:
+        return search_user_memories(user_id, normalized_queries[0], top_k)
+    if search_mode() == "remote":
+        return _search_remote_batch(user_id, normalized_queries, top_k)
+
+    from model_training.services import search_user_memories_batch as local_search
+
+    return local_search(user_id, normalized_queries, top_k)
