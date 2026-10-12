@@ -861,6 +861,7 @@ class DittoVideoSession:
         self._profile_lock = asyncio.Lock()
         self._stream_tasks: set[asyncio.Task] = set()
         self._failed_stream_turns: set[int | None] = set()
+        self._turn_stream_ids: dict[int | None, int] = {}
 
     async def prepare(self) -> None:
         if self._profile is not None:
@@ -1004,11 +1005,24 @@ class DittoVideoSession:
         )
         self.track.enqueue_encoded_video(video_bytes)
 
-    def synchronize_reply_audio(self, start_delay_seconds: float = 0.0) -> bool:
+    def synchronize_reply_audio(
+        self,
+        start_delay_seconds: float = 0.0,
+        *,
+        turn_id: int | None = None,
+    ) -> bool:
         synchronize = getattr(self.track, "synchronize_frame_stream", None)
         if synchronize is None:
             return False
-        return bool(synchronize(start_delay_seconds))
+        expected_stream_id = self._turn_stream_ids.get(turn_id)
+        if expected_stream_id is None:
+            return False
+        return bool(
+            synchronize(
+                start_delay_seconds,
+                stream_id=expected_stream_id,
+            )
+        )
 
     async def _enqueue_streaming_reply(
         self,
@@ -1058,6 +1072,7 @@ class DittoVideoSession:
                     "Ditto frame stream did not produce an initial buffer."
                 )
             activate(stream_id)
+            self._turn_stream_ids[turn_id] = stream_id
             print(
                 "[DITTO_CALL] frame stream ready for playback: "
                 f"{trace_fields(self.call_id, turn_id)} "
@@ -1098,6 +1113,7 @@ class DittoVideoSession:
             return
         error = task.exception()
         if error is not None:
+            self._turn_stream_ids.pop(turn_id, None)
             self._failed_stream_turns.add(turn_id)
             print(
                 "[DITTO_CALL] active frame stream ended with an error: "
@@ -1122,6 +1138,7 @@ class DittoVideoSession:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._stream_tasks.clear()
         self._failed_stream_turns.clear()
+        self._turn_stream_ids.clear()
 
 
 def create_ditto_video_session(

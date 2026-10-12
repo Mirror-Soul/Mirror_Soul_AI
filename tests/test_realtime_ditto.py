@@ -149,9 +149,16 @@ class _StreamingTrack(_Track):
     def activate_frame_stream(self, stream_id):
         self.active.append(stream_id)
 
-    def synchronize_frame_stream(self, start_delay_seconds=0.0):
+    def synchronize_frame_stream(
+        self,
+        start_delay_seconds=0.0,
+        *,
+        stream_id=None,
+    ):
         self.synchronized.append(start_delay_seconds)
-        return bool(self.active)
+        return bool(self.active) and (
+            stream_id is None or stream_id == self.active[-1]
+        )
 
     def finish_frame_stream(self, stream_id):
         self.finished = True
@@ -712,7 +719,7 @@ class DittoRealtimeTests(unittest.TestCase):
         )
 
         asyncio.run(session.enqueue_reply(b"audio", turn_id=1))
-        synchronized = session.synchronize_reply_audio(0.25)
+        synchronized = session.synchronize_reply_audio(0.25, turn_id=1)
 
         self.assertEqual(track.frames, [b"jpeg-1", b"jpeg-2"])
         self.assertEqual(track.active, [1])
@@ -777,6 +784,28 @@ class DittoRealtimeTests(unittest.TestCase):
         )
         self.assertTrue(session.consume_stream_failure(4))
         self.assertFalse(session.consume_stream_failure(4))
+
+    def test_audio_sync_does_not_move_another_turn_stream_clock(self) -> None:
+        profile = FaceRenderProfile(
+            portrait_bytes=b"portrait",
+            portrait_filename="portrait.jpg",
+            portrait_content_type="image/jpeg",
+        )
+        track = _StreamingTrack()
+        session = DittoVideoSession(
+            user_id="member-uuid",
+            clone_id=6,
+            track=track,
+            client=_StreamingClient(),
+            profile_loader=_ProfileLoader(profile),
+            call_id=81,
+        )
+
+        asyncio.run(session.enqueue_reply(b"first", turn_id=1))
+
+        self.assertTrue(session.synchronize_reply_audio(0.25, turn_id=1))
+        self.assertFalse(session.synchronize_reply_audio(4.0, turn_id=2))
+        self.assertEqual(track.synchronized, [0.25])
 
 
 if __name__ == "__main__":

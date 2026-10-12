@@ -31,8 +31,8 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
             async def enqueue_reply(self, audio_bytes, *, turn_id=None):
                 events.append(("video", audio_bytes, turn_id))
 
-            def synchronize_reply_audio(self, start_delay_seconds):
-                events.append(("sync", start_delay_seconds))
+            def synchronize_reply_audio(self, start_delay_seconds, *, turn_id=None):
+                events.append(("sync", start_delay_seconds, turn_id))
                 return True
 
         async def receive_forever(*args, **kwargs):
@@ -81,7 +81,7 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("video", b"reply", 1),
                 ("audio", b"reply"),
-                ("sync", 0.2),
+                ("sync", 0.2, 1),
             ],
         )
 
