@@ -10,6 +10,9 @@ class Settings:
     ELEVENLABS_TTS_MODEL_ID: str = (
         os.getenv("ELEVENLABS_TTS_MODEL_ID") or "eleven_multilingual_v2"
     ).strip()
+    ELEVENLABS_REALTIME_TTS_MODEL_ID: str = (
+        os.getenv("ELEVENLABS_REALTIME_TTS_MODEL_ID") or "eleven_flash_v2_5"
+    ).strip()
 
     BACKEND_API_BASE_URL: str = os.getenv(
         "BACKEND_API_BASE_URL",
@@ -86,6 +89,16 @@ class Settings:
         os.getenv("REALTIME_RAG_QUERY_HISTORY_TURNS", "2")
     )
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    REALTIME_LLM_MODEL: str = os.getenv(
+        "REALTIME_LLM_MODEL",
+        "gpt-4o-mini",
+    ).strip()
+    REALTIME_LLM_STREAM_SENTENCES: int = int(
+        os.getenv("REALTIME_LLM_STREAM_SENTENCES", "2")
+    )
+    REALTIME_LLM_RESPONSE_MAX_CHARS: int = int(
+        os.getenv("REALTIME_LLM_RESPONSE_MAX_CHARS", "180")
+    )
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.4"))
     LLM_MAX_OUTPUT_TOKENS: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "200"))
     LLM_RESPONSE_MAX_CHARS: int = int(
@@ -100,6 +113,24 @@ class Settings:
     LLM_REASONING_EFFORT: str = os.getenv("LLM_REASONING_EFFORT", "none")
     STT_MODEL: str = os.getenv("STT_MODEL", "whisper-1")
     STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ko")
+    REALTIME_STREAMING_STT_ENABLED: bool = os.getenv(
+        "REALTIME_STREAMING_STT_ENABLED",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    REALTIME_STREAMING_STT_MODEL: str = os.getenv(
+        "REALTIME_STREAMING_STT_MODEL",
+        "gpt-4o-mini-transcribe",
+    ).strip()
+    REALTIME_STREAMING_CONNECTION_MODEL: str = os.getenv(
+        "REALTIME_STREAMING_CONNECTION_MODEL",
+        "gpt-realtime-mini",
+    ).strip()
+    REALTIME_STREAMING_STT_CONNECT_TIMEOUT_SECONDS: float = float(
+        os.getenv("REALTIME_STREAMING_STT_CONNECT_TIMEOUT_SECONDS", "5")
+    )
+    REALTIME_STREAMING_STT_RESULT_TIMEOUT_SECONDS: float = float(
+        os.getenv("REALTIME_STREAMING_STT_RESULT_TIMEOUT_SECONDS", "4")
+    )
     REALTIME_STT_TIMEOUT_SECONDS: float = float(
         os.getenv("REALTIME_STT_TIMEOUT_SECONDS", "30")
     )

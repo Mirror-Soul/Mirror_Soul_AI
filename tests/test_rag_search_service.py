@@ -77,6 +77,24 @@ class InternalSearchApiTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 422)
 
+    def test_batch_searches_all_queries_in_one_service_call(self) -> None:
+        memories = [{"documentId": "d1", "text": "t", "metadata": {}, "distance": 0.2}]
+        body = {"userId": USER_A, "queries": ["카페", "최근 대화 카페"], "topK": 3}
+        with patch.object(settings, "RAG_INTERNAL_API_KEY", KEY), patch.object(
+            services, "search_user_memories_batch", return_value=memories
+        ) as search:
+            response = self.client.post(
+                "/internal/rag/search-batch",
+                json=body,
+                headers={"X-Rag-Internal-Key": KEY},
+            )
+        self.assertEqual(response.status_code, 200)
+        search.assert_called_once_with(
+            user_id=USER_A,
+            queries=body["queries"],
+            top_k=3,
+        )
+
 
 class RemoteClientTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -110,6 +128,27 @@ class RemoteClientTests(unittest.TestCase):
         self.assertEqual(request.headers["X-Rag-Internal-Key"], KEY)
         self.assertIn(b'"topK":4', request.content.replace(b" ", b""))
         self.assertEqual(rag_search.search_mode(), "remote")
+
+    def test_batch_posts_once(self) -> None:
+        self._use(lambda request: httpx.Response(200, json={"success": True, "memories": [{"documentId": "d1"}]}))
+        result = rag_search.search_user_memories_batch(USER_A, ["카페", "최근 카페"], 4)
+        self.assertEqual(result, [{"documentId": "d1"}])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(
+            str(self.requests[0].url),
+            "http://ai.internal:8000/internal/rag/search-batch",
+        )
+
+    def test_batch_falls_back_when_ai_server_is_older(self) -> None:
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("search-batch"):
+                return httpx.Response(404)
+            return httpx.Response(200, json={"success": True, "memories": [{"documentId": request.url.path}]})
+
+        self._use(handler)
+        result = rag_search.search_user_memories_batch(USER_A, ["a", "b"], 4)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(self.requests), 3)
 
     def test_error_mapping(self) -> None:
         cases = [
@@ -151,6 +190,16 @@ class LocalModeTests(unittest.TestCase):
         local.assert_called_once_with(USER_A, "q", 2)
         self.assertEqual(rag_search.search_mode(), "local")
 
+    def test_local_batch_uses_one_store_call(self) -> None:
+        with patch.object(settings, "RAG_SEARCH_BASE_URL", ""), patch.object(
+            services,
+            "search_user_memories_batch",
+            return_value=[{"documentId": "local"}],
+        ) as local:
+            result = rag_search.search_user_memories_batch(USER_A, ["q", "context q"], 2)
+        self.assertEqual(result, [{"documentId": "local"}])
+        local.assert_called_once_with(USER_A, ["q", "context q"], 2)
+
 
 class EndToEndTests(unittest.TestCase):
     """Call-server client -> internal API -> AI server ChromaDB."""
@@ -187,7 +236,6 @@ class EndToEndTests(unittest.TestCase):
             [f"{USER_A}:profile_snapshot:clone-1", f"{USER_A}:interview_memory:question-1"],
         )
         self.assertTrue(all(memory["metadata"]["userId"] == USER_A for memory in memories))
-
 
 class CallServerIsolationTests(unittest.TestCase):
     def test_call_server_does_not_open_a_local_store_in_remote_mode(self) -> None:

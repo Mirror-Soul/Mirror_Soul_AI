@@ -101,6 +101,60 @@ class LlmContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("temperature", request)
         self.assertNotIn("max_tokens", request)
 
+    async def test_realtime_stream_stops_after_configured_sentences(self):
+        personality = PersonalityProfile(
+            openness=50,
+            conscientiousness=50,
+            extraversion=50,
+            agreeableness=50,
+            neuroticism=50,
+            summary="테스트 성격",
+        )
+        speech = SpeechProfile(
+            user_id="member-uuid",
+            speech_speed=50,
+            avg_pitch=50,
+            honorific_ratio=50,
+            summary="테스트 말투",
+        )
+
+        class Stream:
+            def __init__(self):
+                self.parts = iter(["첫 답변이야. ", "두 번째야. ", "세 번째야."])
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    part = next(self.parts)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=part))]
+                )
+
+            async def close(self):
+                self.closed = True
+
+        stream = Stream()
+        create = AsyncMock(return_value=stream)
+        with patch("model_calling.services.client.chat.completions.create", new=create):
+            response = await process_llm(
+                user_text="질문",
+                user_persona={"name": "회원"},
+                personality=personality,
+                speech=speech,
+                model="gpt-4o-mini",
+                stream_sentences=2,
+                max_chars=180,
+            )
+
+        self.assertEqual(response, "첫 답변이야. 두 번째야.")
+        self.assertTrue(stream.closed)
+        self.assertTrue(create.await_args.kwargs["stream"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from shared.elevenlabs_tts import (
     ElevenLabsTTSError,
     ElevenLabsVoiceSettings,
     synthesize_member_speech,
 )
+from shared import elevenlabs_tts
 
 
 class _Response:
@@ -69,6 +71,27 @@ class ElevenLabsTTSTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertNotIn("sensitive", str(raised.exception))
+
+    async def test_reuses_default_http_client_on_same_event_loop(self) -> None:
+        client = MagicMock()
+        client.is_closed = False
+        client.post = AsyncMock(return_value=_Response(200, b"audio"))
+        with patch("shared.elevenlabs_tts.httpx.AsyncClient", return_value=client) as factory:
+            elevenlabs_tts._default_client = None
+            elevenlabs_tts._default_client_loop = None
+            await synthesize_member_speech(
+                text="첫 번째",
+                voice_id="member-voice",
+                api_key="api-key",
+            )
+            await synthesize_member_speech(
+                text="두 번째",
+                voice_id="member-voice",
+                api_key="api-key",
+            )
+
+        factory.assert_called_once()
+        self.assertEqual(client.post.await_count, 2)
 
 
 if __name__ == "__main__":

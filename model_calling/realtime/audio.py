@@ -232,10 +232,19 @@ def pcm_to_wav_bytes(pcm: bytes, sample_rate: int = INPUT_SAMPLE_RATE) -> bytes:
 async def receive_utterances(
     track: MediaStreamTrack,
     output_track: QueuedAudioTrack,
-    on_utterance: Callable[[bytes], Awaitable[None]],
+    on_utterance: Callable[[bytes, float], Awaitable[None]],
+    *,
+    on_realtime_audio: Callable[[bytes], Awaitable[None]] | None = None,
+    on_realtime_reset: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     energy_threshold = int(os.getenv("REALTIME_VAD_ENERGY_THRESHOLD", "900"))
-    silence_seconds = float(os.getenv("REALTIME_VAD_SILENCE_SECONDS", "0.8"))
+    silence_seconds = float(os.getenv("REALTIME_VAD_SILENCE_SECONDS", "0.55"))
+    short_silence_seconds = float(
+        os.getenv("REALTIME_VAD_SHORT_SILENCE_SECONDS", "0.7")
+    )
+    short_utterance_seconds = float(
+        os.getenv("REALTIME_VAD_SHORT_UTTERANCE_SECONDS", "1.2")
+    )
     min_speech_seconds = float(os.getenv("REALTIME_VAD_MIN_SPEECH_SECONDS", "0.7"))
     max_speech_seconds = float(os.getenv("REALTIME_VAD_MAX_SPEECH_SECONDS", "15"))
     # Total length including pauses. Without it, a short noise that opened an
@@ -256,7 +265,12 @@ async def receive_utterances(
         layout="mono",
         rate=INPUT_SAMPLE_RATE,
     )
-    pre_roll: deque[bytes] = deque(maxlen=8)
+    realtime_resampler = (
+        av.AudioResampler(format="s16", layout="mono", rate=24000)
+        if on_realtime_audio is not None
+        else None
+    )
+    pre_roll: deque[tuple[bytes, bytes]] = deque(maxlen=8)
     utterance = bytearray()
     speech_seconds = 0.0
     silence_accumulated = 0.0
@@ -316,6 +330,8 @@ async def receive_utterances(
                     "[AUDIO_IN] input ignored while AI audio is playing",
                     flush=True,
                 )
+            if speaking and on_realtime_reset is not None:
+                await on_realtime_reset()
             pre_roll.clear()
             utterance.clear()
             speech_seconds = 0.0
@@ -324,8 +340,18 @@ async def receive_utterances(
             speaking = False
             continue
 
-        for audio_frame in resampler.resample(frame):
-            pcm = audio_frame.to_ndarray().tobytes()
+        local_frames = resampler.resample(frame)
+        pcm = b"".join(audio_frame.to_ndarray().tobytes() for audio_frame in local_frames)
+        if not pcm:
+            continue
+        realtime_pcm = b""
+        if realtime_resampler is not None:
+            realtime_pcm = b"".join(
+                audio_frame.to_ndarray().tobytes()
+                for audio_frame in realtime_resampler.resample(frame)
+            )
+
+        for pcm, realtime_pcm in [(pcm, realtime_pcm)]:
             samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
             if samples.size == 0:
                 continue
@@ -335,7 +361,7 @@ async def receive_utterances(
             has_voice = rms >= energy_threshold
 
             if not speaking:
-                pre_roll.append(pcm)
+                pre_roll.append((pcm, realtime_pcm))
                 if not has_voice:
                     continue
 
@@ -346,11 +372,15 @@ async def receive_utterances(
                     f"pre_roll_chunks={len(pre_roll)}",
                     flush=True,
                 )
-                for chunk in pre_roll:
+                for chunk, realtime_chunk in pre_roll:
                     utterance.extend(chunk)
+                    if on_realtime_audio is not None and realtime_chunk:
+                        await on_realtime_audio(realtime_chunk)
                 pre_roll.clear()
             else:
                 utterance.extend(pcm)
+                if on_realtime_audio is not None and realtime_pcm:
+                    await on_realtime_audio(realtime_pcm)
             utterance_seconds += duration
 
             if has_voice:
@@ -361,7 +391,7 @@ async def receive_utterances(
 
             too_short_then_quiet = (
                 speech_seconds < min_speech_seconds
-                and silence_accumulated >= silence_seconds
+                and silence_accumulated >= short_silence_seconds
             )
             if too_short_then_quiet:
                 # A cough, click or mic bump: drop it instead of waiting
@@ -376,11 +406,18 @@ async def receive_utterances(
                 silence_accumulated = 0.0
                 utterance_seconds = 0.0
                 speaking = False
+                if on_realtime_reset is not None:
+                    await on_realtime_reset()
                 continue
 
+            required_silence = (
+                short_silence_seconds
+                if speech_seconds < short_utterance_seconds
+                else silence_seconds
+            )
             reached_silence = (
                 speech_seconds >= min_speech_seconds
-                and silence_accumulated >= silence_seconds
+                and silence_accumulated >= required_silence
             )
             reached_limit = (
                 speech_seconds >= max_speech_seconds
@@ -402,7 +439,8 @@ async def receive_utterances(
                     f"warnings={','.join(quality.warnings) or 'none'}",
                     flush=True,
                 )
-                await on_utterance(wav_bytes)
+                trailing_silence = silence_accumulated if reached_silence else 0.0
+                await on_utterance(wav_bytes, trailing_silence)
                 utterance.clear()
                 speech_seconds = 0.0
                 silence_accumulated = 0.0

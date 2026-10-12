@@ -56,6 +56,10 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
                 "model_calling.realtime.pipeline.receive_utterances",
                 new=receive_forever,
             ),
+            patch(
+                "model_calling.realtime.pipeline.settings.REALTIME_STREAMING_STT_ENABLED",
+                False,
+            ),
         ):
             receiver_task, pipeline_task = await start_realtime_audio(
                 call_id=77,
@@ -124,6 +128,10 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
                 "model_calling.realtime.pipeline.receive_utterances",
                 new=receive_forever,
             ),
+            patch(
+                "model_calling.realtime.pipeline.settings.REALTIME_STREAMING_STT_ENABLED",
+                False,
+            ),
         ):
             receiver_task, pipeline_task = await start_realtime_audio(
                 call_id=78,
@@ -183,7 +191,7 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=({"name": "회원"}, personality, speech, "ENFP")),
             ),
             patch(
-                "model_calling.realtime.pipeline.search_user_memories",
+                "model_calling.realtime.pipeline.search_user_memories_batch",
                 new=search_memories,
             ),
             patch(
@@ -215,7 +223,8 @@ class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("callId=77 turn=2", output.getvalue())
         self.assertIn("elapsed_ms=", output.getvalue())
-        rag_queries = sorted(call.args[1] for call in search_memories.call_args_list)
+        self.assertEqual(search_memories.call_count, 1)
+        rag_queries = search_memories.call_args.args[1]
         self.assertEqual(len(rag_queries), 2)
         # The current question is always searched on its own as well.
         self.assertIn("아까 이야기 기억나?", rag_queries)
