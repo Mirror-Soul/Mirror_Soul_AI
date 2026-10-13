@@ -56,6 +56,33 @@ def _http_client() -> httpx.Client:
         return _client
 
 
+def warmup_rag_connection() -> str:
+    """Prime the pooled RAG HTTP connection without running an embedding."""
+    if search_mode() != "remote":
+        return "local"
+    timeout = settings.RAG_SEARCH_TIMEOUT_SECONDS
+    if timeout <= 0:
+        raise RagSearchConfigurationError(
+            "RAG_SEARCH_TIMEOUT_SECONDS must be positive."
+        )
+    url = f"{settings.RAG_SEARCH_BASE_URL.rstrip('/')}/health"
+    try:
+        response = _http_client().get(url, timeout=timeout)
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        raise RagSearchUnavailable(
+            f"RAG health check is unavailable ({type(exc).__name__})."
+        ) from exc
+    if response.status_code >= 500:
+        raise RagSearchUnavailable(
+            f"RAG health check failed with HTTP {response.status_code}."
+        )
+    if not response.is_success:
+        raise RagSearchRejected(
+            f"RAG health check returned HTTP {response.status_code}."
+        )
+    return "remote"
+
+
 def _search_remote(user_id: str, query: str, top_k: int) -> list[dict[str, Any]]:
     api_key = settings.RAG_INTERNAL_API_KEY
     if not api_key:

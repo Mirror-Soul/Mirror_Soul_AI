@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 from model_calling.clients.backend_call_context import CallContext
 from model_calling.realtime.pipeline import RealtimePipelineError, load_runtime_context
-from model_calling.webrtc.session import close_session, register_call_context
+from model_calling.webrtc.session import (
+    close_session,
+    get_prepared_runtime_context,
+    register_call_context,
+)
 
 
 USER_UUID = "5f0154ef-7d83-4ae4-a724-ae591e1c985e"
@@ -93,6 +97,40 @@ class RealtimeCallContextTests(unittest.TestCase):
         self.assertEqual(speech.summary, "local speech")
         self.assertEqual(speech.voice_id, "api-voice-id")
         self.assertEqual(mbti, "ENFP")
+
+    def test_runtime_context_is_prepared_once_and_reused_for_the_call(self) -> None:
+        register_call_context(_context())
+        with patch(
+            "model_calling.realtime.pipeline._load_local_persona",
+            return_value=None,
+        ) as load_local:
+            first = asyncio.run(
+                load_runtime_context(USER_UUID, 10, call_id=6001)
+            )
+            second = asyncio.run(
+                load_runtime_context(USER_UUID, 10, call_id=6001)
+            )
+
+        self.assertIs(first, second)
+        load_local.assert_called_once()
+        self.assertIs(
+            get_prepared_runtime_context(6001, USER_UUID, 10),
+            first,
+        )
+
+    def test_closing_call_clears_prepared_runtime_context(self) -> None:
+        register_call_context(_context())
+        with patch(
+            "model_calling.realtime.pipeline._load_local_persona",
+            return_value=None,
+        ):
+            asyncio.run(load_runtime_context(USER_UUID, 10, call_id=6001))
+
+        asyncio.run(close_session(6001))
+
+        self.assertIsNone(
+            get_prepared_runtime_context(6001, USER_UUID, 10)
+        )
 
     def test_missing_or_mismatched_context_is_rejected(self) -> None:
         cases = (

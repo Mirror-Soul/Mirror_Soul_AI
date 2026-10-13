@@ -129,6 +129,18 @@ class RemoteClientTests(unittest.TestCase):
         self.assertIn(b'"topK":4', request.content.replace(b" ", b""))
         self.assertEqual(rag_search.search_mode(), "remote")
 
+    def test_warmup_uses_health_without_embedding_search(self) -> None:
+        self._use(lambda request: httpx.Response(200, json={"status": "ok"}))
+
+        mode = rag_search.warmup_rag_connection()
+
+        self.assertEqual(mode, "remote")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(
+            str(self.requests[0].url),
+            "http://ai.internal:8000/health",
+        )
+
     def test_batch_posts_once(self) -> None:
         self._use(lambda request: httpx.Response(200, json={"success": True, "memories": [{"documentId": "d1"}]}))
         result = rag_search.search_user_memories_batch(USER_A, ["카페", "최근 카페"], 4)

@@ -152,6 +152,13 @@ class Settings:
     REALTIME_UTTERANCE_MAX_QUEUE_SECONDS: float = float(
         os.getenv("REALTIME_UTTERANCE_MAX_QUEUE_SECONDS", "20")
     )
+    REALTIME_DEPENDENCY_PREWARM_ENABLED: bool = os.getenv(
+        "REALTIME_DEPENDENCY_PREWARM_ENABLED",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    REALTIME_DEPENDENCY_PREWARM_TIMEOUT_SECONDS: float = float(
+        os.getenv("REALTIME_DEPENDENCY_PREWARM_TIMEOUT_SECONDS", "5")
+    )
 
     AI_SERVER_HOST: str = os.getenv("AI_SERVER_HOST", "0.0.0.0")
     AI_SERVER_PORT: int = int(os.getenv("AI_SERVER_PORT", "8000"))

@@ -34,6 +34,15 @@ def _mask_voice_id(voice_id: str | None) -> str:
     return f"{voice_id[:4]}...{voice_id[-4:]}"
 
 
+async def warmup_openai_connection() -> str:
+    """Prime the shared OpenAI HTTP connection without running inference."""
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    model = settings.REALTIME_LLM_MODEL or settings.LLM_MODEL
+    await client.models.retrieve(model)
+    return model
+
+
 async def process_stt(audio_bytes: bytes, filename: str = "audio.m4a") -> str:
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = filename

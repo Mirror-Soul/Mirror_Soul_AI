@@ -16,6 +16,92 @@ from model_calling.schemas import PersonalityProfile, SpeechProfile
 
 
 class RealtimeConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_is_loaded_while_stt_is_running(self):
+        context_started = asyncio.Event()
+
+        personality = PersonalityProfile(
+            openness=50,
+            conscientiousness=50,
+            extraversion=50,
+            agreeableness=50,
+            neuroticism=50,
+            summary="테스트 성격",
+        )
+        speech = SpeechProfile(
+            user_id="member-uuid",
+            voice_id="voice-id",
+            speech_speed=50,
+            avg_pitch=50,
+            honorific_ratio=50,
+            summary="테스트 말투",
+        )
+
+        async def process_stt_after_context_started(*args, **kwargs):
+            await asyncio.wait_for(context_started.wait(), timeout=0.2)
+            return "안녕하세요"
+
+        async def load_context(*args, **kwargs):
+            context_started.set()
+            return {"name": "회원"}, personality, speech, "ENFP"
+
+        with (
+            patch(
+                "model_calling.realtime.pipeline.process_stt",
+                new=AsyncMock(side_effect=process_stt_after_context_started),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.load_runtime_context",
+                new=AsyncMock(side_effect=load_context),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.search_user_memories",
+                new=Mock(return_value=[]),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.process_llm",
+                new=AsyncMock(return_value="반가워요"),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.process_tts_bytes",
+                new=AsyncMock(return_value=b"audio"),
+            ),
+        ):
+            result = await generate_reply_audio("member-uuid", 14, b"wav")
+
+        self.assertEqual(result.user_text, "안녕하세요")
+        self.assertIn("context", result.stage_timings_ms)
+
+    async def test_empty_stt_cancels_context_prefetch(self):
+        context_started = asyncio.Event()
+        context_cancelled = asyncio.Event()
+
+        async def process_empty_stt(*args, **kwargs):
+            await asyncio.wait_for(context_started.wait(), timeout=0.2)
+            return ""
+
+        async def wait_for_context_cancellation(*args, **kwargs):
+            context_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                context_cancelled.set()
+                raise
+
+        with (
+            patch(
+                "model_calling.realtime.pipeline.process_stt",
+                new=AsyncMock(side_effect=process_empty_stt),
+            ),
+            patch(
+                "model_calling.realtime.pipeline.load_runtime_context",
+                new=AsyncMock(side_effect=wait_for_context_cancellation),
+            ),
+        ):
+            result = await generate_reply_audio("member-uuid", 14, b"wav")
+
+        self.assertIsNone(result)
+        self.assertTrue(context_cancelled.is_set())
+
     async def test_stream_clock_starts_after_audio_is_queued(self):
         events = []
 

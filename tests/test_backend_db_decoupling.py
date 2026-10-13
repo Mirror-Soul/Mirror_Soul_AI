@@ -24,8 +24,10 @@ from model_calling.webrtc.session import (
     call_context_count,
     close_session,
     get_call_context,
+    get_prepared_runtime_context,
     prune_call_contexts,
     register_call_context,
+    register_prepared_runtime_context,
 )
 from shared.config import settings
 
@@ -231,8 +233,13 @@ class CallContextCacheTests(unittest.TestCase):
 
     def test_idle_context_expires_after_ttl(self) -> None:
         self._register(97011)
+        prepared = object()
+        register_prepared_runtime_context(97011, USER_A, 6, prepared)
         self.clock[0] += 61
         self.assertIsNone(get_call_context(97011))
+        self.assertIsNone(
+            get_prepared_runtime_context(97011, USER_A, 6)
+        )
 
     def test_context_of_active_session_never_expires(self) -> None:
         context = self._register(97021)

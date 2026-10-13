@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from typing import Any
 
 from model_calling.clients.backend_call_context import (
@@ -17,6 +19,48 @@ from model_calling.webrtc.session import (
     get_call_context,
     register_call_context,
 )
+
+
+async def _preload_call_static_context(context: Any) -> None:
+    """Prepare immutable persona and voice data before the first utterance."""
+    from model_calling.realtime.pipeline import load_runtime_context
+
+    started_at = time.monotonic()
+    try:
+        await load_runtime_context(
+            context.clone.userUuid,
+            context.clone.cloneId,
+            call_id=context.callId,
+        )
+    except Exception as exc:
+        # Keep accepting the call. The regular turn pipeline will retry and
+        # report a stage-specific failure if this optional warm-up failed.
+        print(
+            "[REALTIME] call static context preload failed: "
+            f"callId={context.callId} error={type(exc).__name__}",
+            flush=True,
+        )
+        return
+    elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
+    print(
+        "[REALTIME] call static context preloaded: "
+        f"callId={context.callId} user={context.clone.userUuid} "
+        f"clone_id={context.clone.cloneId} elapsed_ms={elapsed_ms}",
+        flush=True,
+    )
+
+
+async def _prewarm_call_dependencies(context: Any) -> None:
+    from model_calling.realtime.prewarm import prewarm_realtime_dependencies
+
+    try:
+        await prewarm_realtime_dependencies(context.callId)
+    except Exception as exc:
+        print(
+            "[REALTIME] dependency prewarm failed; continuing: "
+            f"callId={context.callId} error={type(exc).__name__}",
+            flush=True,
+        )
 
 
 async def handle_signaling_message(ws: Any, message: dict[str, Any]) -> None:
@@ -64,6 +108,7 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
         return
 
     context = get_call_context(call_id)
+    is_new_context = context is None
     if context is None:
         try:
             context = await fetch_call_context(call_id)
@@ -86,6 +131,11 @@ async def handle_call_invite(ws: Any, message: dict[str, Any]) -> None:
         return
 
     register_call_context(context)
+    if is_new_context:
+        await asyncio.gather(
+            _preload_call_static_context(context),
+            _prewarm_call_dependencies(context),
+        )
 
     accept_message = {
         "type": "CALL_ACCEPT",

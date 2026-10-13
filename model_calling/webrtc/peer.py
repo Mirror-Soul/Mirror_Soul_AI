@@ -282,6 +282,27 @@ async def create_answer_from_offer(
         save_session(session)
         if video_renderer is not None:
             async def prepare_video() -> None:
+                warmup_connection = getattr(
+                    video_renderer,
+                    "warmup_connection",
+                    None,
+                )
+                if warmup_connection is not None:
+                    try:
+                        await warmup_connection(
+                            settings.REALTIME_DEPENDENCY_PREWARM_TIMEOUT_SECONDS
+                        )
+                        print(
+                            f"[WEBRTC] Ditto connection prewarmed: callId={call_id}",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        print(
+                            "[WEBRTC] Ditto connection warm-up failed; "
+                            f"continuing: callId={call_id} "
+                            f"error={type(exc).__name__}",
+                            flush=True,
+                        )
                 try:
                     await video_renderer.prepare()
                     print(
