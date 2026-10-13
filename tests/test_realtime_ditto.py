@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
@@ -122,6 +122,9 @@ class _RenderClient:
         self.calls.append((profile, audio_bytes, kwargs))
         return b"mp4"
 
+    async def close(self):
+        return None
+
 
 class _StreamingTrack(_Track):
     def __init__(self) -> None:
@@ -202,6 +205,38 @@ class _LateFailStreamingClient(_StreamingClient):
 
 
 class DittoRealtimeTests(unittest.TestCase):
+    def test_warmup_primes_all_workers_and_reuses_owned_client(self) -> None:
+        async def run() -> tuple[MagicMock, MagicMock]:
+            config = DittoCallConfig(
+                service_url="http://127.0.0.1:18080",
+                service_urls=(
+                    "http://127.0.0.1:18080",
+                    "http://127.0.0.1:18081",
+                ),
+                api_key="secret",
+            )
+            http_client = MagicMock()
+            http_client.is_closed = False
+            http_client.get = AsyncMock(
+                return_value=httpx.Response(200, json={"status": "ready"})
+            )
+            http_client.aclose = AsyncMock()
+            with patch(
+                "model_calling.realtime.ditto.httpx.AsyncClient",
+                return_value=http_client,
+            ) as factory:
+                client = DittoRenderClient(config)
+                await client.warmup()
+                await client.warmup()
+                await client.close()
+            return http_client, factory
+
+        http_client, factory = asyncio.run(run())
+
+        factory.assert_called_once()
+        self.assertEqual(http_client.get.await_count, 4)
+        http_client.aclose.assert_awaited_once()
+
     def test_frame_stream_parser_handles_split_packets(self) -> None:
         frame = b"jpeg-frame"
         payload = b"MSDS1\n" + struct.pack(">I", len(frame)) + frame + struct.pack(">I", 0)

@@ -32,6 +32,26 @@ class ElevenLabsVoiceSettings:
         }
 
 
+async def warmup_elevenlabs_connection(
+    *,
+    api_key: str | None = None,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Prime the pooled ElevenLabs connection without generating audio."""
+    resolved_api_key = api_key or os.getenv("ELEVENLABS_API_KEY")
+    if not resolved_api_key:
+        raise ElevenLabsTTSError("ELEVENLABS_API_KEY is not configured")
+    response = await _default_http_client(timeout_seconds).get(
+        "https://api.elevenlabs.io/v1/user/subscription",
+        headers={"xi-api-key": resolved_api_key},
+        timeout=timeout_seconds,
+    )
+    if response.status_code != 200:
+        raise ElevenLabsTTSError(
+            f"ElevenLabs warm-up failed with HTTP {response.status_code}"
+        )
+
+
 async def synthesize_member_speech(
     *,
     text: str,

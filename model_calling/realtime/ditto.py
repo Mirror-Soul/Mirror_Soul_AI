@@ -395,6 +395,43 @@ class DittoRenderClient:
     ) -> None:
         self.config = config
         self._http_client = http_client
+        self._owns_http_client = http_client is None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                timeout=self.config.timeout_seconds,
+            )
+            self._owns_http_client = True
+        return self._http_client
+
+    async def warmup(self, timeout_seconds: float = 5.0) -> None:
+        """Prime each configured GPU worker connection via /ready."""
+        client = self._client()
+
+        async def check(service_url: str) -> None:
+            response = await client.get(
+                f"{service_url}/ready",
+                headers={"X-Ditto-Api-Key": self.config.api_key},
+                timeout=timeout_seconds,
+            )
+            if response.status_code != 200:
+                raise DittoRealtimeError(
+                    "Ditto warm-up failed: "
+                    f"status={response.status_code} worker={service_url}"
+                )
+
+        await asyncio.gather(
+            *(check(service_url) for service_url in self.config.worker_urls)
+        )
+
+    async def close(self) -> None:
+        if (
+            self._owns_http_client
+            and self._http_client is not None
+            and not self._http_client.is_closed
+        ):
+            await self._http_client.aclose()
 
     async def render(
         self,
@@ -471,23 +508,12 @@ class DittoRenderClient:
                 flush=True,
             )
             try:
-                if self._http_client is not None:
-                    response = await self._send_once(
-                        self._http_client,
-                        service_url,
-                        files,
-                        form_data,
-                    )
-                else:
-                    async with httpx.AsyncClient(
-                        timeout=self.config.timeout_seconds
-                    ) as client:
-                        response = await self._send_once(
-                            client,
-                            service_url,
-                            files,
-                            form_data,
-                        )
+                response = await self._send_once(
+                    self._client(),
+                    service_url,
+                    files,
+                    form_data,
+                )
                 last_transport_error = None
             except httpx.HTTPError as exc:
                 last_transport_error = exc
@@ -622,10 +648,7 @@ class DittoRenderClient:
         pool = _get_render_pool(self.config.worker_urls)
         workers = await pool.acquire(self.config.queue_timeout_seconds)
         worker_index, service_url = workers[0]
-        client = self._http_client or httpx.AsyncClient(
-            timeout=self.config.timeout_seconds
-        )
-        owns_client = self._http_client is None
+        client = self._client()
         count = 0
         total_bytes = 0
         diagnostic = ReplyVideoDiagnosticCapture(
@@ -675,8 +698,6 @@ class DittoRenderClient:
                 parser.finish()
         finally:
             pool.release(workers)
-            if owns_client:
-                await client.aclose()
         if count <= 0:
             raise DittoRealtimeError("Ditto frame stream contained no frames.")
         elapsed = time.monotonic() - started
@@ -880,6 +901,9 @@ class DittoVideoSession:
                     f"clone_id={self.clone_id}",
                     flush=True,
                 )
+
+    async def warmup_connection(self, timeout_seconds: float = 5.0) -> None:
+        await self.client.warmup(timeout_seconds)
 
     async def prepare_idle_loop(self) -> bool:
         """Render a silent Ditto clip and loop it while the clone is idle.
@@ -1139,6 +1163,7 @@ class DittoVideoSession:
         self._stream_tasks.clear()
         self._failed_stream_turns.clear()
         self._turn_stream_ids.clear()
+        await self.client.close()
 
 
 def create_ditto_video_session(

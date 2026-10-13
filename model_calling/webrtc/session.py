@@ -47,6 +47,9 @@ _sessions: dict[int, WebRTCSession] = {}
 # callId -> (context, registered monotonic time). The backend context is
 # fetched once on CALL_INVITE and reused for every turn of that call.
 _call_contexts: dict[int, tuple[CallContext, float]] = {}
+# callId -> (user UUID, clone ID, parsed runtime profile). This keeps the
+# immutable call profile out of the per-utterance hot path.
+_prepared_runtime_contexts: dict[int, tuple[str, int, Any]] = {}
 
 
 def _now() -> float:
@@ -70,6 +73,7 @@ def prune_call_contexts(now: float | None = None) -> int:
     for call_id, (_, registered_at) in list(_call_contexts.items()):
         if call_id not in _sessions and _is_expired(registered_at, current):
             _call_contexts.pop(call_id, None)
+            _prepared_runtime_contexts.pop(call_id, None)
             removed += 1
 
     max_entries = max(1, int(settings.CALL_CONTEXT_CACHE_MAX_ENTRIES))
@@ -83,11 +87,15 @@ def prune_call_contexts(now: float | None = None) -> int:
         )
         for _, call_id in idle[: len(_call_contexts) - max_entries]:
             _call_contexts.pop(call_id, None)
+            _prepared_runtime_contexts.pop(call_id, None)
             removed += 1
     return removed
 
 
 def register_call_context(context: CallContext) -> None:
+    previous = _call_contexts.get(context.callId)
+    if previous is not None and previous[0] != context:
+        _prepared_runtime_contexts.pop(context.callId, None)
     _call_contexts[context.callId] = (context, _now())
     prune_call_contexts()
 
@@ -99,12 +107,40 @@ def get_call_context(call_id: int) -> CallContext | None:
     context, registered_at = entry
     if call_id not in _sessions and _is_expired(registered_at, _now()):
         _call_contexts.pop(call_id, None)
+        _prepared_runtime_contexts.pop(call_id, None)
         return None
     return context
 
 
 def call_context_count() -> int:
     return len(_call_contexts)
+
+
+def register_prepared_runtime_context(
+    call_id: int,
+    user_id: str,
+    clone_id: int,
+    runtime_context: Any,
+) -> None:
+    _prepared_runtime_contexts[call_id] = (
+        user_id,
+        clone_id,
+        runtime_context,
+    )
+
+
+def get_prepared_runtime_context(
+    call_id: int,
+    user_id: str,
+    clone_id: int,
+) -> Any | None:
+    entry = _prepared_runtime_contexts.get(call_id)
+    if entry is None:
+        return None
+    cached_user_id, cached_clone_id, runtime_context = entry
+    if cached_user_id != user_id or cached_clone_id != clone_id:
+        return None
+    return runtime_context
 
 
 def get_call_user(call_id: int) -> str | None:
@@ -132,6 +168,7 @@ def get_session(call_id: int) -> WebRTCSession | None:
 
 async def close_session(call_id: int, *, reason: str = "SESSION_CLOSED") -> None:
     _call_contexts.pop(call_id, None)
+    _prepared_runtime_contexts.pop(call_id, None)
     session = _sessions.pop(call_id, None)
     if session:
         cancelled_tasks: list[asyncio.Task] = []

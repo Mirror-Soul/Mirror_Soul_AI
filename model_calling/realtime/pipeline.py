@@ -24,7 +24,11 @@ from model_calling.realtime.talk_log import (
 )
 from model_calling.realtime.trace import CallTrace, trace_fields
 from model_calling.realtime.transcription import RealtimeTranscriber
-from model_calling.webrtc.session import get_call_context
+from model_calling.webrtc.session import (
+    get_call_context,
+    get_prepared_runtime_context,
+    register_prepared_runtime_context,
+)
 from model_training.base_profiles import get_mbti_base_profile
 from model_calling.clients.rag_search import (
     search_mode,
@@ -228,6 +232,10 @@ async def load_runtime_context(
             "Clone ID does not match registered context.",
         )
 
+    prepared = get_prepared_runtime_context(call_id, user_id, clone_id)
+    if prepared is not None:
+        return prepared
+
     local_persona = _load_local_persona(
         user_id,
         call_id=call_id,
@@ -258,12 +266,19 @@ async def load_runtime_context(
         speech = _default_speech(user_id, context.clone.voice.voiceId)
         mbti = persona.mbti
 
-    return (
+    runtime_context = (
         user_persona,
         personality,
         speech,
         mbti,
     )
+    register_prepared_runtime_context(
+        call_id,
+        user_id,
+        clone_id,
+        runtime_context,
+    )
+    return runtime_context
 
 
 def memory_search_queries(
@@ -331,6 +346,22 @@ async def generate_reply_audio(
     stage = "STT"
     timings: dict[str, int] = {}
     fields = trace_fields(call_id, turn_id)
+
+    async def load_context_in_parallel():
+        context_started_at = time.monotonic()
+        context = await _run_stage(
+            "CONTEXT",
+            settings.REALTIME_CONTEXT_TIMEOUT_SECONDS,
+            lambda: load_runtime_context(
+                user_id,
+                clone_id,
+                call_id=call_id,
+                turn_id=turn_id,
+            ),
+        )
+        return context, _elapsed_ms(context_started_at)
+
+    context_task = asyncio.create_task(load_context_in_parallel())
     try:
         stage_started = time.monotonic()
         print(
@@ -380,23 +411,18 @@ async def generate_reply_audio(
         )
 
         stage = "CONTEXT"
-        stage_started = time.monotonic()
-        user_persona, personality, speech, mbti = await _run_stage(
-            "CONTEXT",
-            settings.REALTIME_CONTEXT_TIMEOUT_SECONDS,
-            lambda: load_runtime_context(
-                user_id,
-                clone_id,
-                call_id=call_id,
-                turn_id=turn_id,
-            ),
-        )
-        timings["context"] = _elapsed_ms(stage_started)
+        context_wait_started_at = time.monotonic()
+        (
+            (user_persona, personality, speech, mbti),
+            context_work_ms,
+        ) = await context_task
+        timings["context"] = _elapsed_ms(context_wait_started_at)
         print(
             "[REALTIME] context ready: "
             f"{fields} user={user_id} mbti={mbti or 'none'} "
             f"voice_id={'set' if speech.voice_id else 'fallback-or-missing'} "
-            f"elapsed_ms={timings['context']}",
+            f"elapsed_ms={timings['context']} work_ms={context_work_ms} "
+            "prefetched=True",
             flush=True,
         )
 
@@ -532,6 +558,10 @@ async def generate_reply_audio(
             flush=True,
         )
         raise
+    finally:
+        if not context_task.done():
+            context_task.cancel()
+        await asyncio.gather(context_task, return_exceptions=True)
 
 
 def _append_conversation_turn(

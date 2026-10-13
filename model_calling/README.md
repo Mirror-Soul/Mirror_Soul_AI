@@ -153,6 +153,8 @@ BACKEND_CALL_CONTEXT_MAX_ATTEMPTS=2
 BACKEND_CALL_CONTEXT_RETRY_BACKOFF_SECONDS=0.2
 CALL_CONTEXT_CACHE_TTL_SECONDS=600
 CALL_CONTEXT_CACHE_MAX_ENTRIES=500
+REALTIME_DEPENDENCY_PREWARM_ENABLED=true
+REALTIME_DEPENDENCY_PREWARM_TIMEOUT_SECONDS=5
 ```
 
 `ELEVENLABS_TTS_MODEL_ID` selects the training and preview synthesis model.
@@ -165,6 +167,13 @@ On `CALL_INVITE`, the call server sends one authenticated request to
 clone, persona, voice, and media type for the lifetime of that call. Realtime
 turn processing reads only this in-memory context and does not query MySQL.
 `AI_INTERNAL_API_KEY` must match the backend setting and must never be logged.
+
+For a new call, the call server prepares the parsed persona and primes the
+pooled OpenAI, RAG, and ElevenLabs HTTP connections before `CALL_ACCEPT`.
+These checks do not run inference or synthesize speech. Video calls also
+prime and reuse the Ditto HTTP connection from WebRTC setup until call end.
+Warm-up failures are logged but do not reject a call; the real turn pipeline
+keeps its existing timeout and retry behavior.
 
 Transport errors and HTTP 502/504 are retried up to
 `BACKEND_CALL_CONTEXT_MAX_ATTEMPTS` in total; business errors (404, 409, 401,

@@ -5,6 +5,7 @@ from shared.elevenlabs_tts import (
     ElevenLabsTTSError,
     ElevenLabsVoiceSettings,
     synthesize_member_speech,
+    warmup_elevenlabs_connection,
 )
 from shared import elevenlabs_tts
 
@@ -26,6 +27,24 @@ class _Client:
 
 
 class ElevenLabsTTSTests(unittest.IsolatedAsyncioTestCase):
+    async def test_warmup_reuses_default_client_without_synthesizing(self) -> None:
+        client = MagicMock()
+        client.is_closed = False
+        client.get = AsyncMock(return_value=_Response(200))
+        client.post = AsyncMock()
+        with patch(
+            "shared.elevenlabs_tts.httpx.AsyncClient",
+            return_value=client,
+        ) as factory:
+            elevenlabs_tts._default_client = None
+            elevenlabs_tts._default_client_loop = None
+            await warmup_elevenlabs_connection(api_key="api-key")
+            await warmup_elevenlabs_connection(api_key="api-key")
+
+        factory.assert_called_once()
+        self.assertEqual(client.get.await_count, 2)
+        client.post.assert_not_awaited()
+
     async def test_synthesizes_with_explicit_member_voice(self) -> None:
         client = _Client(_Response(200, b"member-audio"))
 

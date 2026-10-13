@@ -60,9 +60,17 @@ class _WebSocket:
 
 
 class SignalingVideoInviteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._prewarm_patcher = patch(
+            "model_calling.signaling.handlers._prewarm_call_dependencies",
+            new=AsyncMock(),
+        )
+        self.prewarm = self._prewarm_patcher.start()
+
     def tearDown(self) -> None:
         for call_id in (8001, 8002, 8003, 8004):
             asyncio.run(close_session(call_id))
+        self._prewarm_patcher.stop()
 
     def test_invite_fetches_and_registers_context_then_accepts_strict_shape(self) -> None:
         async def run():
@@ -91,6 +99,29 @@ class SignalingVideoInviteTests(unittest.TestCase):
         self.assertEqual(get_call_user(8001), USER_UUID)
         self.assertEqual(get_call_clone_id(8001), 6)
         self.assertEqual(get_call_media_type(8001), "VIDEO")
+        self.prewarm.assert_awaited_once()
+
+    def test_invite_preloads_static_runtime_context_before_accept(self) -> None:
+        async def run():
+            ws = _WebSocket()
+            preload = AsyncMock()
+            with (
+                patch(
+                    "model_calling.signaling.handlers.fetch_call_context",
+                    AsyncMock(return_value=_context()),
+                ),
+                patch(
+                    "model_calling.signaling.handlers._preload_call_static_context",
+                    preload,
+                ),
+            ):
+                await handle_call_invite(ws, _invite())
+            return ws.messages, preload
+
+        messages, preload = asyncio.run(run())
+
+        preload.assert_awaited_once()
+        self.assertEqual(messages[0]["type"], "CALL_ACCEPT")
 
     def test_duplicate_invite_reuses_context_without_second_api_call(self) -> None:
         async def run():
@@ -102,9 +133,11 @@ class SignalingVideoInviteTests(unittest.TestCase):
             ):
                 await handle_call_invite(ws, _invite())
                 await handle_call_invite(ws, _invite())
-            return fetch.await_count
+            return fetch.await_count, self.prewarm.await_count
 
-        self.assertEqual(asyncio.run(run()), 1)
+        fetch_count, prewarm_count = asyncio.run(run())
+        self.assertEqual(fetch_count, 1)
+        self.assertEqual(prewarm_count, 1)
 
     def test_room_mismatch_rejects_without_registration(self) -> None:
         async def run():
